@@ -183,6 +183,10 @@ class MyRadarDriver(RadarDriver):
 | 深色标题栏偶尔失效 | Qt 重建窗口句柄会丢属性 | `showEvent` 里再设一次 |
 | 真运动时圆内出现方形缺口 | 先把画面裁成圆再平移，圆外数据被抹掉 | 裁剪要放在平移**之后**（天线扫描圆跟着本舰走） |
 | AIS 目标全堆在原点 | 没填本船经纬度，参考点是 (0,0) | 「工具→AIS 接入」里必须填实际经纬度 |
+| 离屏截图完全没有文字 | offscreen 平台找不到字体库 | 设 `QT_QPA_FONTDIR=C://Windows//Fonts` |
+| QImage 存不到内存流 | `QImage.save(BytesIO)` 没有这个重载 | 用 `QBuffer` 或临时文件 |
+| 拆 mixin 后 NameError | 方法搬走了，模块级常量/类没跟着搬 | 常量与 `ReaderThread` 一起放进 controllers.py 并显式 import |
+| `.lnk` 建不出来 | COM 实例化被安全策略拦 | 按 MS-SHLLINK 规范手写二进制（Header+LinkInfo+StringData） |
 | 地图整片被盖住看不见 | 光栅 0 号色不透明，把底图糊住了 | `_ctable_for()` 把低电平（<26）设成全透明 |
 | 地图级别永远是最粗的 | 从低级往高级找，第一个满足条件的总是 z=3 | 从 z=18 往下找，取第一个能装下的 |
 | 换浅色主题后雷达图一片灰白 | 深色色板挂在白底上 | `_apply_theme()` 里按主题自动配对色板（daylight/ice） |
