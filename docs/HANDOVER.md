@@ -1,31 +1,61 @@
 # 交接与协作规范
 
 > 给下一个接手的人（或 AI）。目标：**读完这一页就能安全改动，不会把别人踩过的坑再踩一遍。**
-> 如果你只有五分钟，读第 1、4、6 节。
+> 如果你只有五分钟：读第 0 节（路径与状态）、第 4/6 节（禁忌与坑），
+> 然后打开 `docs/ROADMAP.md` 挑任务。
+
+---
+
+## 0. 项目在哪 / 现在是什么状态
+
+> **这一节是给刚接手的人（或 AI）看的。先确认路径，再动手。**
+
+| 项 | 值 |
+|---|---|
+| **项目根目录** | `D:\workbudy\2026-11-25-19-11-27\radarscope` |
+| 源码包 | `<根>\radarscope\`（包名 `radarscope`，**不要改成产品名**） |
+| 文档 | `<根>\docs\`，接手先读 `ROADMAP.md` → 本文第 4/6 节 → `STRUCTURE.md` |
+| 虚拟环境 | `<根>\.venv\`，Windows 下解释器是 `.venv\Scripts\python.exe` |
+| 打包产物 | `<根>\dist\Lookout\Lookout.exe`（129 MB，含 `plugins/`） |
+| 桌面入口 | `C:\Users\L\Desktop\瞭望 Lookout.lnk`（+ 同名 .bat 兜底） |
+| 运行数据 | 开发时 `<根>\data\`；打包版 `%LOCALAPPDATA%\Lookout\data` |
+| Git 仓库 | https://github.com/sun2006-xin/lookout-radar （public / main / MIT） |
+| 基线提交 | `558bd33`（2026-11-26，REVIEW 全部闭环）；之后以 `git log -1` 为准 |
+
+**当前状态**：61 个 Python 文件 / 约 11 400 行 / **20 组测试全过** /
+`tools/check.py` 全绿 / `Lookout.exe --selftest` 退出码 0。
+产品名「瞭望 Lookout」，默认主题现代白（色板 daylight），可切深色（ice）。
+
+**接下来做什么**：[`docs/ROADMAP.md`](ROADMAP.md) 是唯一的任务清单，
+阶段 A（真机联调）优先级最高，阶段 B/C 是算法与架构深水区。
+**不要在没读 ROADMAP 的情况下自己挑功能加。**
 
 ---
 
 ## 1. 三十秒上手
 
-```bash
-cd radarscope
-python -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements.txt   # Windows 用反斜杠
-.venv\Scripts\python.exe tests\test_core.py                    # 必须全绿再动手
-.venv\Scripts\python.exe main.py
-
-# 无界面自检（不弹窗，验证依赖与核心链路）
+```bat
+cd /d D:\workbudy\2026-11-25-19-11-27\radarscope
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+rem 20 组测试，必须全绿
+.venv\Scripts\python.exe tests\test_core.py
+rem 编译 + 测试 + 链路自检，提交前必跑
+.venv\Scripts\python.exe tools\check.py
+rem 无界面自检，不弹窗，退出码 0 才算通过
 .venv\Scripts\python.exe main.py --selftest
+rem 启动图形界面（会弹窗口）
+.venv\Scripts\python.exe main.py
 ```
 
 启动后默认是虚拟雷达，点「连接」就有画面。
-想看懂整体设计，按顺序读：`docs/PLAN.md` → `docs/ARCHITECTURE.md` → `core/model.py`。
+想接手继续开发，按顺序读：`docs/ROADMAP.md`（做什么）→ 本文第 4/6 节（别踩坑）→
+`docs/STRUCTURE.md`（代码在哪）→ `docs/ARCHITECTURE.md`（为什么这么分层）→ `core/model.py`。
 
 **改动前必须知道的三件事**：
 
 1. 这是个**分层**项目：传输 / 协议 / 驱动 / 数据 / 处理 / 呈现，单向依赖。
 2. 界面是**能力驱动**的：显示什么由 `Capabilities` 决定，不按型号写分支。
-3. 有 **11 组测试**，改完必须全绿。测试就是规格文档。
+3. 有 **20 组测试**，改完必须全绿。测试就是规格文档，不打桩不 mock。
 
 ---
 
@@ -121,6 +151,9 @@ class MyRadarDriver(RadarDriver):
 
 然后在 `drivers/__init__.py` 加一行 `from .myradar import MyRadarDriver`。
 
+`source` / `form` / `vendor` 是**类属性**，不用在 `capabilities()` 里重复声明 ——
+基类 `resolve_capabilities()` 会统一合并（A2）。漏了这一步曾导致"共视列不显示"。
+
 **不要做的**：
 - 不要自己写 `while` 循环切帧 —— 用 `StreamDecoder`
 - 不要 `import serial` —— 用 `open_transport()`
@@ -128,7 +161,7 @@ class MyRadarDriver(RadarDriver):
 
 ---
 
-## 4. 七条硬性禁忌
+## 4. 十条硬性禁忌
 
 违反任何一条都算 bug，评审时直接打回。
 
@@ -141,6 +174,9 @@ class MyRadarDriver(RadarDriver):
 | 5 | 噪声写成 `scan += noise` | 稳态收敛到 `noise/(1-decay)`，底噪整体抬升 |
 | 6 | 角度做算术平均 | `+179°` 与 `−179°` 平均出 0°，要用圆均值 |
 | 7 | 插件钩子叫 `register` | 会和 `from core.driver import register` 撞名 |
+| 8 | 改 Python 包名 `radarscope` | 会破坏所有 import、插件、PyInstaller 收集规则；产品名只影响 UI/exe/文档 |
+| 9 | 把方法继续堆进 `mainwindow.py` | 已拆到 `ui/controllers.py` 三个控制器，新功能请放进对应的那个 |
+| 10 | QSS 用 f-string 拼 | QSS 全是 `{}`，要写成 `{{}}` 极易漏；`theme.py` 用 `@bg@` 占位符替换 |
 
 ---
 
@@ -172,8 +208,8 @@ class MyRadarDriver(RadarDriver):
 | 旋转雷达航迹老是断 | 丢失判据用了帧数 | 用秒（`missed` 是 float，秒） |
 | 标签糊成一团 | 多目标位置接近 | `ppi._draw_targets` 里的避让逻辑 |
 | 插件加载后把 API 当驱动注册 | 钩子名撞车 | 入口改叫 `setup(api)` |
-| 北向朝上时有个跟着转的黑菱形 | 调色板 0 号色是纯黑，控件背景不是 | `PPIWidget._ctable_for()` 把 0 号色设成背景色 |
-| 界面明明按 form 判断却没生效 | 分类属性在驱动**类**上，`capabilities()` 里没写 | `_connect` 里统一补 `caps.source/form/vendor` |
+| 北向朝上时有个跟着转的黑菱形 | 调色板 0 号色是纯黑，控件背景不是 | `PPIWidget._ctable_for()` 把低电平(<26)设成**全透明**（同时解决地图被盖住） |
+| 界面明明按 form 判断却没生效 | 分类属性在驱动**类**上，`capabilities()` 里没写 | 调 `drv.resolve_capabilities()`（基类用 `dataclasses.replace` 一次合并），别在调用点手工补 |
 | 统计图变成一个整块色块 | 只有 1 个时间桶，柱宽=全宽 | 柱宽设上限，少于 2 桶直接提示"数据太少" |
 | 报警一响整个画面就抖一下 | 报警条用显隐切换，布局重排 | 改成常驻 + 固定高度，只换文案与配色 |
 | 顶部出现白色条，和深色界面不搭 | 没给 QMenuBar/QMenu 写样式，走了系统主题 | `theme.py` 里补 QMenuBar/QMenu 样式 |
@@ -183,7 +219,7 @@ class MyRadarDriver(RadarDriver):
 | 深色标题栏偶尔失效 | Qt 重建窗口句柄会丢属性 | `showEvent` 里再设一次 |
 | 真运动时圆内出现方形缺口 | 先把画面裁成圆再平移，圆外数据被抹掉 | 裁剪要放在平移**之后**（天线扫描圆跟着本舰走） |
 | AIS 目标全堆在原点 | 没填本船经纬度，参考点是 (0,0) | 「工具→AIS 接入」里必须填实际经纬度 |
-| 离屏截图完全没有文字 | offscreen 平台找不到字体库 | 设 `QT_QPA_FONTDIR=C://Windows//Fonts` |
+| 离屏截图完全没有文字 | offscreen 平台找不到字体库 | 设 `QT_QPA_FONTDIR=C:\Windows\Fonts` |
 | QImage 存不到内存流 | `QImage.save(BytesIO)` 没有这个重载 | 用 `QBuffer` 或临时文件 |
 | 拆 mixin 后 NameError | 方法搬走了，模块级常量/类没跟着搬 | 常量与 `ReaderThread` 一起放进 controllers.py 并显式 import |
 | `.lnk` 建不出来 | COM 实例化被安全策略拦 | 按 MS-SHLLINK 规范手写二进制（Header+LinkInfo+StringData） |
@@ -200,7 +236,7 @@ class MyRadarDriver(RadarDriver):
 - 改 `core/` 的任何文件 → **必须**跑通 `tests/test_core.py`
 - 改驱动 → 至少跑 `selftest.py` + 界面里连一次
 - 修 bug → **先写一个会失败的断言**，再修（这是防止回归的唯一可靠办法）
-- 打完包 → 必须跑 `RadarScope.exe --selftest`（退出码 0 才算成，不弹窗，脚本可判）
+- 打完包 → 必须跑 `Lookout.exe --selftest`（退出码 0 才算成，不弹窗，脚本可判）
 - 新增功能 → 加一组测试，命名用中文短语描述行为
 
 测试不依赖 pytest，`assert` + 打印即可，保持零额外依赖。
@@ -218,6 +254,9 @@ class MyRadarDriver(RadarDriver):
 | 里程碑完成或调整 | `PLAN.md` 第四节 |
 | 新增已知限制 | `README.md` 限制表 + `PLAN.md` 风险表 |
 | 新的踩坑 | 本文第 6 节 |
+| 新增/删除文件、改职责 | `STRUCTURE.md` 对应表格 |
+| 完成或调整路线图任务 | `ROADMAP.md`（勾选 + 写实测结论），别只改代码 |
+| 新增架构决策 / 改数据契约 | 新增一条 `ADR/000x-*.md` |
 
 ---
 
@@ -227,12 +266,13 @@ class MyRadarDriver(RadarDriver):
 
 | 目的 | 读这些 |
 |---|---|
-| 只想跑起来 | 第 1 节 |
+| **接下来该做什么** | **`ROADMAP.md`**（阶段 A 优先） |
+| 只想跑起来 | 第 0 / 1 节 |
 | 加一块新雷达 | 第 3 节 + `drivers/ld2450.py`（约 140 行，最标准的例子） |
 | 改显示 | `ui/ppi.py` 文件头注释 + `ARCHITECTURE.md` 第八节性能预算 |
 | 动融合 | `core/fusion.py` + `ARCHITECTURE.md` 第四节 + `tests` 里 `test_fusion` |
 | 动标定 | `core/calibration.py` 模块文档 + `ARCHITECTURE.md` 第五节 |
-| 排查线上问题 | `data/radarscope.log` + 本文第 6 节 |
+| 排查线上问题 | `data/radarscope.log`（打包版在 `%LOCALAPPDATA%\Lookout\data`）+ 本文第 6 节 |
 
 ---
 
@@ -254,3 +294,54 @@ fix: 帧长度字段偏移改为由帧头长度推导
 ```
 
 改核心逻辑的提交，正文必须写清"为什么"，不是"改了什么"。
+
+
+---
+
+## 11. 给下一位 AI 的工作方式（重要）
+
+这一节是踩过几次坑之后总结的，照做能少走弯路。
+
+### 验证手段：不要动不动就启动 GUI
+
+| 想验证什么 | 用什么 |
+|---|---|
+| 算法、协议、存储 | `tests/test_core.py` + `tools/check.py`（纯命令行） |
+| 打包产物能跑 | `Lookout.exe --selftest`（**不创建窗口**，看退出码与 `data/radarscope.log`） |
+| 界面构造、方法是否齐备、帧循环 | `QT_QPA_PLATFORM=offscreen` 起 QApplication，构造 MainWindow 但**不 `show()`** |
+| 需要出图（README 截图 / 动图） | 同样 offscreen，但**必须设** `QT_QPA_FONTDIR=C:\Windows\Fonts`，否则渲染出来一个字都没有 |
+
+离屏渲染时用 `QImage` + `QPainter` + `w.render(p)`；`QImage.save()` 不接受 `BytesIO`，
+要用 `QBuffer` 或临时文件。
+
+### 改动顺序
+
+1. **先写一个会失败的断言**，再改代码（HANDOVER 第 7 节）。
+2. 改完跑三条命令（第 1 节），全绿才继续。
+3. 改了 `core/model.py` → 读 ARCHITECTURE 第二节 + 写一条 ADR。
+4. 收尾同步四份文档：`STRUCTURE.md`（文件/职责）、本文第 6 节（新坑）、
+   `ROADMAP.md`（勾选 + 实测结论）、`README.md`（已知限制）。
+5. 打包 → `--selftest` → commit（正文写**为什么**，不是改了什么）。
+
+### 别替用户下结论
+
+- 沙箱里连不上的东西（地图瓦片、公网、COM 蓝牙），
+  明确写"未验证网络链路"，**不要写"已验证"**。
+- 需要实机点一下才确认的观感问题（真运动边缘、`.lnk` 双击），
+  写"待用户实机确认"。
+- 用户在打游戏/不方便时，全程用 offscreen + `--selftest`，不弹窗口。
+
+### 深水区在哪
+
+`ROADMAP.md` 阶段 B/C 是真正难的部分：
+瀑布图数据形态重设计（B1）、CFAR 自适应（B2）、航迹级加权融合（B3）、
+原始 ADC→FFT（B4，需硬件）、渲染与处理分进程（C1）。
+**每一项都写了涉及文件、实现路径、验收标准、风险**，可以直接开工。
+
+### 最容易出错的三处
+
+1. `AlarmRule` 的字段叫 **`id`** 不是 `rule_id`（`rule_id` 是 `AlarmEvent` 的字段）。
+2. `PALETTES` 的 `daylight` 是**白底深回波**，深浅逻辑和其他五套相反。
+3. `ui/controllers.py` 里的方法引用了模块级常量 `PRESET_ENDPOINTS` /
+   `ALARM_STYLE*`，搬方法时这些常量必须跟着搬，否则运行时 `NameError`
+   （编译期发现不了）。

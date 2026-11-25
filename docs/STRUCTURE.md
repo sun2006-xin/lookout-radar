@@ -1,143 +1,177 @@
-# 目录结构与文件职责
+# 项目文件具体解释
 
-> 一个文件只干一件事。想找功能先看这张表，不要靠猜。
-
-源码总量约 7700 行（不含依赖与打包产物）。
+> 一个文件只干一件事。**想改功能先看这张表**，别靠猜。
+> 源码约 11 400 行 / 61 个 Python 文件 / 20 组测试（不含依赖与打包产物）。
+> 产品名「瞭望 Lookout」，但 **Python 包名仍是 `radarscope`** —— 这是内部标识，不要改。
+>
+> 配套：[ROADMAP.md](ROADMAP.md) 未来计划 · [HANDOVER.md](HANDOVER.md) 怎么改与禁忌 ·
+> [ARCHITECTURE.md](ARCHITECTURE.md) 分层与数据契约 · [REVIEW.md](REVIEW.md) 已闭环的审查。
 
 ---
 
 ## 顶层
 
-```
-radarscope/
-├── main.py                 程序入口：日志、异常兜底、启动窗口
-├── selftest.py             无界面自检：矩阵→检测→航迹 整条链路
-├── 1-安装依赖.bat          首次使用：建 venv + 装依赖
-├── 启动.bat                日常启动（控制台可见，报错会停）
-├── 2-打包EXE.bat           重新打包（产物在 dist/）
-├── requirements.txt        依赖（bleak 为可选）
-├── README.md               项目简介 + 快速上手（本文件的入口）
-├── docs/                   所有文档与截图 ← 先读这里
-├── plugins/                插件目录：丢 .py 即生效
-├── tools/                  开发工具（bench 性能基准 / check 一键自检）
-├── .github/workflows/      CI（跑 tools/check.py）
-├── installer/              Inno Setup 安装包脚本
-├── tests/                  单元测试
-├── data/                   运行时生成：数据库、录制、配置、日志
-├── dist/                   打包产物（可删，重新打包会生成）
-└── build/                  PyInstaller 中间产物（可删）
-```
+| 文件 | 具体职责 | 改动注意 |
+|---|---|---|
+| `main.py` | 程序入口：日志初始化、全局异常兜底、`--selftest` 分支、创建 QApplication 与 MainWindow、套用上次主题 | `--selftest` **不创建窗口**，靠退出码表达成败；自检逻辑已抽到 `core/selftest.py` |
+| `selftest.py` | 独立的无界面自检脚本（历史入口，链路验证） | 与 `main.py --selftest` 有重叠，新代码优先用 `core/selftest.py` |
+| `1-安装依赖.bat` | 首次使用：建 `.venv`、装 `requirements.txt` | Windows 批处理，CRLF |
+| `启动.bat` | 日常源码启动（控制台可见，报错会停） | 排查启动失败时用这个，不用 exe |
+| `2-打包EXE.bat` | 重新打包：检查占用 → PyInstaller `--name Lookout --icon assets/app.ico` → 拷插件 → **跑 `--selftest` 验证** | 程序开着会 `Permission denied`，先关窗口 |
+| `requirements.txt` | 运行时依赖（PyQt5 / numpy / pyserial；`bleak` 可选） | 新依赖必须确认能进 PyInstaller 包体 |
+| `requirements-dev.txt` | 仅文档/开发工具：Pillow（动图）、PyInstaller | **不要**和运行依赖混在一起 |
+| `README.md` | 项目门面：Logo、动图、特性表、快速开始、设备表、转发协议、插件、文档索引 | 已知限制与路线图要跟代码同步 |
+| `LICENSE` | 纯 MIT 文本 | 别再夹第三方说明，否则 GitHub 识别成 "Other" |
+| `NOTICE.md` | 第三方归属：OSM / CARTO 瓦片使用条件 | 用地图功能就必须保留归属（界面左下角也显示） |
+| `.gitignore` | 排除 `dist/ build/ data/ .venv/ tiles/ __pycache__/ *.db` | 别把 129MB 产物提交上去 |
+| `.gitattributes` | 把 `firmware/**` 标 `linguist-vendored`，避免 `.ino` 把仓库语言统计成 C++ | 纯 GitHub 展示用 |
+| `Lookout.spec` | PyInstaller 生成的构建配置（`2-打包EXE.bat` 会重写） | 手改容易和命令行参数打架 |
+| `.github/workflows/ci.yml` | Windows + Python 3.11/3.12 跑 `tools/check.py` | 见 ROADMAP D5（扩 Linux/macOS） |
 
-**data/ 目录内容**（运行时生成，不要提交到版本库）：
+### 目录
+
+| 目录 | 内容 |
+|---|---|
+| `radarscope/` | Python 包：`core/` `drivers/` `ui/` `paths.py` |
+| `assets/` | `logo.png`（512 透明底）、`app.ico`（7 尺寸）、`demo.gif`（20 帧演示）；由 `tools/make_*.py` 生成 |
+| `dist/Lookout/` | 打包产物：`Lookout.exe` + `_internal/` + `plugins/`。可删，重打包生成 |
+| `data/` | 运行时生成，**不进版本库**：见下表 |
+| `plugins/` | 用户插件目录，丢 `.py` 即生效 |
+| `tools/` | 开发/文档工具（下面单列） |
+| `tests/` | 一组测试文件 + 未来的 `fixtures/`（真机录制样本） |
+| `docs/` | 全部文档（下面单列） |
+| `installer/` | Inno Setup 安装包脚本 `radarscope.iss`（尚未编译签名，见 ROADMAP D4） |
+| `firmware/` | `hc_sr04_servo.ino`，HC-SR04 + 舵机扫描的 Arduino 示例 |
+
+**`data/` 内容**（打包版在 `%LOCALAPPDATA%\Lookout\data`）：
 
 | 文件 | 内容 |
 |---|---|
-| `radarscope.db` | SQLite：会话 / 航迹点 / 告警事件 |
-| `*.rad` | 帧归档（强度矩阵，float16） |
+| `radarscope.db` | SQLite：会话 / 航迹点 / 告警事件（`-wal` `-shm` 是 WAL 临时文件） |
+| `*.rad` | 帧归档：强度矩阵 float16 + 轴信息 |
+| `rules.json` | 用户编辑/画布新增的告警规则（含自绘警戒区，id 前缀 `zone_user_`） |
 | `sensors.json` | 多站布站配置（位置、朝向、视场） |
-| `rules.json` | 用户编辑过的告警规则 |
-| `radarscope.log` | 运行日志（崩溃后排查用） |
+| `tiles/` | 地图瓦片磁盘缓存，超过 200MB 由 `TileStore.prune()` 自动清最旧 |
+| `rec_*/` | 屏幕录像的 PNG 序列（4 帧/秒） |
+| `radarscope.log` | 运行日志，崩溃后第一时间看这个 |
 
 ---
 
-## core/ —— 与界面无关的心脏
+## `radarscope/core/` —— 与界面无关的心脏
 
-| 文件 | 职责 | 稳定度 |
+**硬约束：`core/` 里不许出现 `import PyQt5`。** 破坏了就没法无界面测试。
+
+| 文件 | 具体职责 | 关键入口 / 改动注意 |
 |---|---|---|
-| `model.py` | `Target` / `RadarFrame` / `Capabilities` 三个契约 | **极稳，改要慎重** |
-| `driver.py` | 驱动基类 + 注册表（`@register`） | 稳 |
-| `transport.py` | 串口/TCP/UDP/BLE/文件 + 端点 URL 解析 | 稳 |
-| `codec.py` | 声明式切帧：帧头/长度/帧尾、粘包半包假同步 | 稳 |
-| `pipeline.py` | CA-CFAR 检测、目标反投影、缺失补全 | 较稳 |
-| `tracker.py` | 最近邻关联 + alpha-beta 滤波 + 航迹合并 | 较稳 |
-| `fusion.py` | 多站空间对齐、扇区拼接、盲区计算 | 新，可能还要调 |
-| `calibration.py` | 朝向标定、残差报告 | 新 |
-| `geometry.py` | 方位线、最小二乘交会（融合与标定共用） | 稳 |
-| `cpa.py` | CPA/TCPA 最近会遇距离与时间 | 稳 |
-| `forwarder.py` | UDP 数据转发（每帧 JSON）+ 接收端示例 | 稳 |
-| `ais.py` | AIS NMEA 报文解析（AIVDM 6bit 装甲 / 位置报告） | 稳 |
-| `aisfeed.py` | AIS UDP 监听线程 + 目标表 | 稳 |
-| `maptiles.py` | 地图瓦片：Web Mercator 换算 / 下载 / 磁盘缓存 | 稳 |
-| `viewmath.py` | 视图换算：北向/艏向、屏幕↔极坐标、文本格式 | 稳 |
-
-> 提交前跑 `tools/check.py`，判据与 CI 完全一致。
-| `alarm.py` | 告警引擎（去抖/滞回/冷却）、规则序列化 | 稳 |
-| `storage.py` | SQLite 记录 + `.rad` 帧归档 | 稳 |
-| `plugins.py` | 运行时插件加载与隔离 | 新 |
-| `paths.py` | 开发/打包两套路径解析 | 稳 |
-
-**core 里不许出现 `import PyQt5`。** 这条是硬约束，破坏了就没法无界面测试。
+| `model.py` | 三个数据契约：`Target`（x/y/vx/vy/snr/tid/views/threat）、`RadarFrame`（timestamp/scan/az_axis/r_axis/meta）、`Capabilities`（设备能力声明） | **极稳，改要慎重**。全部 `@dataclass(slots=True)`；换设备不改界面靠的就是它。改前读 ARCHITECTURE 第二节 + 写 ADR |
+| `driver.py` | 驱动基类 `RadarDriver` + `@register` 注册表 + 可选下行控制钩子 | `resolve_capabilities()` 用 `dataclasses.replace` **一次性合并** `source/form/vendor` 类属性（A2，别再手工补）；`set_control()` 基类返回 False 表示"不支持"是正当答案 |
+| `transport.py` | `serial:// / tcp:// / udp:// / ble:// / file://` 端点解析与实际读写 | `open_transport()`、`endpoint_of()`、`TransportError`；BLE 需 bleak（异步→同步桥，见 ROADMAP A3） |
+| `codec.py` | 声明式切帧：`FrameSpec` + `StreamDecoder` 处理粘包、半包、数据区假帧头 | 长度字段偏移 = `len(header)`；`_total_of()` 返回 `0` 表示"等数据"、`-1` 才是非法 |
+| `pipeline.py` | CA-CFAR 检测、目标反投影、`synthesize_scan` 补全缺失矩阵 | 门限目前是固定值（默认 0.30），自适应见 ROADMAP B2；训练窗别落在目标自己身上 |
+| `tracker.py` | 最近邻关联 + α-β 滤波 + 航迹合并 | 丢失判据用**秒**（`missed` 是 float），用帧数会在旋转雷达上断航迹 |
+| `fusion.py` | 多站空间对齐、扇区拼接、盲区计算 | `_close_gaps()` 3×3 最大值闭运算补散射洞；当前是**点级融合**，加权/航迹级见 ROADMAP B3 |
+| `geometry.py` | 方位线、最小二乘交会（融合与标定共用） | 共址传感器要拒绝交会 |
+| `calibration.py` | 朝向装偏标定、残差报告 | 与 `ui/calibrationwizard.py` 配套 |
+| `viewmath.py` | 视图换算：北向/艏向、屏幕↔极坐标、读数文本格式 | `point_to_polar()`；角度一律用圆均值，不做算术平均 |
+| `alarm.py` | 告警引擎（去抖 / 滞回 / 冷却）+ 规则序列化 | `AlarmRule(id, name, kind, params, level, ...)` 字段名是 **`id`** 不是 `rule_id`；`merge_rules` 优先级：内置 < 插件 < 用户 |
+| `storage.py` | `Store`（SQLite 会话/航迹/事件）+ `FrameArchive`（`.rad`） | `flush()` 失败会 `write_errors += 1` 并保留 pending 重试（上限 5000）；状态栏会亮红字。**不许把强度矩阵存 SQLite** |
+| `plugins.py` | 运行时插件加载与隔离 | 插件入口统一 `def setup(api)`，别叫 `register`（会撞驱动注册器） |
+| `cpa.py` | CPA / TCPA 最近会遇距离与时间 | `evaluate(tracks, speed, heading)`、`worst()`、`own_velocity()`；推导 `t* = -(r·v)/\|v\|²` |
+| `forwarder.py` | UDP 数据转发：每帧一个 JSON 包（含 `"v":1`）+ 接收端示例 | `is_public_target()` 判公网，界面二次确认；`sample_receiver()` 可直接跑来验证配置 |
+| `ais.py` | AIS NMEA 解析：AIVDM 6bit 装甲、异或校验、类型 1/2/3/18/19 位置报告 | **按 bit 偏移切字段，不是按字节**；经纬度是有符号 1/10000 分；`make_aivdm()` 用来造测试数据 |
+| `aisfeed.py` | UDP 监听线程（默认 10110）+ 目标表 + 6 分钟过期 | `feed_line()` 在 `running=False` 后直接返回（R4）；`snapshot(ref_lat, ref_lon)` 换成本地米制坐标 |
+| `maptiles.py` | Web Mercator 换算、瓦片下载、磁盘缓存 | `zoom_for_range()` **从 z=18 往下找**第一个装得下的；`prune(200MB)` 清最旧；UA 与归属见 `PROVIDERS` |
+| `selftest.py` | `run_core_checks()`：跑真实驱动 + 算法，返回 `(ok, 摘要)` | 三个入口共用：`main.py --selftest`、帮助菜单、`tools/check.py` |
+| `paths.py` | 开发/打包两套数据目录解析 | `data_dir()`；打包版落到 `%LOCALAPPDATA%\Lookout\data` |
 
 ---
 
-## drivers/ —— 每种雷达一个文件
+## `radarscope/drivers/` —— 每种雷达一个文件
 
-| 文件 | source | form | 说明 |
+| 文件 | source | form | 具体职责 |
 |---|---|---|---|
-| `simulator.py` | sim | sector | 合成雷达，旋转/凝视双模式，带底噪与静止杂波 |
-| `sim_aesa.py` | sim | rd | 相控阵/脉冲多普勒，9 目标 + RD + IFF + 威胁 |
-| `multi.py` | sim / fusion | fusion | 多站融合：6×60° 演示 + 真实组网 |
+| `__init__.py` | — | — | 导入即注册所有驱动，**加驱动只需加一行 import** |
+| `simulator.py` | sim | sector | 合成雷达：旋转/凝视双模式、底噪、静止杂波；唯一实现 `set_control()`（gain/STC/FTC）的驱动 |
+| `sim_aesa.py` | sim | rd | 相控阵/脉冲多普勒：9 目标 + RD 图 + IFF + 威胁分级 |
+| `multi.py` | sim / fusion | fusion | 多站融合：6×60° 全向演示 + 真实组网入口 |
 | `ld2410.py` | device | point | 海凌科存在感应，9 距离门能量 |
-| `ld2450.py` | device | sector | 海凌科三目标跟踪，直接给 x/y |
-| `ldlidar.py` | device | omni | LD19/LD06/D500 旋转激光，360° |
-| `ultrasonic.py` | device | sector | HC-SR04 + 舵机，180° 机械扫描 |
-| `replay.py` | replay | sector | 回放 `.rad` 录制文件 |
-| `__init__.py` | — | — | 导入即注册，加驱动只需加一行 |
+| `ld2450.py` | device | sector | 海凌科三目标跟踪，直接给 x/y；**bit15 是独立符号位，不是补码** |
+| `ldlidar.py` | device | omni | LD19/LD06/D500 旋转激光，360°，CRC + 碎片重同步 |
+| `ultrasonic.py` | device | sector | HC-SR04 + 舵机，180° 机械扫描，文本协议 |
+| `replay.py` | replay | sector | 回放 `.rad` 帧归档；到文件尾标记 `_finished`，下一轮再抛，不丢最后一帧 |
 
-**驱动里不许操作界面，也不许出现型号判断逻辑。**
-型号只出现在 `label` 和 `vendor` 字符串里。
+**驱动里不许操作界面、不许按型号写 `if did == "..."`。** 型号只出现在 `label`/`vendor` 字符串。
 
----
-
-## ui/ —— 只负责画和交互
-
-| 文件 | 职责 |
-|---|---|
-| `mainwindow.py` | 编排：工具栏、菜单、页签、帧分发、连接生命周期 |
-| `theme.py` | 三套配色、刻度步长算法、全局样式表 |
-| `ppi.py` | 环视显示器：LUT 渲染、余晖、标签避让、点击锁定、扇区与盲区 |
-| `ascope.py` | A 显（距离剖面） |
-| `waterfall.py` | 距离-时间瀑布 |
-| `rdscope.py` | 距离-多普勒热图 |
-| `tracktable.py` | 航迹表（列随能力变化） |
-| `sensorpanel.py` | 多站传感器状态 |
-| `eventlog.py` | 事件日志（可导出） |
-| `history.py` | 历史会话（查库 + 导出 CSV） |
-| `sensorsdialog.py` | 传感器布站配置 |
-| `statsdialog.py` | 统计分析：KPI / 活动量图 / 告警汇总 / 事件检索 |
-| `linkdialog.py` | 连接设置：串口枚举(识别 CH340/CP210x) / BLE 扫描 / TCP / UDP / 文件 |
-| `extra.py` | 设备控制（增益/STC/FTC）与 AIS 接入两个小对话框 |
-| `maplayer.py` | 瓦片拼图 + 后台下载线程，供 PPI 当底图 |
-| `winstyle.py` | 标题栏深浅色（DWM）+ 程序图标 + 对话框标题栏全局跟随 |
-| `rulesdialog.py` | 告警规则编辑器 |
-| `pluginsdialog.py` | 插件管理 |
-| `calibrationwizard.py` | 标定向导（采集 → 计算 → 写入） |
-
-**ui 里不许出现 `struct.unpack` 或 `serial`。** 协议解析漏到界面层就是分层破了。
+> **A1~A4 待办**：`ldlidar / ld2450 / ld2410 / ble` 与真实多站组网都还没接过硬件。
+> 详见 [ROADMAP.md](ROADMAP.md) 阶段 A。
 
 ---
 
-## plugins/ —— 第三方扩展
+## `radarscope/ui/` —— 只负责画和交互
+
+**硬约束：`ui/` 里不许出现 `struct.unpack` 或 `serial`。** 协议解析漏到界面就是分层破了。
+
+| 文件 | 具体职责 | 关键入口 / 改动注意 |
+|---|---|---|
+| `mainwindow.py` | 编排：工具栏、菜单、页签、帧分发、主题应用、连接生命周期 | 1021 行；继承三个控制器 mixin。**新功能优先放进 `controllers.py` 对应类**，别让这里再膨胀 |
+| `controllers.py` | 三个 mixin + `ReaderThread` + `PRESET_ENDPOINTS` + `ALARM_STYLE*` 常量 | `ConnectionController`（连接/重连/回放）、`ExportController`（转发/录像/静音/导出）、`AlarmBarController`（告警条/规则/警戒区）。mixin 依赖 `self` 是 MainWindow，**搬方法时模块级常量要一起搬** |
+| `theme.py` | 6 套雷达色板 + 2 套 UI 主题 + 样式表生成 | `PALETTES`（daylight/ice/mono/green/amber/cyan）、`THEMES`（light 默认/dark）、`build_stylesheet(mode, scale)` 用 `@bg@` 占位符替换（**不要用 f-string，QSS 全是花括号**）；`LIGHT_PALETTES = {"daylight"}` 用于主题配对 |
+| `ppi.py` | 环视显示器：LUT 光栅、余晖、尾迹、警戒区、AIS、地图、EBL/VRM、真运动、点击锁定 | 最复杂的控件。`_ctable_for()` 把低电平(<26)设**透明**（否则地图被盖住）；真运动裁剪 = 屏幕圆 ∩ 天线圆；`zoneDeleteRequested(rule_id)` 删点中的圈 |
+| `ascope.py` | A 显（距离剖面） | `set_capabilities()` / `set_threshold()` |
+| `waterfall.py` | 距离-时间瀑布 | 当前用 `scan.max(axis=0)`，6 站融合下偏亮 —— **数据形态问题，见 ROADMAP B1** |
+| `rdscope.py` | 距离-多普勒热图 | 数组第 0 行是 `-V_MAX`，显示前 `arr[::-1]` |
+| `tracktable.py` | 航迹表，列随 `Capabilities` 变化 | `configure(caps)` / `refresh(tracks)` / `set_locked(tid)` |
+| `sensorpanel.py` | 多站传感器状态表 | `update_sensors(list[dict])`；单站驱动由主窗口合成一行回退数据，避免空表 |
+| `eventlog.py` | 事件日志 + 导出 | `push(level, text)`；告警条与日志同源 |
+| `history.py` | 历史会话查库 + CSV 导出 | 未来时间轴回放从这里长（ROADMAP C3） |
+| `statsdialog.py` | 统计分析：KPI / 活动量图 / 告警汇总 / 事件检索 | 少于 2 个时间桶要提示"数据太少"，别画成整块色块 |
+| `linkdialog.py` | 连接设置：串口枚举（识别 CH340/CP210x）、BLE 扫描、TCP/UDP、文件回放 | `测试连接` 走 **QTimer 20ms 非阻塞轮询**，按钮再点即停；`closeEvent` 收尾别把端口留后台 |
+| `rulesdialog.py` | 告警规则编辑器 | 与 `alarm.py` 的序列化配套 |
+| `sensorsdialog.py` | 多站布站配置 → `sensors.json` | 朝向/视场写错会让融合整体偏 |
+| `calibrationwizard.py` | 标定向导：采集 → 计算 → 写入 | 对应 `core/calibration.py` |
+| `pluginsdialog.py` | 插件管理（含琥珀色"任意代码"警示） | `reloaded` 信号通知主窗口 |
+| `extra.py` | 两个小对话框：`ControlDialog`（增益/STC/FTC）、`AisDialog`（端口+本船经纬度） | 设备不支持下行控制时**控件置灰并说明原因**，不假装生效 |
+| `maplayer.py` | 瓦片拼图 + 后台 `_Fetcher` 线程 | `stop()` 会 `requestInterruption()`；地图按 `-heading` 反向旋转对齐雷达 |
+| `winstyle.py` | Windows 标题栏深浅色（DWM）+ 代码生成图标 + 全局对话框标题栏跟随 | `enable_dark_titlebar()` 属性号 **20/19 都试**；`install_dialog_titlebar()` 是应用级事件过滤器（QDialog 是独立原生窗口） |
+
+---
+
+## `plugins/` —— 用户扩展
 
 | 文件 | 演示什么 |
 |---|---|
 | `example_sweep_ranger.py` | 用插件注册一台新雷达（单波束测距） |
-| `parking_rules.py` | 用插件注册一组告警规则（泊车分区） |
+| `parking_rules.py` | 用插件注册一组告警规则（泊车分区，`zone` 类规则会直接画到 PPI 上） |
 
-插件入口统一是 `def setup(api)`。**不要叫 `register`**——插件通常会
-`from radarscope.core.driver import register`，名字会撞车。
+插件是**任意 Python 代码，加载即执行**（ROADMAP C2 要做沙箱/校验）。
 
 ---
 
-## tests/ —— 测试即规格
+## `tools/` —— 开发 / 文档工具
 
-`tests/test_core.py` 共 20 组，不依赖 pytest，直接 `python tests/test_core.py`。
+| 文件 | 具体职责 |
+|---|---|
+| `check.py` | **提交前必跑**：编译 + 20 组测试 + 链路自检，判据与 CI 一致 |
+| `bench.py` | 性能基准（改线程模型 C1 前先留基线） |
+| `make_icon.py` | 离屏画 `assets/logo.png` + `assets/app.ico`（手写多尺寸 ICO 头 + PNG 负载） |
+| `make_shortcut.py` | 按 **MS-SHLLINK** 手写 `桌面\瞭望 Lookout.lnk`（COM 被安全策略拦，不依赖 COM） |
+| `make_demo.py` | 离屏渲染 20 帧 PPI → `assets/demo.gif`（需要 Pillow，见 `requirements-dev.txt`） |
+
+> 三个 `make_*.py` 都用 `QT_QPA_PLATFORM=offscreen`，**不弹窗口**；
+> 截图/动图必须设 `QT_QPA_FONTDIR=C:\Windows\Fonts`，否则渲染出来完全没有文字。
+
+---
+
+## `tests/` —— 测试即规格
+
+`tests/test_core.py` 共 **20 组**，不依赖 pytest，直接 `python tests/test_core.py`。
+**不打桩、不 mock**：直接跑真实算法与真实 SQLite。
 
 | 组 | 盯的是什么 |
 |---|---|
 | 帧解码 | 碎片、粘包、数据区里的假帧头 |
 | LD2450 符号位 | bit15 独立符号位，不是补码 |
-| 流水线闭环 | 目标→矩阵→CFAR→目标，位置能还原 |
+| 流水线闭环 | 目标 → 矩阵 → CFAR → 目标，位置能还原 |
 | 告警 | 去抖、不刷屏、恢复、滞回 |
 | 数据库 | 会话/航迹/事件往返，威胁与分类不丢 |
 | 帧归档 | 写入/读回/轴一致性 |
@@ -151,32 +185,41 @@ radarscope/
 | 统计检索 | 分桶计数、告警汇总、级别与规则过滤 |
 | CPA/TCPA | 接近 / 远离 / 本舰运动 / 侧向掠过 |
 | 数据转发 | 载荷 / 速率限制 / 开关 |
-| 底噪稳定性 | 多帧后底噪不抬升（防噪声累加回归） |
+| AIS | 位置报告 / 校验拒收 / 非位置报文 / 经纬度换算 |
+| 下行控制 | 模拟器生效 / 基类明确返回不支持 |
+| 地图瓦片 | 分辨率 / 级别 / 坐标 / 覆盖范围 |
+| 底噪稳定性 | 多帧后不抬升（防 `scan += noise` 回归） |
 
 ---
 
-## docs/ —— 文档
+## `docs/` —— 文档
 
-| 文件 | 内容 |
-|---|---|
-| `PLAN.md` | 总体计划：里程碑、优先级、风险、参考项目 |
-| `ARCHITECTURE.md` | 分层、数据契约、扩展点、性能预算、取舍 |
-| `STRUCTURE.md` | 本文件：目录与文件职责 |
-| `HANDOVER.md` | 交接：怎么改、禁忌、常见坑 |
-| `ADR/` | 架构决策记录（为什么这样选，附实测数据） |
-| `screenshot*.png` | 界面截图 |
+| 文件 | 内容 | 什么时候读 |
+|---|---|---|
+| **ROADMAP.md** | **未来开发计划**：阶段 A~D 共 18 项，每项含目标/文件/路径/验收/风险 | **接手先读**，选任务 |
+| HANDOVER.md | 交接：路径、30 秒上手、驱动模板、七条禁忌、已知坑、提交规范 | 动手前读第 4/6 节 |
+| STRUCTURE.md | 本文件：逐文件职责 | 找代码位置 |
+| ARCHITECTURE.md | 分层、数据契约、扩展点、性能预算、取舍 | 改 `core/model.py` 前 |
+| PLAN.md | 里程碑历史、优先级方法、能力差距表、已知显示瑕疵 | 了解来龙去脉 |
+| REVIEW.md | 五视角审查（2026-11-26 已全部闭环）+ 4 条剩余风险 | 评估技术债 |
+| ADR/0001-language-choice.md | 为什么选 Python + PyQt5（附实测数据） | — |
+| ADR/0002-product-positioning.md | 定位：教学/DIY 为入口、工程留证为深度 + 5 条取舍规则 | 决定"做不做"某个功能时 |
+| screenshot.png | 现代白主题界面截图 | — |
 
 ---
 
-## 还没做的（与 PLAN 对应）
+## 还没做的 / 已知限制
 
-| 项 | 原因 |
-|---|---|
-| GIS 底图 | 需要罗盘/IMU 给航向，否则世界坐标无意义 |
-| 真信号处理（ADC→FFT） | 需要能吐原始数据的板子（IWR6843 + DCA1000） |
-| 3D 点云 | 同上，且要先有 3D 数据 |
-| 多站加权融合 | 2 站时交会结果与权重无关，需 3 站以上才有意义 |
-| 覆盖率门槛 | 需要额外依赖；当前按关键路径写测试 |
+| 项 | 状态 | 详见 |
+|---|---|---|
+| 4 个驱动 + 真实多站组网未接硬件 | **最大未知数** | ROADMAP 阶段 A |
+| 瀑布图 6 站融合偏亮 | 数据形态问题，需重设计 | ROADMAP B1 |
+| 真运动边缘在极大量程的观感 | 需实机确认 | REVIEW 剩余风险 1 |
+| 地图瓦片真实下载链路 | 沙箱无外网，用假瓦片验过拼图/对齐/旋转 | REVIEW 剩余风险 3 |
+| 桌面 `.lnk` 双击启动 | 二进制结构已校验，未实点 | REVIEW 剩余风险 4 |
+| 真信号处理（ADC→FFT） | 需要 IWR6843 + DCA1000 等硬件 | ROADMAP B4 |
+| 3D 点云 / 矢量地图编辑 / i18n / 签名安装包 | 明确排期 | ROADMAP 阶段 C/D |
+| 覆盖率门槛 | 当前按关键路径写测试，未做覆盖率统计 | ROADMAP D 系列 |
 
 ---
 
@@ -184,7 +227,9 @@ radarscope/
 
 | 路径 | 说明 |
 |---|---|
-| `build/` | PyInstaller 中间产物 |
-| `dist/` | 打包产物，`2-打包EXE.bat` 可重建 |
-| `data/` | 运行时数据，删掉会丢历史记录与布站配置 |
-| `__pycache__/` | 解释器缓存 |
+| `build/` `dist_prev/` | PyInstaller 中间产物 / 打包前旧产物 |
+| `dist/` | 打包产物，`2-打包EXE.bat` 可完全重建（129 MB） |
+| `data/` | 运行时数据，**删掉会丢历史记录、布站配置与自绘警戒区** |
+| `assets/tiles` 缓存 | 在 `data/tiles/`，可随时删，会自动重下 |
+| `__pycache__/` | 解释器缓存，随时删 |
+| `.venv/` | 虚拟环境，`1-安装依赖.bat` 可重建 |

@@ -151,10 +151,11 @@ def setup(api):
 | 文档 | 内容 |
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 分层、数据流、线程模型 |
-| [docs/STRUCTURE.md](docs/STRUCTURE.md) | 每个文件干什么 |
-| [docs/PLAN.md](docs/PLAN.md) | 里程碑、能力差距表 |
+| [docs/STRUCTURE.md](docs/STRUCTURE.md) | 逐文件职责解释 |
+| **[docs/ROADMAP.md](docs/ROADMAP.md)** | **未来开发计划**：阶段 A~D 共 18 项，含验收标准与风险 |
+| [docs/PLAN.md](docs/PLAN.md) | 里程碑历史、能力差距表 |
 | [docs/REVIEW.md](docs/REVIEW.md) | 多角度代码审查（2026-11-26 已全部闭环） |
-| [docs/HANDOVER.md](docs/HANDOVER.md) | 接手须知、踩坑记录 |
+| [docs/HANDOVER.md](docs/HANDOVER.md) | 项目路径、交接规范、禁忌与踩坑 |
 | [docs/ADR](docs/ADR) | 架构决策记录 |
 
 ## 测试
