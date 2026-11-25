@@ -188,7 +188,7 @@ Windows + Python 3.11/3.12 双版本。
 
 ## 许可与致谢
 
-MIT License，见 [LICENSE](LICENSE)。
+MIT License，见 [LICENSE](LICENSE)；第三方资源归属见 [NOTICE.md](NOTICE.md)。
 
 地图瓦片 © OpenStreetMap contributors（ODbL），由 CARTO 渲染。
 使用联网地图时界面会显示归属信息，这是使用条件的一部分。

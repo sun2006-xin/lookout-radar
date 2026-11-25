@@ -1,0 +1,4 @@
+# GitHub 语言统计：固件示例不是本项目主体，别让 .ino 把仓库标成 C++
+firmware/** linguist-vendored
+docs/screenshot.png linguist-generated
+assets/** linguist-generated
