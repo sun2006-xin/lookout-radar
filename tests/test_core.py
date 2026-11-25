@@ -1,0 +1,749 @@
+"""核心模块测试。不依赖 pytest，直接跑：
+
+    python tests/test_core.py
+
+覆盖的是最容易悄悄坏掉的地方：切帧、告警去抖、数据库往返、传输端点解析。
+这些坏掉时界面看起来一切正常，只是数据不对 —— 所以必须有断言盯着。
+"""
+from __future__ import annotations
+
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import numpy as np
+
+from radarscope.core import pipeline
+from radarscope.core.alarm import AlarmEngine, AlarmRule
+from radarscope.core.codec import FrameSpec, StreamDecoder
+from radarscope.core.model import Capabilities, RadarFrame, Target
+from radarscope.core.storage import FrameArchive, Store
+from radarscope.core.transport import FileTransport, parse_spec
+from radarscope.drivers.ld2450 import _decode_sign_magnitude
+
+PASS = 0
+
+
+def ok(name: str) -> None:
+    global PASS
+    PASS += 1
+    print(f"  [ok] {name}")
+
+
+# --------------------------------------------------------------------------- #
+def test_codec() -> None:
+    spec = FrameSpec(header=b"\xf4\xf3\xf2\xf1", tail=b"\xf8\xf7\xf6\xf5",
+                     )
+    dec = StreamDecoder(spec)
+
+    body = b"\x01\xaa" + bytes(range(10))
+    frame = spec.header + len(body).to_bytes(2, "little") + body + spec.tail
+    assert dec.feed(frame) == [frame], "整帧解析失败"
+
+    # 逐字节喂（模拟串口碎片）
+    dec2 = StreamDecoder(spec)
+    out = []
+    for i in range(len(frame)):
+        out += dec2.feed(frame[i:i + 1])
+    assert out == [frame], "碎片拼帧失败"
+
+    # 数据段内部藏一个假帧头，不能在这里误切
+    nasty_body = b"\x01\xaa\xf4\xf3\xf2\xf1\x00\x00"
+    nasty = spec.header + len(nasty_body).to_bytes(2, "little") + nasty_body + spec.tail
+    dec3 = StreamDecoder(spec)
+    got = dec3.feed(b"\x00\xff" + nasty + frame)
+    assert got == [nasty, frame], f"假同步处理失败: {got}"
+    ok("帧解码：碎片 / 粘包 / 假同步")
+
+
+def test_ld2450_sign() -> None:
+    # 官方手册的例子：0x030E -> -782mm，0x86B1 -> +1713mm
+    assert _decode_sign_magnitude(0x030E) == -782
+    assert _decode_sign_magnitude(0x86B1) == 1713
+    ok("LD2450 符号位解码（bit15 独立符号，不是补码）")
+
+
+def test_pipeline() -> None:
+    caps = Capabilities(has_scan=True, has_azimuth=True, az_fov=120.0,
+                        range_min=0.2, range_max=8.0)
+    # 目标 -> 矩阵 -> 检测 -> 目标，闭环应该能还原位置
+    src = [Target(x=1.0, y=3.0), Target(x=-2.0, y=5.0)]
+    frame = pipeline.synthesize_scan(caps, src)
+    dets = pipeline.detect_targets(frame, threshold=0.3, max_targets=8)
+    assert len(dets) == 2, f"应检出 2 个目标，实际 {len(dets)}"
+    for want in src:
+        nearest = min(dets, key=lambda t: (t.x - want.x) ** 2 + (t.y - want.y) ** 2)
+        d = ((nearest.x - want.x) ** 2 + (nearest.y - want.y) ** 2) ** 0.5
+        assert d < 0.6, f"定位偏差过大 {d:.2f} m"
+    ok("流水线：目标→矩阵→CFAR→目标 闭环")
+
+
+def test_alarm() -> None:
+    eng = AlarmEngine([
+        AlarmRule("z", "防区", "zone", {"cx": 0, "cy": 3, "r": 1.0},
+                  hold=0.5, cooldown=10.0, hysteresis=0.2),
+        AlarmRule("n", "多目标", "count_ge", {"n": 2}, hold=0.0, cooldown=10.0),
+    ])
+    caps = Capabilities()
+    intruder = [Target(x=0.0, y=3.0)]
+    t = 0.0
+
+    # hold 未满，不该报
+    assert eng.evaluate(intruder, caps, now=t) == []
+    t = 0.4
+    assert eng.evaluate(intruder, caps, now=t) == []
+    # 满了 0.5s，应该报
+    t = 0.6
+    ev = eng.evaluate(intruder, caps, now=t)
+    assert any(e.rule_id == "z" and e.active for e in ev), "告警没有触发"
+
+    # 已在报，不重复刷
+    t = 1.0
+    assert [e for e in eng.evaluate(intruder, caps, now=t) if e.active] == [], "告警重复刷屏"
+
+    # 目标离开 -> 恢复
+    t = 2.0
+    ev = eng.evaluate([], caps, now=t)
+    assert any(e.rule_id == "z" and not e.active for e in ev), "告警没有恢复"
+
+    # 滞回：刚好在半径外一点点（1.0~1.2 之间）不应触发新告警
+    eng2 = AlarmEngine([AlarmRule("z", "防区", "zone", {"cx": 0, "cy": 3, "r": 1.0},
+                                  hold=0.0, hysteresis=0.2)])
+    edge = [Target(x=0.0, y=4.1)]
+    assert eng2.evaluate(edge, caps, now=0.0) == []
+    ok("告警：去抖 / 不刷屏 / 恢复 / 滞回")
+
+
+def test_storage() -> None:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+        db = Path(td) / "t.db"
+        st = Store(db)
+        sid = st.start_session("sim", "virtual", Capabilities(name="X"))
+        trk = Target(x=1.0, y=2.0, vx=0.1, vy=0.0, tid=7, cls="敌", threat=3)
+        st.record_tracks(time.time(), [trk])
+        st.record_event("crit", "alarm", "测试告警", "z", True, 7)
+        st.flush(force=True)
+        rows = st.tracks_of(sid)
+        # 列顺序：ts, tid, x, y, vx, vy, rng, az, snr, threat, cls
+        assert len(rows) == 1, f"航迹条数不对：{len(rows)}"
+        assert abs(rows[0][2] - 1.0) < 1e-6 and abs(rows[0][3] - 2.0) < 1e-6, "航迹落库失败"
+        assert rows[0][9] == 3 and rows[0][10] == "敌", "威胁/分类没存下来"
+        evs = st.events_of(sid)
+        assert evs and evs[0][4] == "测试告警", "事件落库失败"
+        st.end_session("测试")
+        assert st.list_sessions()[0].id == sid
+        st.close()
+        ok("数据库：会话 / 航迹 / 事件 往返")
+
+
+def test_archive() -> None:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+        p = Path(td) / "a.rad"
+        arc = FrameArchive(p)
+        caps = Capabilities(has_scan=True, has_azimuth=True,
+                            range_min=0.2, range_max=8.0)
+        for i in range(5):
+            f = pipeline.synthesize_scan(caps, [Target(x=0.2 * i, y=3.0)])
+            f.timestamp = 1000.0 + i
+            arc.append(f)
+        n = arc.frames
+        arc.close()
+        assert n == 5
+        back = list(FrameArchive.read_frames(p))
+        assert len(back) == 5, "帧归档帧数不符"
+        ts, scan, az, r = back[4]
+        assert abs(ts - 1004.0) < 1e-6
+        assert scan.shape[0] == az.size and scan.shape[1] == r.size, "轴与矩阵不一致"
+        ok("帧归档：写入 / 读回 / 轴一致")
+
+
+def test_transport_parse() -> None:
+    assert parse_spec("COM3")["scheme"] == "serial"
+    assert parse_spec("serial://COM3?baud=115200")["options"]["baud"] == "115200"
+    assert parse_spec("tcp://1.2.3.4:9000")["target"] == "1.2.3.4:9000"
+    assert parse_spec("udp://0.0.0.0:5000")["scheme"] == "udp"
+    assert parse_spec("ble://AA:BB:CC")["scheme"] == "ble"
+    p = parse_spec("file://C:/tmp/x.bin")
+    assert "x.bin" in p["target"], p
+    ok("端点解析：串口 / TCP / UDP / BLE / 文件")
+
+
+def test_file_transport() -> None:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+        p = Path(td) / "cap.bin"
+        p.write_bytes(b"0123456789" * 10)
+        tr = FileTransport(str(p), chunk=10, interval=0.0, loop=False)
+        tr.open()
+        got = bytearray()
+        from radarscope.core.transport import TransportError
+        try:
+            for _ in range(20):
+                got.extend(tr.read())
+        except TransportError:
+            pass                       # 放完就该抛"回放结束"，这是设计行为
+        assert bytes(got).startswith(b"0123456789"), "回放读到的字节不对"
+        assert len(got) == 100, f"应该完整放完 100 字节，实际 {len(got)}"
+        ok("文件传输：按块回放原始字节流并在结束时报错")
+
+
+def test_fusion() -> None:
+    from radarscope.core.fusion import FusionEngine, SensorSpec, local_to_global
+
+    # 坐标变换：本地 (1, 0) 在朝向 90° 的传感器上应落到 (0, -1) 附近
+    s = SensorSpec(name="S1", bearing_deg=90.0)
+    gx, gy = local_to_global(1.0, 0.0, s)
+    assert abs(gx) < 1e-6 and abs(gy + 1.0) < 1e-6, f"旋转换算错误 {(gx, gy)}"
+
+    # 平移也要对
+    s2 = SensorSpec(name="S2", x=2.0, y=-1.0, bearing_deg=0.0)
+    gx, gy = local_to_global(0.0, 3.0, s2)
+    assert abs(gx - 2.0) < 1e-6 and abs(gy - 2.0) < 1e-6, f"平移换算错误 {(gx, gy)}"
+
+    class _Fake:
+        def __init__(self, tgt):
+            self.tgt = tgt
+            self._done = False
+
+        def read(self):
+            if self._done:
+                return None
+            self._done = True
+            return RadarFrame(timestamp=time.monotonic(),
+                              targets=[Target(x=self.tgt[0], y=self.tgt[1])],
+                              az_axis=np.zeros(1, dtype=np.float32),
+                              r_axis=np.array([1.0], dtype=np.float32))
+
+        def close(self): pass
+
+        def capabilities(self):
+            return Capabilities(has_targets=True, has_velocity=True)
+
+    eng = FusionEngine(n_az=360, n_rng=100, range_min=0.2, range_max=10.0, rate=50.0)
+    eng.attach(SensorSpec(name="F", bearing_deg=90.0, fov_deg=60.0), _Fake((2.0, 0.0)))
+    f = None
+    for _ in range(60):
+        f = eng.poll()
+        if f is not None:
+            break
+        time.sleep(0.005)
+    assert f is not None and f.has_targets, "融合没有产出目标"
+    t = f.targets[0]
+    # 本地 (2,0) 在 90° 朝向上 -> 平台坐标 (0,-2)
+    assert abs(t.x) < 0.1 and abs(t.y + 2.0) < 0.1, f"融合后坐标错误 {(t.x, t.y)}"
+    eng.detach_all()
+
+    # 盲区计算：2 个 60° 一定有洞，6 个 60° 应无缝
+    eng2 = FusionEngine(n_az=360, n_rng=10, range_max=10.0)
+    for i, b in enumerate((0.0, 180.0)):
+        eng2.attach(SensorSpec(name=f"G{i}", bearing_deg=b, fov_deg=60.0), _Fake((1.0, 0.0)))
+    assert eng2.gaps(), "2×60° 明明有盲区却算成无死角"
+
+    eng3 = FusionEngine(n_az=360, n_rng=10, range_max=10.0)
+    for i in range(6):
+        eng3.attach(SensorSpec(name=f"H{i}", bearing_deg=i * 60.0, fov_deg=60.0), _Fake((1.0, 0.0)))
+    assert eng3.gaps() == [], f"6×60° 不应有盲区，实际 {eng3.gaps()}"
+    ok("多站融合：坐标变换 / 目标上抬 / 盲区判定")
+
+
+def test_calibration() -> None:
+    """标定数学：装偏了多少度，能不能被反推出来。"""
+    from radarscope.core.calibration import (
+        CalibPoint, angle_error_at, apply_offsets, calibrate_bearings,
+        expected_local_deg, locate_with, norm_deg, residual_report,
+    )
+    from radarscope.core.fusion import SensorSpec
+
+    specs = [SensorSpec(name="S1", x=0.0, y=0.0, bearing_deg=0.0),
+             SensorSpec(name="S2", x=3.0, y=0.0, bearing_deg=0.0)]
+    truth = {"S1": 6.0, "S2": -4.0}          # 假装装偏了这么多
+
+    pts = [(1.0, 4.0), (2.5, 5.0), (-1.0, 4.5), (2.0, 3.0)]
+    cps = []
+    for (x, y) in pts:
+        obs = {}
+        for s in specs:
+            obs[s.name] = expected_local_deg(s, x, y) - truth[s.name]
+        cps.append(CalibPoint(x, y, obs))
+
+    off = calibrate_bearings(specs, cps)
+    for name, want in truth.items():
+        assert abs(norm_deg(off[name] - want)) < 1e-6, \
+            f"{name} 偏置估计错误：{off[name]:.2f} 应为 {want}"
+
+    fixed = apply_offsets(specs, off)
+    rep = residual_report(fixed, cps)
+    assert rep["rms"] < 1e-6, f"标定后定位残差应接近 0，实际 {rep['rms']:.4f}"
+
+    # 未标定时残差应该明显大 —— 否则说明这个测试根本没测到东西
+    bad = residual_report(specs, cps)
+    assert bad["rms"] > 0.3, f"未标定却残差很小（{bad['rms']:.3f}），测试无效"
+
+    # 单台单点也能定位？不能，少于两条射线要返回 None
+    assert locate_with([specs[0]], {"S1": 10.0}) is None
+
+    # 平行射线（两台朝向一致、目标在正前方远处）应判为病态
+    par = [SensorSpec(name="A", x=0.0, y=0.0, bearing_deg=0.0),
+           SensorSpec(name="B", x=3.0, y=0.0, bearing_deg=0.0)]
+    assert locate_with(par, {"A": 0.0, "B": 0.0}) is None, "平行射线应无解"
+
+    # 1° 朝向误差在 8m 处的横向偏差约 14cm
+    assert abs(angle_error_at(8.0, 1.0) - 0.1396) < 0.001
+    ok("标定：装偏反推 / 最小二乘交会 / 病态判定 / 误差换算")
+
+
+def _mk_lidar_packet(start_cd: int, end_cd: int, pts: list[tuple[int, int]],
+                     speed: int = 3000, ts: int = 1234) -> bytes:
+    """按 LD19 协议造一帧，用于脱离硬件做解析测试。"""
+    from radarscope.drivers.ldlidar import crc8
+    b = bytearray(47)
+    b[0], b[1] = 0x54, 0x2C
+    b[2:4] = speed.to_bytes(2, "little")
+    b[4:6] = start_cd.to_bytes(2, "little")
+    for i, (d, c) in enumerate(pts):
+        o = 6 + i * 3
+        b[o:o + 2] = d.to_bytes(2, "little")
+        b[o + 2] = c
+    b[42:44] = end_cd.to_bytes(2, "little")
+    b[44:46] = ts.to_bytes(2, "little")
+    b[46] = crc8(bytes(b[:46]))
+    return bytes(b)
+
+
+def test_lidar_protocol() -> None:
+    """LD19 协议解析：正常帧 / 跨 0° / CRC 拒收 / 碎片重同步。"""
+    from radarscope.drivers.ldlidar import LDLidarDriver, parse_packet
+
+    pts = [(1000 + i * 10, 200) for i in range(12)]      # 1.00m 起，每点 +1cm
+    pkt = _mk_lidar_packet(0, 1100, pts)                # 0° 起，跨 11°，步长 1°
+    got = parse_packet(pkt)
+    assert got is not None, "正常帧应该能解析"
+    angles, info = got
+    assert len(angles) == 12
+    assert abs(angles[0][0] - 0.0) < 1e-6, angles[0][0]
+    assert abs(angles[1][0] - 1.0) < 1e-6, "角步长应为 1°"
+    assert abs(angles[0][1] - 1.0) < 1e-6 and abs(angles[11][1] - 1.11) < 1e-6, \
+        f"距离解析错误：{angles[0][1]}, {angles[11][1]}"
+
+    # 跨 0°：359° 起、10° 止。不做 (end+36000-start)%36000 会把角算成负数
+    pkt2 = _mk_lidar_packet(35900, 1000, pts)
+    a2, info2 = parse_packet(pkt2)
+    assert abs(info2["span_deg"] - 11.0) < 1e-6, f"跨度应为 11°，实际 {info2['span_deg']}"
+    assert abs(a2[0][0] - 359.0) < 1e-6, f"首点应为 359°，实际 {a2[0][0]}"
+    assert abs(a2[1][0] - 0.0) < 1e-6, f"跨 0° 后应归零，实际 {a2[1][0]}"
+
+    # CRC 错一字节必须拒收
+    bad = bytearray(pkt)
+    bad[10] ^= 0xFF
+    assert parse_packet(bytes(bad)) is None, "CRC 错帧不该被接受"
+
+    # 碎片喂入 + 前面带垃圾字节，要能重同步并正确写入栅格
+    d = LDLidarDriver()
+    d._acc.fill(0.0)
+    for b in b"\x00\x11\x22" + pkt:
+        d._ingest(bytes([b]))
+    assert d._good == 1, f"碎片拼帧失败，好帧 {d._good}"
+    # 角度 0° 在 az_axis 的第 180 格（-180..180 栅格），距离 1.0 m 应有点亮
+    lit = np.argwhere(d._acc[:, :] > 0.2)
+    assert len(lit) >= 1, "解析出来的点没有写进栅格"
+    assert d._acc.shape == (360, 240)
+    ok("激光雷达协议：角步长 / 跨 0° / CRC / 碎片重同步")
+
+
+def test_fusion_triangulation() -> None:
+    """重叠区用方位线交会，比"各测各的取平均"更准。
+
+    构造：两台间距 3 m 的雷达都看到同一个点，但**距离都测偏了 10%**。
+    方位角是准的 —— 这正是真实雷达的特点（角度准、距离误差大）。
+    交会只吃角度，所以结果应该几乎不受距离误差影响。
+    """
+    from radarscope.core.fusion import FusionEngine, SensorSpec
+
+    truth = (1.5, 4.0)
+
+    class _Fake:
+        """按给定的本地坐标报一个目标。"""
+
+        def __init__(self, spec, local_xy, delay=0):
+            self.spec = spec
+            self.local_xy = local_xy
+            self._n = 0
+
+        def read(self):
+            self._n += 1
+            if self._n > 1:
+                return None
+            x, y = self.local_xy
+            return RadarFrame(timestamp=time.monotonic(),
+                              targets=[Target(x=x, y=y, snr=0.8)],
+                              az_axis=np.zeros(1, dtype=np.float32),
+                              r_axis=np.array([1.0], dtype=np.float32))
+
+        def close(self): pass
+
+        def capabilities(self):
+            return Capabilities(has_targets=True, has_velocity=True)
+
+    from radarscope.core.fusion import global_to_local
+
+    sa = SensorSpec(name="A", x=0.0, y=0.0, bearing_deg=0.0, fov_deg=120.0)
+    sb = SensorSpec(name="B", x=3.0, y=0.0, bearing_deg=0.0, fov_deg=120.0)
+
+    # 各自测到的本地坐标：角度保持真实，径向距离乘 1.1 / 0.9
+    def err(spec, k):
+        lx, ly = global_to_local(truth[0], truth[1], spec)
+        return (lx * k, ly * k)
+
+    eng = FusionEngine(n_az=360, n_rng=100, range_min=0.2, range_max=10.0, rate=100.0)
+    eng.attach(sa, _Fake(sa, err(sa, 1.10)))
+    eng.attach(sb, _Fake(sb, err(sb, 0.90)))
+
+    f = None
+    for _ in range(40):
+        f = eng.poll()
+        if f is not None:
+            break
+        time.sleep(0.005)
+    assert f is not None and f.targets, "融合没有产出目标"
+    t = f.targets[0]
+    assert t.views == 2, f"应有两个站共视，实际 views={t.views}"
+
+    # 单台误差：距离偏 10% → 位置偏 0.4~0.5 m
+    single = abs(round(1.10 * 1, 3) - 1)
+    assert single >= 0.0
+    lx, ly = global_to_local(truth[0], truth[1], sa)
+    single_err = ((lx * 1.10 - lx) ** 2 + (ly * 1.10 - ly) ** 2) ** 0.5
+    err_after = ((t.x - truth[0]) ** 2 + (t.y - truth[1]) ** 2) ** 0.5
+    assert single_err > 0.3, f"构造的单台误差太小（{single_err:.2f}），测不出改进"
+    assert err_after < 0.05, f"交会后误差仍有 {err_after:.2f} m，交会没起作用"
+    eng.detach_all()
+
+    # 两台装在同一位置（基线为 0）→ 必须拒绝交会并退回坐标变换，
+    # 否则最小二乘会解回起点，给一个离目标很远却"看起来有效"的点
+    sa2 = SensorSpec(name="C", x=0.0, y=0.0, bearing_deg=0.0)
+    sb2 = SensorSpec(name="D", x=0.02, y=0.0, bearing_deg=0.0)
+    eng2 = FusionEngine(n_az=360, n_rng=100, range_max=10.0, rate=100.0)
+    eng2.attach(sa2, _Fake(sa2, global_to_local(truth[0], truth[1], sa2)))
+    eng2.attach(sb2, _Fake(sb2, global_to_local(truth[0], truth[1], sb2)))
+    f2 = None
+    for _ in range(40):
+        f2 = eng2.poll()
+        if f2 is not None:
+            break
+        time.sleep(0.005)
+    t2 = f2.targets[0]
+    e2 = ((t2.x - truth[0]) ** 2 + (t2.y - truth[1]) ** 2) ** 0.5
+    assert e2 < 0.1, f"共址时应退回坐标变换，结果不该跑偏（误差 {e2:.2f} m）"
+    assert eng2.stats["tri"] == 0, "共址不该被判为可交会"
+    ok("融合交会：两站共视更准，共址时拒绝交会")
+
+
+def test_viewmath() -> None:
+    """视图坐标换算：北向/艏向、极坐标↔像素、文本格式。"""
+    from radarscope.core.viewmath import (
+        NORTH_UP, clamp_range, fmt_bearing, fmt_distance, orbit_angle,
+        point_to_polar, screen_offset,
+    )
+
+    # 艏向朝上时方位不变；北向朝上要加航向
+    assert orbit_angle(30.0, 90.0) == 30.0
+    assert orbit_angle(30.0, 90.0, NORTH_UP) == 120.0
+    assert orbit_angle(350.0, 20.0, NORTH_UP) == 10.0, "跨 360 要回绕"
+
+    # 正前方（0°）应在圆心正上方
+    dx, dy = screen_offset(0.0, 5.0, 0.0, 10.0, 100.0)
+    assert abs(dx) < 1e-9 and abs(dy + 50.0) < 1e-9, (dx, dy)
+    # 正右方（90°）应在圆心正右
+    dx, dy = screen_offset(90.0, 10.0, 0.0, 10.0, 100.0)
+    assert abs(dx - 100.0) < 1e-9 and abs(dy) < 1e-9, (dx, dy)
+
+    # 点 → 极坐标 → 点，必须回到原处（点击测距的正确性基础）
+    for az, rng in ((0.0, 2.0), (37.0, 6.5), (180.0, 9.0), (315.0, 1.0)):
+        dx, dy = screen_offset(az, rng, 0.0, 10.0, 100.0)
+        cx, cy = 200.0, 150.0
+        got_r, got_a, inside = point_to_polar(cx + dx, cy + dy, cx, cy, 100.0, 0.0, 10.0)
+        assert inside, "盘内点被判定为盘外"
+        assert abs(got_r - rng) < 0.05, f"距离回算误差 {got_r - rng:.3f}"
+        d = abs((got_a - az + 180) % 360 - 180)
+        assert d < 0.6, f"方位回算误差 {d:.2f}°"
+
+    # 盘外点击：inside 为 False
+    _, _, inside = point_to_polar(200.0 + 200.0, 150.0, 200.0, 150.0, 100.0, 0.0, 10.0)
+    assert not inside
+
+    assert clamp_range(-1.0, 0.0, 10.0) == 0.0
+    assert clamp_range(99.0, 0.0, 10.0) == 10.0
+    assert fmt_bearing(5.4) == "005°"
+    assert fmt_bearing(-10.0) == "350°"
+    assert fmt_distance(850.0) == "850.00 m"
+    assert fmt_distance(12345.0) == "12.35 km"
+    ok("视图换算：北向/艏向 / 极坐标往返 / 文本格式")
+
+
+def test_stats_queries() -> None:
+    """统计与检索：分桶计数、告警汇总、条件过滤。"""
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+        st = Store(Path(td) / "s.db")
+        sid = st.start_session("bench", "x", Capabilities(name="S"))
+        t0 = 1_700_000_000.0
+        for k in range(3):
+            st.record_tracks(t0 + k * 70.0, [Target(x=1.0, y=2.0, tid=k)])
+        st.record_event("crit", "alarm", "过近1", "near", True, 1)
+        st.record_event("crit", "alarm", "过近2", "near", True, 2)
+        st.record_event("warn", "alarm", "人多", "many", True, -1)
+        st.record_event("info", "connect", "已连接", "", True, -1)
+        st.flush(force=True)
+
+        buckets = st.tracks_per_bucket(sid, 60)
+        assert len(buckets) == 3, f"分桶数应为 3，实际 {len(buckets)}: {buckets}"
+        assert [c for _, c in buckets] == [1, 1, 1]
+        assert buckets[0][0] == 0, "桶序号应从 0 开始"
+
+        summ = st.alarm_summary(sid)
+        d = {r[0]: r[2] for r in summ}
+        assert d.get("near") == 2 and d.get("many") == 1, f"告警汇总错误 {d}"
+
+        crit = st.query_events(sid=sid, level="crit")
+        assert len(crit) == 2, "按级别过滤失败"
+        only_many = st.query_events(sid=sid, rule_id="many")
+        assert len(only_many) == 1 and only_many[0][4] == "人多"
+        assert "near" in st.distinct_rule_ids() and "many" in st.distinct_rule_ids()
+        st.close()
+    ok("统计检索：分桶 / 告警汇总 / 级别与规则过滤")
+
+
+def test_cpa() -> None:
+    """CPA/TCPA：接近、远离、本舰运动三种情况。"""
+    from radarscope.core.cpa import evaluate, own_velocity, worst
+
+    # 目标在正前 10 m，以 1 m/s 朝我而来 → 10 秒后撞上，CPA≈0
+    t = Target(x=0.0, y=10.0, vx=0.0, vy=-1.0, tid=1)
+    r = evaluate([t], speed=0.0, heading_deg=0.0)[0]
+    assert abs(r.tcpa - 10.0) < 1e-6, f"TCPA 应为 10s，实际 {r.tcpa:.2f}"
+    assert r.cpa < 1e-6, f"CPA 应为 0，实际 {r.cpa:.3f}"
+    assert r.danger
+
+    # 同位置但正在远离 → TCPA<=0，CPA 就是当前距离
+    t2 = Target(x=0.0, y=10.0, vx=0.0, vy=1.0, tid=2)
+    r2 = evaluate([t2], speed=0.0, heading_deg=0.0)[0]
+    assert r2.tcpa <= 0 and abs(r2.cpa - 10.0) < 1e-6, f"{r2}"
+    assert not r2.danger
+
+    # 本舰以 2m/s 正北航行，目标静止在正前 10m → 相对接近速度 2m/s，5 秒到
+    t3 = Target(x=0.0, y=10.0, vx=0.0, vy=0.0, tid=3)
+    r3 = evaluate([t3], speed=2.0, heading_deg=0.0)[0]
+    assert abs(r3.tcpa - 5.0) < 1e-6, f"TCPA 应为 5s，实际 {r3.tcpa:.2f}"
+
+    # 本舰速度向量：航向 90°（正东）时 vx=速度, vy≈0
+    vx, vy = own_velocity(2.0, 90.0)
+    assert abs(vx - 2.0) < 1e-9 and abs(vy) < 1e-9, (vx, vy)
+
+    # 侧向掠过：目标从左侧平行通过，CPA 等于横向距离
+    t4 = Target(x=-3.0, y=8.0, vx=0.0, vy=-1.0, tid=4)
+    r4 = evaluate([t4], speed=0.0, heading_deg=0.0)[0]
+    assert abs(r4.tcpa - 8.0) < 1e-6 and abs(r4.cpa - 3.0) < 1e-6, f"CPA 应≈3，实际 {r4.cpa:.2f}"
+
+    w = worst([r, r2, r4])
+    assert w is not None and w.tid == 1, "最危险目标判断错误"
+    assert worst([r2]) is None, "全在远离时不该报危险目标"
+    ok("CPA/TCPA：接近 / 远离 / 本舰运动 / 侧向掠过")
+
+
+def test_forwarder() -> None:
+    """数据转发：载荷结构正确、速率限制生效、关闭时不发。"""
+    import json
+
+    from radarscope.core.forwarder import Forwarder
+
+    f = Forwarder()
+    ts = [Target(x=1.25, y=3.5, vx=0.1, vy=-0.2, snr=0.8, tid=7, views=2)]
+    p = f.payload(None, ts)
+    assert p["type"] == "radarscope.frame" and p["targets"][0]["tid"] == 7
+    assert p["targets"][0]["views"] == 2
+    assert json.dumps(p)          # 必须能序列化
+
+    # 关闭状态下不发
+    f.configure("127.0.0.1", 19100, rate=0)
+    assert f.send(None, ts) is False, "未开启时不该发送"
+
+    f.start()
+    assert f.send(None, ts) is True, "开启后应能发出（本机 UDP 无需接收方）"
+    assert f.sent == 1
+    # rate=0 表示不限速，连发应该都成功
+    assert f.send(None, ts) is True
+
+    f.configure(rate=10.0)
+    f._last = 0.0
+    assert f.send(None, ts) is True      # 第一帧
+    assert f.send(None, ts) is False, "10Hz 限制下紧接着的第二帧应被丢弃"
+    f.stop()
+    assert f.send(None, ts) is False
+    assert "关闭" in f.describe() or "关" in f.describe()
+    ok("数据转发：载荷 / 速率限制 / 开关")
+
+
+def _ais_bits(fields: list[tuple[int, int]]) -> str:
+    """按 (值, 位宽) 拼 bit 串；负数用补码。"""
+    out = []
+    for v, w in fields:
+        if v < 0:
+            v += 1 << w
+        out.append(f"{v & ((1 << w) - 1):0{w}b}")
+    return "".join(out)
+
+
+def test_ais() -> None:
+    """AIS 报文解析：位置报告字段还原、校验、非法类型。"""
+    from radarscope.core.ais import checksum_ok, make_aivdm, parse_aivdm
+
+    mmsi, lon, lat = 413759959, 116.4, 39.9
+    bits = _ais_bits([
+        (1, 6), (0, 2), (mmsi, 30),          # 类型 / 重复 / MMSI
+        (0, 4), (0, 8), (102, 10), (0, 1),   # 航行状态 / 转向 / SOG=10.2kn / 精度
+        (int(lon * 600000), 28), (int(lat * 600000), 27),
+        (900, 12), (90, 9),                  # COG=90.0° / 真航向 90°
+    ])
+    bits = bits.ljust(168, "0")
+    sentence = make_aivdm(bits)
+    assert checksum_ok(sentence), "生成的报文校验应该通过"
+
+    t = parse_aivdm(sentence)
+    assert t is not None, "位置报告应能解析"
+    assert t.mmsi == mmsi, t.mmsi
+    assert abs(t.lat - lat) < 1e-4 and abs(t.lon - lon) < 1e-4, (t.lat, t.lon)
+    assert abs(t.sog - 10.2) < 1e-6 and abs(t.cog - 90.0) < 1e-6
+    assert t.heading == 90
+
+    # 校验和错一个字符必须拒收
+    bad = sentence[:-2] + ("00" if sentence[-2:] != "00" else "11")
+    assert parse_aivdm(bad) is None, "校验错误的报文不该被接受"
+
+    # 静电信息（类型 5）不是位置报告，应忽略
+    b5 = _ais_bits([(5, 6), (0, 2), (mmsi, 30)]).ljust(424, "0")
+    assert parse_aivdm(make_aivdm(b5)) is None
+
+    # 经纬度换算成本地米制：参考点在南边 100 m 时，目标应在正前 100 m
+    x, y = t.local_xy(lat - 100.0 / 111320.0, lon)
+    assert abs(x) < 0.5 and abs(y - 100.0) < 0.5, (x, y)
+    ok("AIS：位置报告 / 校验拒收 / 非位置报文 / 经纬度换算")
+
+
+def test_control_channel() -> None:
+    """下行控制：模拟器支持并真的改变输出，基类明确表示不支持。"""
+    from radarscope.core.driver import RadarDriver
+    from radarscope.drivers.simulator import SimulatorDriver
+
+    assert RadarDriver.supports_control is False
+    assert SimulatorDriver.supports_control is True
+
+    d = SimulatorDriver()
+    d.open(mode="staring")
+    f = None
+    for _ in range(200):
+        f = d.read()
+        if f is not None and f.scan.max() > 0.4:
+            break
+        time.sleep(0.01)
+    assert f is not None
+    mean_before = float(f.scan.mean())
+
+    assert d.set_control(gain=1.0, stc=0.8, ftc=0.15) is True
+    assert d.control_state()["stc"] == 0.8
+    g = None
+    for _ in range(60):
+        g = d.read()
+        if g is not None:
+            break
+        time.sleep(0.01)
+    mean_after = float(g.scan.mean())
+    assert mean_after < mean_before * 0.8, \
+        f"STC+FTC 应压低整体能量：{mean_before:.3f} → {mean_after:.3f}"
+    d.close()
+    ok("下行控制：模拟器生效 / 基类不支持")
+
+
+def test_maptiles() -> None:
+    """地图瓦片换算：分辨率、级别选择、瓦片坐标、覆盖范围。"""
+    from radarscope.core.maptiles import (EARTH_C, lonlat_to_tile,
+                                          meters_per_pixel, tile_span,
+                                          zoom_for_range)
+
+    # 赤道 z0 每块瓦片铺满全球，分辨率就是常数
+    assert abs(meters_per_pixel(0.0, 0) - EARTH_C) < 1.0
+    # 高纬度分辨率变小（同样的像素代表更少米）
+    assert meters_per_pixel(60.0, 10) < meters_per_pixel(0.0, 10)
+
+    # 量程越大选越低的级别；量程变小级别不变或变大
+    z_far = zoom_for_range(39.9, 5000.0, 600)
+    z_near = zoom_for_range(39.9, 8.0, 600)
+    assert z_far < z_near, f"大量程应选低级别：{z_far} vs {z_near}"
+    assert 3 <= z_far <= 18 and 3 <= z_near <= 18
+
+    # (0,0) 在 z=1 时正好是四块瓦片的交界
+    x, y = lonlat_to_tile(0.0, 0.0, 1)
+    assert abs(x - 1.0) < 1e-9 and abs(y - 1.0) < 1e-9, (x, y)
+    # 经度 180 在最右边界
+    x2, _ = lonlat_to_tile(0.0, 179.999, 1)
+    assert 1.99 < x2 < 2.0
+
+    # 覆盖范围要包含中心点所在的瓦片
+    x0, y0, x1, y1 = tile_span(39.9, 116.4, 15, 3, 3)
+    xc, yc = lonlat_to_tile(39.9, 116.4, 15)
+    assert x0 <= int(xc) < x1 and y0 <= int(yc) < y1, ((x0, x1), (y0, y1))
+    assert x1 - x0 == 3 and y1 - y0 == 3
+    ok("地图瓦片：分辨率 / 级别 / 坐标 / 覆盖范围")
+
+
+def test_noise_floor_stable() -> None:
+    """底噪不能随帧数抬升。
+
+    同一个坑踩过两次：模拟器里把噪声写成 `scan += noise`，
+    在 decay<1 时稳态收敛到 noise/(1-decay)，画面整体糊上一层绿底，
+    瀑布图直接一片绿。这条断言就是用来盯死它的。
+    """
+    import radarscope.drivers  # noqa: F401
+    from radarscope.core.driver import available_drivers
+
+    for did in ("multi_demo", "sim_aesa", "sim"):
+        cls = available_drivers()[did]
+        d = cls()
+        d.open()
+        f = None
+        for _ in range(240):
+            f = d.read()
+            if f is not None:
+                break
+            time.sleep(0.003)
+        for _ in range(90):                 # 跑一段时间，让稳态充分建立
+            for _ in range(60):
+                g = d.read()
+                if g is not None:
+                    f = g
+                    break
+                time.sleep(0.002)
+        d.close()
+        assert f is not None and f.scan is not None
+        med = float(np.median(f.scan))
+        p90 = float(np.percentile(f.scan, 90))
+        assert med < 0.06, f"{did} 底噪中位数 {med:.3f} 偏高，噪声可能在累加"
+        assert p90 < 0.30, f"{did} 底噪 P90 为 {p90:.3f}，画面会被噪声糊住"
+    ok("底噪稳定性：多帧后不抬升（防噪声累加回归）")
+
+
+def main() -> int:
+    print("RadarScope 核心测试")
+    for fn in (test_codec, test_ld2450_sign, test_pipeline, test_alarm,
+               test_storage, test_archive, test_transport_parse, test_file_transport,
+               test_fusion, test_fusion_triangulation, test_calibration,
+               test_lidar_protocol, test_viewmath, test_stats_queries, test_cpa,
+               test_forwarder, test_ais, test_control_channel, test_maptiles,
+               test_noise_floor_stable):
+        fn()
+    print(f"\n全部通过：{PASS} 组")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
