@@ -142,6 +142,29 @@ class TileStore:
                     out.append((x, y))
         return out
 
+    def cache_bytes(self) -> int:
+        return sum(p.stat().st_size for p in self.root.rglob("*.png"))
+
+    def prune(self, max_bytes: int = 200 * 1024 * 1024) -> int:
+        """超过上限就删最旧的瓦片，返回删掉的数量。
+
+        没有上限的话，看遍一个城市就是几十 MB，长期用会悄悄吃掉整个盘。
+        """
+        files = sorted(self.root.rglob("*.png"), key=lambda p: p.stat().st_mtime)
+        total = sum(p.stat().st_size for p in files)
+        removed = 0
+        for p in files:
+            if total <= max_bytes:
+                break
+            try:
+                size = p.stat().st_size
+                p.unlink()
+                total -= size
+                removed += 1
+            except OSError:
+                pass
+        return removed
+
     def describe(self) -> str:
         return (f"{self.provider} · 已下载 {self.downloaded} · "
                 f"失败 {self.failed}")

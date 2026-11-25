@@ -11,6 +11,8 @@
 
 ![界面](docs/screenshot.png)
 
+![扫描演示](assets/demo.gif)
+
 </div>
 
 ---
@@ -25,6 +27,10 @@
 - **形态而非型号**决定显示方式：单点测距、扇区扫描、全向、目标跟踪、距离-多普勒、多站融合
 
 所以加一款新雷达通常只需要写一个驱动文件，不用动界面。
+
+> **定位**：以「插上就有画面」为入口（教学 / DIY / 课设），
+> 以「可靠与可追溯」为深度（多站组网、告警、留证）。取舍规则见
+> [ADR-0002](docs/ADR/0002-product-positioning.md)。
 
 ## 主要特性
 
@@ -147,7 +153,7 @@ def setup(api):
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 分层、数据流、线程模型 |
 | [docs/STRUCTURE.md](docs/STRUCTURE.md) | 每个文件干什么 |
 | [docs/PLAN.md](docs/PLAN.md) | 里程碑、能力差距表 |
-| [docs/REVIEW.md](docs/REVIEW.md) | 多角度代码审查与风险清单 |
+| [docs/REVIEW.md](docs/REVIEW.md) | 多角度代码审查（2026-11-26 已全部闭环） |
 | [docs/HANDOVER.md](docs/HANDOVER.md) | 接手须知、踩坑记录 |
 | [docs/ADR](docs/ADR) | 架构决策记录 |
 
@@ -161,12 +167,14 @@ def setup(api):
 不打桩：测试直接跑真实算法与真实 SQLite。CI 见 `.github/workflows/ci.yml`，
 Windows + Python 3.11/3.12 双版本。
 
+演示动图由 `tools/make_demo.py` 离屏生成（`requirements-dev.txt` 里的 Pillow）。
+
 ## 已知限制
 
 - **真运动**边缘处理在极大量程下还需打磨
 - **瀑布图**在 6 站融合时偏亮（`max over 方位` 会把目标抹宽）
 - **GIS 底图**只有栅格瓦片，没有矢量要素与离线包
-- **STC/FTC** 走 `set_control()` 下行通道，目前只有模拟器实现
+- **STC/FTC** 走 `set_control()` 下行通道，目前只有模拟器实现（真机驱动需覆写）
 - 只解 AIS 位置报告（1/2/3/18/19），不支持静态与航程报文
 - 未做多语言（仅中文界面）
 

@@ -1,0 +1,3 @@
+# 仅文档/开发工具需要，运行软件不需要
+pillow>=10.0        # tools/make_demo.py 生成 README 演示动图
+pyinstaller>=6.0    # 2-打包EXE.bat

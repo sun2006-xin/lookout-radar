@@ -1,0 +1,648 @@
+"""主窗口的三个控制器（mixin）与读取线程。
+
+A1：mainwindow 一度长到 1580 行，成了"什么都知道"的上帝对象。
+这里按职责把三块拆出来：
+
+    ConnectionController  连接/断开/重连/回放
+    ExportController      转发/录像/静音/导出
+    AlarmBarController    告警条/规则/警戒区
+
+用 mixin 而不是持有 owner 引用的组合，是为了让 `self.xxx` 的语义保持不变 ——
+这些方法操作的就是 MainWindow 自己，拆的是"代码放在哪"，不是"谁负责"。
+风险点：循环导入。所以本模块只 import 外部模块与自己的常量，
+绝不 `from .mainwindow import ...`。
+"""
+
+
+import logging
+import time
+from pathlib import Path
+
+import numpy as np
+
+from PyQt5.QtCore import QSettings, Qt, QThread, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor, QKeySequence
+from PyQt5.QtWidgets import (
+    QAction, QActionGroup, QApplication, QComboBox, QDialog, QDockWidget,
+    QDoubleSpinBox, QFileDialog, QFormLayout, QHBoxLayout, QInputDialog, QLabel,
+    QDialogButtonBox, QMainWindow, QMenu, QMessageBox, QPushButton,
+    QShortcut, QTabWidget,
+    QToolBar, QToolButton, QVBoxLayout, QWidget, QWidgetAction,
+)
+
+from ..core import cpa, pipeline
+from ..core.aisfeed import AisFeed
+from ..core.forwarder import Forwarder
+from ..core.alarm import DEFAULT_RULES, AlarmEngine, merge_rules, rules_from_json
+from ..core.driver import available_drivers
+from ..core.model import Capabilities
+from ..core.plugins import PluginManager
+from ..core.storage import FrameArchive, Store
+from ..core.tracker import Tracker
+from .. import paths
+from .ascope import AScopeWidget
+from .calibrationwizard import CalibrationWizard
+from .eventlog import EventLog
+from .history import HistoryPanel
+from .linkdialog import LinkDialog
+from .maplayer import MapLayer
+from .pluginsdialog import PluginsDialog
+from .ppi import PPIWidget
+from .rdscope import RDScopeWidget
+from .rulesdialog import RulesDialog
+from .sensorpanel import SensorPanel
+from .sensorsdialog import SensorsDialog
+from .statsdialog import StatsDialog
+from .theme import (DEFAULT_PALETTE, DEFAULT_THEME, PALETTES, THEMES,
+                    build_stylesheet)
+from .tracktable import TrackTable
+from .extra import AisDialog, ControlDialog
+from .waterfall import WaterfallWidget
+from .winstyle import enable_dark_titlebar, install_dialog_titlebar, make_app_icon
+
+LOG = logging.getLogger("radarscope")
+
+
+PRESET_ENDPOINTS = [
+    "tcp://192.168.4.1:8080",
+    "udp://0.0.0.0:9000",
+    "serial://COM3?baud=256000",
+    "ble://",
+]
+
+ALARM_STYLE = {
+    "crit": "background:#7A1B14;color:#FFE3DA;border-radius:4px;padding:4px 10px;font-size:13px;",
+    "warn": "background:#5E4210;color:#FFEDCC;border-radius:4px;padding:4px 10px;font-size:13px;",
+    "info": "background:#1B3324;color:#CFEAD9;border-radius:4px;padding:4px 10px;font-size:13px;",
+    # 无告警时的常态：刻意做得很淡，不该抢注意力
+    "ok": "background:#11170F;color:#6C8375;border:1px solid #1E2A22;"
+          "border-radius:4px;padding:4px 10px;font-size:12px;",
+}
+
+#: 只有这一个色板是"白底深回波"，专供浅色主题
+LIGHT_PALETTES = {"daylight"}
+
+
+#: 浅色主题下换成"淡底深字"。一条深棕横幅挂在白界面上太突兀了。
+ALARM_STYLE_LIGHT = {
+    "crit": "background:#FDECEA;color:#B42318;border:1px solid #F6C9C2;"
+            "border-radius:6px;padding:4px 10px;font-size:13px;",
+    "warn": "background:#FFF6E5;color:#8A5A00;border:1px solid #F3DFB6;"
+            "border-radius:6px;padding:4px 10px;font-size:13px;",
+    "info": "background:#EAF6EF;color:#1B6B45;border:1px solid #CBE7D8;"
+            "border-radius:6px;padding:4px 10px;font-size:13px;",
+    "ok": "background:#F3F4F6;color:#6B7280;border:1px solid #E2E5EA;"
+          "border-radius:6px;padding:4px 10px;font-size:12px;",
+}
+
+#: 二级下拉框的形态分组顺序（从"最简单"到"最复杂"）
+#: 分组依据是"测量形态"，不是型号 —— 型号天天出新，写进逻辑就等于把软件钉死在某一年
+FORM_ORDER = ["point", "sector", "omni", "tracking", "rd", "fusion"]
+FORM_NAMES = {
+    "point": "单点测距",
+    "sector": "扇区扫描",
+    "omni": "全向 360°",
+    "tracking": "目标跟踪",
+    "rd": "距离-多普勒",
+    "fusion": "多设备融合",
+}
+
+
+class ReaderThread(QThread):
+    frameReady = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, driver, parent=None):
+        super().__init__(parent)
+        self.driver = driver
+        self._alive = True
+
+    def stop(self) -> None:
+        self._alive = False
+        self.wait(2000)
+
+    def run(self) -> None:
+        while self._alive:
+            try:
+                frame = self.driver.read()
+            except Exception as exc:                 # 串口拔出、网络断开
+                self.failed.emit(f"{type(exc).__name__}: {exc}")
+                return
+            if frame is not None:
+                self.frameReady.emit(frame)
+
+
+
+class ConnectionController:
+    """见模块说明。方法在运行时由 MainWindow 实例调用。"""
+
+    def _refresh_endpoints(self) -> None:
+        cur = self.endpoint_combo.currentText()
+        self.endpoint_combo.clear()
+        items: list[str] = []
+        try:
+            from serial.tools import list_ports
+            for p in list_ports.comports():
+                items.append(f"serial://{p.device}?baud=256000")
+        except Exception:
+            pass
+        items.extend(PRESET_ENDPOINTS)
+        for f in sorted(self.data_dir.glob("*.rad"))[-5:]:
+            items.append(str(f))
+        self.endpoint_combo.addItems(items)
+        saved = self.settings.value("endpoint", "", type=str)
+        if cur:
+            self.endpoint_combo.setCurrentText(cur)
+        elif saved:
+            self.endpoint_combo.setCurrentText(saved)
+        elif items:
+            self.endpoint_combo.setCurrentIndex(0)
+
+    def _on_source_changed(self) -> None:
+        self._rebuild_driver_combo()
+
+    def _rebuild_driver_combo(self, keep: str | None = None) -> None:
+        """按「来源 → 形态」两级重建二级下拉框。"""
+        src = self.src_combo.currentData()
+        want = keep or self.drv_combo.currentData()
+        self.drv_combo.blockSignals(True)
+        self.drv_combo.clear()
+
+        by_form: dict[str, list[tuple[str, type]]] = {}
+        for did, cls in available_drivers().items():
+            if getattr(cls, "source", "device") != src:
+                continue
+            by_form.setdefault(getattr(cls, "form", "sector"), []).append((did, cls))
+
+        for form in FORM_ORDER:
+            items = by_form.get(form)
+            if not items:
+                continue
+            # 组标题做成不可选项，比单纯加分隔线更容易看懂
+            self.drv_combo.addItem(f"── {FORM_NAMES[form]} ──", None)
+            item = self.drv_combo.model().item(self.drv_combo.count() - 1)
+            if item is not None:
+                item.setEnabled(False)
+            for did, cls in sorted(items, key=lambda kv: kv[1].label):
+                self.drv_combo.addItem(cls.label, did)
+
+        idx = self.drv_combo.findData(want) if want else -1
+        if idx < 0:
+            idx = next((i for i in range(self.drv_combo.count())
+                        if self.drv_combo.itemData(i) is not None), 0)
+        self.drv_combo.setCurrentIndex(idx)
+        self.drv_combo.blockSignals(False)
+        self._on_driver_changed()
+
+    def _on_driver_changed(self) -> None:
+        did = self.drv_combo.currentData()
+        cls = available_drivers().get(did)
+        if cls is None:
+            return
+        sim = bool(getattr(cls, "simulated", False))
+        self.endpoint_combo.setEnabled(not sim)
+        self.mode_combo.setEnabled(did == "sim")
+        try:
+            caps = cls().resolve_capabilities()
+        except Exception:
+            caps = Capabilities()
+        self._apply_caps(caps)
+
+    def _toggle_connect(self) -> None:
+        if self.reader is not None:
+            self._disconnect("手动断开")
+            return
+        self._want_connect = True
+        self._connect()
+
+    def _connect(self, silent: bool = False) -> None:
+        if self.reader is not None:
+            return
+        did = self.drv_combo.currentData()
+        cls = available_drivers().get(did)
+        if cls is None:
+            return
+        endpoint = self.endpoint_combo.currentText().strip()
+        try:
+            drv = cls()
+            drv.open(endpoint=endpoint, port=endpoint, path=endpoint,
+                     mode=self.mode_combo.currentData())
+        except Exception as exc:
+            self.driver = None
+            self._log_level("crit", f"打开失败：{type(exc).__name__}: {exc}")
+            if not silent:
+                QMessageBox.critical(
+                    self, "打开失败",
+                    f"{type(exc).__name__}: {exc}\n\n"
+                    "常见原因：\n"
+                    "· 串口被别的软件占用 / 没装 CH340 驱动\n"
+                    "· 波特率不对（海凌科模块是 256000，不是 115200）\n"
+                    "· 模块供电不足（峰值要 200mA 以上）\n"
+                    "· TCP/UDP 地址或端口写错，防火墙拦截")
+            self.btn_conn.setChecked(False)
+            self.btn_conn.setText("连接")
+            return
+
+        self.driver = drv
+        # 分类属性由驱动基类统一合并，别在这里手工补（容易漏）
+        caps = drv.resolve_capabilities()
+        self._apply_caps(caps)
+        self._reconnect_try = 0
+
+        self.store.start_session(did, endpoint, caps)
+        if self.btn_rec.isChecked():
+            self._open_archive()
+
+        self._last_ts = 0.0
+        self._last_frame_mono = time.monotonic()
+        self._frames = 0
+        self._fps_t = time.monotonic()
+
+        self.reader = ReaderThread(self.driver, self)
+        self.reader.frameReady.connect(self._on_frame)
+        self.reader.failed.connect(self._on_failed)
+        self.reader.start()
+
+        self.btn_conn.setText("断开")
+        self.btn_conn.setChecked(True)
+        self.status_left.setText(drv.describe())
+        self._log_level("ok", f"已连接 {caps.name} ｜ {endpoint or '虚拟设备'}")
+        self.store.record_event("info", "connect", f"连接 {caps.name} {endpoint}")
+
+    def _teardown_reader(self) -> None:
+        if self.reader is not None:
+            self.reader.stop()
+            self.reader = None
+        if self.archive is not None:
+            self.archive.close()
+            if self.store.session_id is not None:
+                self.store.attach_archive(self.store.session_id, self.archive)
+            self.archive = None
+        if self.driver is not None:
+            try:
+                self.driver.close()
+            except Exception:
+                pass
+            self.driver = None
+
+    def _disconnect(self, reason: str = "") -> None:
+        self._want_connect = False
+        self._teardown_reader()
+        if self.store.session_id is not None:
+            self.store.end_session(reason)
+        self.btn_conn.setText("连接")
+        self.btn_conn.setChecked(False)
+        self.status_left.setText("已断开")
+        try:
+            self.history.refresh()
+        except Exception:
+            pass
+        if reason:
+            self._log_level("info", f"已断开：{reason}")
+
+    def _on_failed(self, msg: str) -> None:
+        simulated = bool(getattr(self.driver, "simulated", False))
+        self._teardown_reader()
+        if self.store.session_id is not None:
+            self.store.end_session(f"中断：{msg}")
+        self._log_level("crit", f"数据中断：{msg}")
+        self.btn_conn.setText("连接")
+        self.btn_conn.setChecked(False)
+
+        if self.chk_reconnect.isChecked() and not simulated and self._want_connect:
+            self._reconnect_try += 1
+            delay = min(10.0, 2.0 ** (self._reconnect_try - 1))
+            self.status_left.setText(
+                f"连接中断，{delay:.0f} 秒后自动重连（第 {self._reconnect_try} 次）")
+            QTimer.singleShot(int(delay * 1000), lambda: self._connect(silent=True))
+        else:
+            self.status_left.setText("已断开")
+            QMessageBox.warning(self, "数据中断", msg)
+
+    # ================================================================== #
+    # 录制
+    # ================================================================== #
+
+    def _open_archive(self) -> None:
+        name = time.strftime("%Y%m%d-%H%M%S") + ".rad"
+        self.archive = FrameArchive(self.data_dir / name)
+        self.log.push("info", f"开始录制帧：{name}")
+
+    # ================================================================== #
+    # 帧处理
+    # ================================================================== #
+
+    def _start_replay(self, path: str) -> None:
+        """从历史面板直接回放某次录制。"""
+        p = Path(path)
+        if not p.exists():
+            QMessageBox.warning(self, "回放", f"录制文件不存在：\n{path}")
+            return
+        if self.reader is not None:
+            self._disconnect("切换到回放")
+        si = self.src_combo.findData("replay")
+        if si >= 0:
+            self.src_combo.setCurrentIndex(si)
+        self._rebuild_driver_combo(keep="replay")
+        self.endpoint_combo.setCurrentText(str(p))
+        self._log_level("info", f"开始回放 {p.name}")
+        self._toggle_connect()
+
+    # ================================================================== #
+
+
+
+class ExportController:
+    """见模块说明。方法在运行时由 MainWindow 实例调用。"""
+
+    def _on_record_toggled(self, on: bool) -> None:
+        if on:
+            if self.reader is None:
+                self.log.push("warn", "先连接再开始录制")
+            else:
+                self._open_archive()
+        elif self.archive is not None:
+            self.archive.close()
+            if self.store.session_id is not None:
+                self.store.attach_archive(self.store.session_id, self.archive)
+            self.log.push("info", f"录制结束：{self.archive.path.name}"
+                                  f"（{self.archive.frames} 帧）")
+            self.archive = None
+
+    def _toggle_forward(self, on: bool) -> None:
+        if not on:
+            self.forwarder.stop()
+            self.log.push("info", "数据转发已停止")
+            return
+        cur = self.settings.value("fwd_addr", "127.0.0.1:9100", type=str)
+        addr, ok = QInputDialog.getText(
+            self, "数据转发",
+            "接收地址（host:port）。本机调试用 127.0.0.1:9100；\n"
+            "发给局域网其他机器可用 255.255.255.255:9100 广播：", text=cur)
+        if not ok or not addr.strip():
+            self.btn_fwd.setChecked(False)
+            return
+        host, _, port = addr.strip().rpartition(":")
+        if not port.isdigit():
+            QMessageBox.warning(self, "地址不对", "格式应为 host:port，例如 127.0.0.1:9100")
+            self.btn_fwd.setChecked(False)
+            return
+        self.forwarder.configure(host or "127.0.0.1", int(port), rate=10.0)
+        if self.forwarder.public_target:
+            if QMessageBox.question(
+                    self, "确认转发到公网",
+                    f"目标 {host} 看起来是公网地址。\n"
+                    "雷达目标数据会被发送到本机网络之外，确认继续？",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No) != QMessageBox.Yes:
+                self.forwarder.configure("127.0.0.1", int(port), rate=10.0)
+                self.btn_fwd.setChecked(False)
+                return
+        self.settings.setValue("fwd_addr", addr.strip())
+        self.forwarder.start()
+        self.log.push("ok", f"数据转发已开启 → {host}:{port}（每帧一个 JSON 包）")
+
+    def _toggle_record(self, on: bool) -> None:
+        if not on:
+            if self._rec_dir is not None:
+                self.log.push("info", f"录像结束，共 {self._rec_n} 帧：{self._rec_dir}")
+            self._rec_dir = None
+            return
+        self._rec_dir = paths.data_dir() / f"rec_{time.strftime('%Y%m%d-%H%M%S')}"
+        self._rec_dir.mkdir(parents=True, exist_ok=True)
+        self._rec_n = 0
+        self._rec_t = 0.0
+        self.log.push("ok", f"开始录像（4 帧/秒）→ {self._rec_dir}")
+
+    def _toggle_mute(self, on: bool) -> None:
+        self._muted = bool(on)
+        self.log.push("info", "告警提示音已静音（事件仍在记录）" if on else "提示音已恢复")
+
+    def _maybe_record(self, now: float) -> None:
+        if self._rec_dir is None or (now - self._rec_t) < 0.25:
+            return
+        self._rec_t = now
+        self._rec_n += 1
+        try:
+            self.ppi.grab().save(str(self._rec_dir / f"f{self._rec_n:05d}.png"))
+        except Exception as exc:
+            self.log.push("warn", f"录像写盘失败：{exc}")
+            self.btn_clip.setChecked(False)
+
+    def _export_log(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出事件日志", str(self.data_dir / "events.log"),
+            "日志文件 (*.log *.txt)")
+        if not path:
+            return
+        n = self.log.export(path)
+        if n < 0:
+            QMessageBox.warning(self, "导出失败", "写文件时出错")
+        else:
+            self.log.push("ok", f"已导出 {n} 行到 {path}")
+
+    def _export_screenshot(self) -> None:
+        """把整个窗口存成 PNG。
+
+        写报告、发给同事、留档"当时长什么样"都靠它 —— 比口头描述强。
+        默认文件名带时间戳，免得存一堆 screenshot(1)(2)。
+        """
+        default = self.data_dir / (time.strftime("%Y%m%d-%H%M%S") + "-画面.png")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出当前画面", str(default), "PNG 图片 (*.png)")
+        if not path:
+            return
+        try:
+            ok = self.grab().save(path)
+        except Exception as exc:
+            QMessageBox.warning(self, "导出失败", str(exc))
+            return
+        if ok:
+            self.log.push("ok", f"画面已导出：{path}")
+        else:
+            QMessageBox.warning(self, "导出失败", "图片写入失败，检查路径与权限")
+
+    def _open_data_dir(self) -> None:
+        from PyQt5.QtGui import QDesktopServices
+        from PyQt5.QtCore import QUrl
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.data_dir)))
+
+
+
+class AlarmBarController:
+    """见模块说明。方法在运行时由 MainWindow 实例调用。"""
+
+    def _on_alarm_events(self, events) -> None:
+        worst = "info"
+        for ev in events:
+            if ev.active:
+                self.log.push(ev.level, f"[告警] {ev.name}：{ev.message}")
+                self.store.record_event(ev.level, "alarm", ev.message, ev.rule_id, True, ev.tid)
+                if ev.level_rank > 2:
+                    worst = "crit"
+                elif ev.level_rank == 1 and worst != "crit":
+                    worst = "warn"
+            else:
+                self.log.push("info", f"[恢复] {ev.name}")
+                self.store.record_event("info", "alarm-clear", ev.message, ev.rule_id, False, ev.tid)
+        if worst == "crit" and not self._muted:
+            from PyQt5.QtWidgets import QApplication
+            QApplication.beep()
+        self._refresh_alarm_bar()
+
+    def _alarm_style(self, level: str) -> str:
+        table = ALARM_STYLE_LIGHT if self._theme == "light" else ALARM_STYLE
+        return table.get(level, table["warn"])
+
+    def _refresh_alarm_bar(self) -> None:
+        act = self.alarm.active_events()
+        if not act:
+            self.alarm_bar.setStyleSheet(self._alarm_style("ok"))
+            self.alarm_bar.setText("　系统正常")
+            return
+        worst = max(act, key=lambda e: e.level_rank)
+        self.alarm_bar.setStyleSheet(self._alarm_style(worst.level))
+        self.alarm_bar.setText("　!　" + "　｜　".join(e.name for e in act))
+        self.alarm_bar.setVisible(True)
+
+    # ================================================================== #
+    # 杂项
+    # ================================================================== #
+    # 规则 / 插件 / 传感器配置
+    # ================================================================== #
+
+    def _load_rules(self) -> None:
+        """规则优先级：内置默认 < 插件 < 用户手动编辑。"""
+        user_rules = []
+        p = self.data_dir / "rules.json"
+        if p.exists():
+            try:
+                user_rules = rules_from_json(p.read_text(encoding="utf-8"))
+            except Exception as exc:
+                LOG.warning("rules.json 解析失败，改用内置规则：%s", exc)
+        merged = merge_rules(DEFAULT_RULES, self.plugins.plugin_rules(), user_rules)
+        self.alarm.set_rules(merged)
+        self._sync_zones()
+
+    def _user_rules_path(self) -> Path:
+        return self.data_dir / "rules.json"
+
+    def _save_zone_rule(self, x: float, y: float, r: float) -> None:
+        """把屏上画出来的圈存成一条 zone 规则并立即生效。
+
+        这是"普通人能用"的关键一步：不用去翻 JSON，画一个圈就生效。
+        存进 rules.json 后 _load_rules() 重新合并，界面和检测同时更新。
+        """
+        import json
+
+        p = self._user_rules_path()
+        data = {"rules": []}
+        if p.exists():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if not isinstance(data, dict) or "rules" not in data:
+                    data = {"rules": []}
+            except Exception:
+                data = {"rules": []}
+        n = sum(1 for r in data["rules"] if str(r.get("kind")) == "zone") + 1
+        data["rules"].append({
+            "id": f"zone_user_{int(time.time())}",
+            "name": f"警戒区 {n}",
+            "kind": "zone",
+            "level": "warn",
+            "enabled": True,
+            "params": {"cx": round(x, 3), "cy": round(y, 3), "r": round(r, 3)},
+        })
+        try:
+            p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as exc:
+            QMessageBox.warning(self, "保存失败", str(exc))
+            return
+        self._load_rules()
+        self.log.push("ok", f"已添加警戒区 ({x:.1f}, {y:.1f}) r={r:.1f}m")
+
+    def _delete_zone(self, rule_id: str) -> None:
+        """删除用户点中的那个警戒区。"""
+        import json
+
+        p = self._user_rules_path()
+        if not p.exists():
+            self.log.push("info", "没有自绘的警戒区可删")
+            return
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        rules = data.get("rules", [])
+        name = next((r.get("name", rule_id) for r in rules
+                     if str(r.get("id")) == rule_id), rule_id)
+        if QMessageBox.question(
+                self, "删除警戒区", f"确定删除「{name}」？\n（内置规则不受影响）",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        kept = [r for r in rules if str(r.get("id")) != rule_id]
+        if len(kept) == len(rules):
+            self.log.push("info", "内置警戒区请在「告警规则」里调整")
+            return
+        data["rules"] = kept
+        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._load_rules()
+        self.log.push("info", f"已删除警戒区「{name}」")
+
+    def _delete_last_zone(self) -> None:
+        """删掉最后一个自绘的警戒区（id 以 zone_user_ 开头）。
+
+        原来右键一下就删，手一抖警戒区就没了 —— 删除必须二次确认。
+        """
+        if QMessageBox.question(
+                self, "删除警戒区",
+                "确定删除最近添加的那个警戒区？\n（内置规则不受影响）",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        import json
+
+        p = self._user_rules_path()
+        if not p.exists():
+            self.log.push("info", "没有自绘的警戒区可删")
+            return
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        rules = data.get("rules", [])
+        idx = [i for i, r in enumerate(rules) if str(r.get("id", "")).startswith("zone_user_")]
+        if not idx:
+            self.log.push("info", "没有自绘的警戒区可删")
+            return
+        rules.pop(idx[-1])
+        data["rules"] = rules
+        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._load_rules()
+        self.log.push("info", "已删除最近添加的警戒区")
+
+    def _sync_zones(self) -> None:
+        """把 zone 类规则同步到 PPI 上画出来。
+
+        规则里写了"圆心 (0,3) 半径 1.5"却看不见它 —— 圈住了什么东西只能靠想象。
+        画出来才算把配置和画面接上。
+        """
+        zs: list[tuple] = []
+        for r in getattr(self.alarm, "rules", []):
+            if r.kind != "zone" or not getattr(r, "enabled", True):
+                continue
+            p = r.params or {}
+            try:
+                zs.append((float(p.get("cx", 0.0)), float(p.get("cy", 0.0)),
+                           float(p.get("r", 1.0)), str(r.level), str(r.id)))
+            except (TypeError, ValueError):
+                continue
+        # _load_rules() 在界面构造之前就会跑一次，那时还没有 ppi
+        ppi = getattr(self, "ppi", None)
+        if ppi is not None:
+            ppi.set_alarm_zones(zs)
+
+    def _open_rules(self) -> None:
+        dlg = RulesDialog(self.alarm, self)
+        dlg.exec_()
+        self._load_rules()          # 编辑器可能已经写盘，重新读一遍保持单一来源
+        self._log_level("info", f"告警规则已更新，共 {len(self.alarm.rules)} 条")

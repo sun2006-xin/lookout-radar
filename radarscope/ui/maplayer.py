@@ -105,11 +105,22 @@ class MapLayer(QObject):
             self._start_fetch(z, missing)
 
     def _start_fetch(self, z: int, tiles: list[tuple[int, int]]) -> None:
+        # 换图源/换量程时先让上一批停下来，别在后台继续拉没用的瓦片
         if self._thread is not None and self._thread.isRunning():
+            self._thread.requestInterruption()
+            self._thread.wait(300)
             return
         self._thread = _Fetcher(self.store, z, tiles[:24], self)
         self._thread.done.connect(lambda n, err: self._on_fetched(z))
         self._thread.start()
+
+    def stop(self) -> None:
+        """关闭地图时终止下载线程。"""
+        t = self._thread
+        if t is not None and t.isRunning():
+            t.requestInterruption()
+            t.wait(1500)
+        self._thread = None
 
     def _on_fetched(self, z: int) -> None:
         # 新瓦片落盘后重拼一次；_key 清掉以保证会真的重算

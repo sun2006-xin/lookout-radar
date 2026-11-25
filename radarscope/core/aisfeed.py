@@ -78,6 +78,8 @@ class AisFeed:
 
     def feed_line(self, line: str) -> AisTarget | None:
         """解析一行。单独暴露出来，方便绕过网络做测试。"""
+        if not self.running:
+            return None                 # stop() 之后不再往表里写
         t = parse_aivdm(line)
         if t is None:
             if line.strip().startswith(("!AIVD", "$AIVD")):

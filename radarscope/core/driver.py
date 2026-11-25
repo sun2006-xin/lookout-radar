@@ -55,6 +55,25 @@ class RadarDriver(ABC):
         """状态栏显示的一行摘要。"""
         return self.capabilities().summary()
 
+    def resolve_capabilities(self) -> "Capabilities":
+        """把类属性（source/form/vendor）合并进 Capabilities，一次做完。
+
+        以前每个调用点都要手工补三行，漏一处就出"共视列不显示"这种鬼 bug。
+        现在只有这一个地方负责同步，界面和驱动都调它。
+        """
+        from dataclasses import replace
+
+        from .model import Capabilities
+
+        caps = self.capabilities()
+        t = type(self)
+        return replace(
+            caps,
+            source=getattr(t, "source", "") or caps.source,
+            form=getattr(t, "form", "") or caps.form,
+            vendor=getattr(t, "vendor", "") or caps.vendor,
+        )
+
     def set_control(self, **params) -> bool:
         """向设备下发参数：gain / stc / ftc / range。
 

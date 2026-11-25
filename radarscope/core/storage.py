@@ -20,6 +20,7 @@ import json
 import sqlite3
 import struct
 import threading
+import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -166,6 +167,9 @@ class Store:
         self._pending_events: list[tuple] = []
         self._last_flush = time.monotonic()
         self.session_id: int | None = None
+        # 写失败必须可见：航迹没进库却一声不吭，等于"以为在留证其实没留"
+        self.write_errors = 0
+        self.last_error = ""
 
     # ------------------------------------------------------------------ #
     def start_session(self, driver: str, endpoint: str = "",
@@ -219,18 +223,30 @@ class Store:
         if not force and now - self._last_flush < 0.4:
             return
         with self._lock:
-            if self._pending_tracks:
-                self._db.executemany(
-                    "INSERT INTO tracks(sid,ts,tid,x,y,vx,vy,rng,az,snr,threat,cls)"
-                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", self._pending_tracks)
-                self._pending_tracks.clear()
-            if self._pending_events:
-                self._db.executemany(
-                    "INSERT INTO events(sid,ts,level,kind,rule_id,message,active,tid)"
-                    " VALUES(?,?,?,?,?,?,?,?)", self._pending_events)
-                self._pending_events.clear()
-            self._db.commit()
-            self._last_flush = now
+            try:
+                if self._pending_tracks:
+                    self._db.executemany(
+                        "INSERT INTO tracks(sid,ts,tid,x,y,vx,vy,rng,az,snr,threat,cls)"
+                        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", self._pending_tracks)
+                    self._pending_tracks.clear()
+                if self._pending_events:
+                    self._db.executemany(
+                        "INSERT INTO events(sid,ts,level,kind,rule_id,message,active,tid)"
+                        " VALUES(?,?,?,?,?,?,?,?)", self._pending_events)
+                    self._pending_events.clear()
+                self._db.commit()
+                self._last_flush = now
+            except Exception as exc:
+                # 不吞：计数 + 留最后一条错误，界面状态栏会亮出来。
+                # pending 保留以便下次重试，但设上限，避免一直失败把内存吃光。
+                self.write_errors += 1
+                self.last_error = f"{type(exc).__name__}: {exc}"
+                logging.getLogger("radarscope").warning(
+                    "存储写入失败(%d)：%s", self.write_errors, self.last_error)
+                if len(self._pending_tracks) > 5000:
+                    del self._pending_tracks[:2500]
+                if len(self._pending_events) > 5000:
+                    del self._pending_events[:2500]
 
     # ------------------------------------------------------------------ #
     def attach_archive(self, sid: int, arc: FrameArchive) -> None:

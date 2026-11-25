@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import time
 
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QComboBox, QDialog, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSpinBox, QTabWidget,
@@ -110,9 +110,12 @@ class LinkDialog(QDialog):
         self.preview.setReadOnly(True)
         self.preview.setStyleSheet("font-family:Consolas;color:#9BF5BE;")
 
-        btn_test = QPushButton("测试连接")
-        btn_test.setToolTip("尝试打开并读取约 1 秒，看能不能收到字节")
-        btn_test.clicked.connect(self._test)
+        self.btn_test = QPushButton("测试连接")
+        self.btn_test.setToolTip("尝试打开并读取约 1 秒；再点一次可提前停止")
+        self.btn_test.clicked.connect(self._test)
+        self._test_timer: QTimer | None = None
+        self._test_tr = None
+        self._test_got = b""
         btn_ok = QPushButton("确定")
         btn_ok.clicked.connect(self._accept)
         btn_cancel = QPushButton("取消")
@@ -120,7 +123,7 @@ class LinkDialog(QDialog):
 
         bottom = QHBoxLayout()
         bottom.addStretch(1)
-        for b in (btn_test, btn_ok, btn_cancel):
+        for b in (self.btn_test, btn_ok, btn_cancel):
             bottom.addWidget(b)
 
         lay = QVBoxLayout(self)
@@ -346,40 +349,73 @@ class LinkDialog(QDialog):
 
     # ------------------------------------------------------------------ #
     def _test(self) -> None:
+        """非阻塞连接测试：QTimer 轮询，界面不卡，按钮再点一次即停止。
+
+        原来是 `while + time.sleep` 顶在 UI 线程里，最长 1.2 秒无法响应，
+        也没法取消 —— 用户点了"测试"就只能干等。
+        """
+        if self._test_timer is not None and self._test_timer.isActive():
+            self._finish_test(cancelled=True)
+            return
+
         ep = self._current_endpoint()
         if not ep:
             QMessageBox.information(self, "测试", "先选一个端口或填地址")
             return
         from ..core.transport import TransportError, open_transport
-        tr = None
         try:
-            tr = open_transport(ep, default_baud=256000)
-            got = b""
-            deadline = time.monotonic() + 1.2
-            while time.monotonic() < deadline and len(got) < 64:
-                chunk = tr.read(256)
-                if chunk:
-                    got += chunk
-                else:
-                    time.sleep(0.02)
+            self._test_tr = open_transport(ep, default_baud=256000)
         except TransportError as exc:
             QMessageBox.warning(self, "连接失败", f"{ep}\n\n{exc}")
             return
         except Exception as exc:
             QMessageBox.warning(self, "连接失败", f"{ep}\n\n{type(exc).__name__}: {exc}")
             return
-        finally:
-            if tr is not None:
-                try:
-                    tr.close()
-                except Exception:
-                    pass
 
+        self._test_ep = ep
+        self._test_got = b""
+        self._test_deadline = time.monotonic() + 1.2
+        self.btn_test.setText("停止测试")
+        t = QTimer(self)
+        t.timeout.connect(self._test_tick)
+        t.start(20)
+        self._test_timer = t
+
+    def _test_tick(self) -> None:
+        tr = self._test_tr
+        if tr is None:
+            self._finish_test()
+            return
+        try:
+            chunk = tr.read(256)
+            if chunk:
+                self._test_got += chunk
+        except Exception as exc:
+            QMessageBox.warning(self, "读取失败", str(exc))
+            self._finish_test()
+            return
+        if (len(self._test_got) >= 64
+                or time.monotonic() >= self._test_deadline):
+            self._finish_test()
+
+    def _finish_test(self, cancelled: bool = False) -> None:
+        if self._test_timer is not None:
+            self._test_timer.stop()
+            self._test_timer = None
+        if self._test_tr is not None:
+            try:
+                self._test_tr.close()
+            except Exception:
+                pass
+            self._test_tr = None
+        self.btn_test.setText("测试连接")
+        if cancelled:
+            return
+        got = self._test_got
         if got:
             head = " ".join(f"{b:02X}" for b in got[:16])
             QMessageBox.information(
-                self, "连接正常",
-                f"收到 {len(got)} 字节。前 16 字节：\n{head}")
+                self, "连接正常", f"收到 {len(got)} 字节。前 16 字节：\n{head}")
         else:
             QMessageBox.information(
                 self, "连上了但没数据",
@@ -387,6 +423,12 @@ class LinkDialog(QDialog):
                 "· 波特率不对（这类模块常见 256000 / 230400 / 115200）\n"
                 "· 板子没上电，或 TX/RX 接反\n"
                 "· 需要先发指令才会开始吐数据")
+
+    def closeEvent(self, ev) -> None:
+        # 对话框关掉时别把端口留在后台
+        if self._test_timer is not None and self._test_timer.isActive():
+            self._finish_test(cancelled=True)
+        super().closeEvent(ev)
 
     def _accept(self) -> None:
         ep = self._current_endpoint()

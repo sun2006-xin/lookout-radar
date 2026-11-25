@@ -22,6 +22,14 @@ class PluginsDialog(QDialog):
         self.resize(860, 420)
         self.manager = manager
 
+        # S3：插件是任意代码，必须给出视觉警示，不能只写在文档里
+        warn = QLabel("⚠ 插件是任意 Python 代码，加载即在本机执行。"
+                      "只加载你自己写的、或你信任的来源。")
+        warn.setWordWrap(True)
+        warn.setStyleSheet(
+            "background:#FFF6E5;color:#8A5A00;border:1px solid #F3DFB6;"
+            "border-radius:6px;padding:6px 10px;font-size:12px;")
+
         tip = QLabel(
             f"插件目录：{manager.plugin_dir}\n"
             "往这个目录丢一个 .py（或一个包目录），点「重新加载」即可生效。\n"
@@ -49,6 +57,7 @@ class PluginsDialog(QDialog):
         bottom.addWidget(btn_close)
 
         lay = QVBoxLayout(self)
+        lay.addWidget(warn)
         lay.addWidget(tip)
         lay.addWidget(self.table, 1)
         lay.addLayout(bottom)

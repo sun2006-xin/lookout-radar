@@ -54,6 +54,7 @@ class PPIWidget(QWidget):
     targetPicked = pyqtSignal(int)
     zoneDrawn = pyqtSignal(float, float, float)   # 圆心 x, y, 半径（米）
     zoneDeleted = pyqtSignal()
+    zoneDeleteRequested = pyqtSignal(str)   # 指定 rule_id，删"我点的那个"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -80,7 +81,9 @@ class PPIWidget(QWidget):
         self.trail_len = 36
         self.show_trails = True
         #: 告警禁入区 (cx, cy, r, level)，与 alarm 规则里的 zone 同源
-        self._zones: list[tuple[float, float, float, str]] = []
+        #: (cx, cy, r, level, rule_id)
+        self._zones: list[tuple] = []
+        self._zone_selected: str = ""
         self.show_zones = True
         #: 电子方位线 (方位°, 距离m)：经典雷达的 EBL/VRM
         self._ebl: tuple[float, float] | None = None
@@ -371,14 +374,19 @@ class PPIWidget(QWidget):
                   "info": QColor(120, 190, 150, 140)}
         p.setBrush(Qt.NoBrush)
         p.setFont(QFont("Consolas", 8))
-        for (x, y, r, level) in self._zones:
+        for z in self._zones:
+            x, y, r, level = z[0], z[1], z[2], z[3]
+            rid = z[4] if len(z) > 4 else ""
             rr = hypot(x, y)
             if rr > rmax:
                 continue
             ctr = self._pt(cx, cy, rr / rmax * R, atan2(x, y))
             rad = max(3.0, r / rmax * R)
             col = colors.get(level, colors["warn"])
-            p.setPen(QPen(col, 1.2, Qt.DashLine))
+            selected = bool(rid) and rid == self._zone_selected
+            p.setPen(QPen(QColor(255, 190, 80) if selected else col,
+                          2.4 if selected else 1.2,
+                          Qt.SolidLine if selected else Qt.DashLine))
             p.drawEllipse(ctr, rad, rad)
             # 圆心画个小十字，让人看清"区"是被圈在哪
             p.setPen(QPen(col, 1))
@@ -666,7 +674,15 @@ class PPIWidget(QWidget):
                 self.update()
                 return
             if ev.button() == Qt.RightButton:
-                self.zoneDeleted.emit()
+                # U1：删"我右键点中的那个圈"，而不是"最近加的那个"。
+                # 区一多，"最近一个"根本不可预测。
+                hit = self._zone_at(ev.pos())
+                if hit:
+                    self._zone_selected = hit
+                    self.zoneDeleteRequested.emit(hit)
+                else:
+                    self._zone_selected = ""
+                    self.update()
                 return
         if ev.button() == Qt.LeftButton:
             tid = self.pick_target(ev.pos())
@@ -745,6 +761,21 @@ class PPIWidget(QWidget):
         self._zone_drag = None
         self.setCursor(Qt.CrossCursor if on else Qt.ArrowCursor)
         self.update()
+
+    def _zone_at(self, pos) -> str:
+        """返回点击位置落在哪个警戒区里；重叠时取最小的那个。"""
+        body = self._screen_to_body(QPointF(pos.x(), pos.y()))
+        if body is None:
+            return ""
+        best, best_r = "", 1e18
+        for z in self._zones:
+            if len(z) < 5:
+                continue
+            x, y, r, _level, rid = z[0], z[1], z[2], z[4]
+            d = ((body[0] - x) ** 2 + (body[1] - y) ** 2) ** 0.5
+            if d <= r and r < best_r:
+                best, best_r = str(rid), r
+        return best
 
     def _screen_to_body(self, pt: QPointF) -> tuple[float, float] | None:
         cx, cy, R = self._geometry()

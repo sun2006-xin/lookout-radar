@@ -25,6 +25,30 @@ import time
 from .model import RadarFrame, Target
 
 
+def is_public_target(host: str) -> bool:
+    """判断转发目标是不是"公网地址"。
+
+    环回 / 私网 / 链路本地 / 组播 / 受限广播都算安全目标；
+    其余（含解析后的公网 IP）需要界面二次确认，避免误把目标数据发到外网。
+    """
+    import ipaddress
+    import socket
+
+    h = (host or "").strip()
+    if not h:
+        return False
+    try:
+        ip = ipaddress.ip_address(h)
+    except ValueError:
+        try:
+            ip = ipaddress.ip_address(socket.gethostbyname(h))
+        except Exception:
+            return True                     # 域名解析不了 → 按"不确定"从严处理
+    return not (ip.is_loopback or ip.is_private or ip.is_link_local
+                or ip.is_multicast or ip.is_reserved or ip.is_unspecified
+                or str(ip) == "255.255.255.255")
+
+
 class Forwarder:
     """UDP 广播器。不依赖 Qt，方便单测与嵌入到别的脚本里。"""
 
@@ -32,6 +56,7 @@ class Forwarder:
         self.host = "127.0.0.1"
         self.port = 9100
         self.enabled = False
+        self.public_target = False
         self.rate = 10.0                 # 每秒最多发多少帧，0 表示不限
         self._sock: socket.socket | None = None
         self._last = 0.0
@@ -45,6 +70,7 @@ class Forwarder:
                   rate: float | None = None) -> None:
         if host is not None:
             self.host = host.strip() or "127.0.0.1"
+            self.public_target = is_public_target(self.host)
         if port is not None:
             self.port = int(port)
         if rate is not None:
