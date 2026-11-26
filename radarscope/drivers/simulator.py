@@ -98,13 +98,26 @@ class SimulatorDriver(RadarDriver):
 
     # ------------------------------------------------------------------ #
     def _advance(self, dt: float) -> None:
-        for m in self._movers:
+        # 动态进出与缓慢变向：目标不再只在固定几条线上来回撞墙，而是每隔一段时间自然换航向/重生
+        self._age = getattr(self, "_age", 0.0) + dt
+        rmax = 5.8 if self.mode == "rotating" else 7.6
+        for idx_m, m in enumerate(self._movers):
             m.x += m.vx * dt
             m.y += m.vy * dt
-            if abs(m.x) > 3.2:
-                m.vx = -m.vx
-            if not (0.8 < m.y < 6.5):
-                m.vy = -m.vy
+            # 轻微正弦机动，模拟非直线目标运动
+            turn = 0.12 * sin(self._age * 0.5 + idx_m * 1.7) * dt
+            nvx = m.vx * cos(turn) - m.vy * sin(turn)
+            nvy = m.vx * sin(turn) + m.vy * cos(turn)
+            m.vx, m.vy = nvx, nvy
+            if (m.x ** 2 + m.y ** 2) ** 0.5 > rmax or m.y < (0.4 if self.mode == "staring" else -rmax):
+                ang = float(self._rng.uniform(-2.2 if self.mode == "rotating" else -0.9,
+                                              2.2 if self.mode == "rotating" else 0.9))
+                r_spawn = float(self._rng.uniform(rmax * 0.65, rmax * 0.92))
+                m.x = r_spawn * sin(ang)
+                m.y = r_spawn * cos(ang)
+                spd = float(self._rng.uniform(0.22, 0.55))
+                in_ang = float(np.arctan2(-m.x, -m.y)) + float(self._rng.uniform(-0.5, 0.5))
+                m.vx, m.vy = spd * sin(in_ang), spd * cos(in_ang)
         assert self._az is not None and self._r is not None and self._scan is not None
         # 老数据缓慢衰减，扫描拖尾就来自这里。
         # 系数要和转速配合：一圈 60 帧，0.985^60≈0.40，

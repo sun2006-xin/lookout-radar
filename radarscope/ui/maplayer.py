@@ -59,6 +59,15 @@ class MapLayer(QObject):
     def attribution(self) -> str:
         return self.store.attribution
 
+    def set_provider(self, provider: str) -> None:
+        from ..core.maptiles import PROVIDERS
+
+        if provider in PROVIDERS and provider != self.store.provider:
+            self.store.provider = provider
+            self._key = None
+            if self.enabled and self._last_req is not None:
+                self.update_for(*self._last_req)
+
     # ------------------------------------------------------------------ #
     def update_for(self, lat: float, lon: float, range_m: float,
                    width_px: float) -> None:
@@ -78,10 +87,12 @@ class MapLayer(QObject):
     def _compose(self, lat: float, lon: float, z: int,
                  x0: int, y0: int, x1: int, y1: int) -> None:
         cols, rows = x1 - x0, y1 - y0
-        canvas = QImage(cols * TILE_PX, rows * TILE_PX, QImage.Format_RGB32)
-        canvas.fill(QColor(12, 16, 20))
+        # 必须用透明底，否则离线或瓦片加载失败时整块画布会变成纯黑盖住白昼界面
+        canvas = QImage(cols * TILE_PX, rows * TILE_PX, QImage.Format_ARGB32)
+        canvas.fill(Qt.transparent)
         p = QPainter(canvas)
         missing: list[tuple[int, int]] = []
+        loaded = 0
         for ix, x in enumerate(range(x0, x1)):
             for iy, y in enumerate(range(y0, y1)):
                 data = self.store.get(z, x, y) if self.store.path_of(z, x, y).exists() else None
@@ -91,9 +102,10 @@ class MapLayer(QObject):
                 img = QImage()
                 if img.loadFromData(data):
                     p.drawImage(ix * TILE_PX, iy * TILE_PX, img)
+                    loaded += 1
         p.end()
 
-        self.image = canvas
+        self.image = canvas if loaded > 0 else None
         self.mpp = meters_per_pixel(lat, z)
         xc, yc = lonlat_to_tile(lat, lon, z)
         self.anchor_px = ((xc - x0) * TILE_PX, (yc - y0) * TILE_PX)

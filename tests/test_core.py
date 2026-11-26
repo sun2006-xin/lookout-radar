@@ -1006,6 +1006,75 @@ def test_ws_bridge() -> None:
     ok("Web 订阅桥 (D6)：RFC 6455 握手与 WS 帧编码")
 
 
+def test_electronic_station() -> None:
+    from radarscope.core.sim_targets import ElectronicStation
+
+    st = ElectronicStation(seed=7)
+    st.set_scenario("patrol", range_max=8.0)
+    assert st.active() and len(st.objects) == 3, f"巡逻场景应生成 3 个目标，实际 {len(st.objects)}"
+
+    obj = st.inject(1.0, 2.0, 0.5, -0.4, amp=0.90, name="手动测试点", respawn=False)
+    assert len(st.objects) == 4
+    pts_before = (obj.x, obj.y)
+    tgts = st.step(0.5, range_max=8.0)
+    assert len(tgts) == 4
+    assert (obj.x, obj.y) != pts_before, "推进步进后目标位置应更新"
+
+    base_scan = np.zeros((36, 40), dtype=np.float32)
+    frame = RadarFrame(
+        timestamp=time.time(),
+        scan=base_scan,
+        az_axis=np.radians(np.linspace(-90.0, 90.0, 36)).astype(np.float32),
+        r_axis=np.linspace(0.3, 8.0, 40, dtype=np.float32),
+        targets=[Target(x=-2.0, y=3.0, snr=12.0, tid=1)],
+    )
+    caps = Capabilities(name="Sim", source="sim", form="sector",
+                        range_min=0.3, range_max=8.0, az_fov=180.0)
+    merged = st.merge_into_frame(frame, caps, dt=0.1)
+    assert len(merged.targets) == 1 + len(st.objects), "叠加后应保留原目标并追加虚拟目标"
+    assert float(merged.scan.max()) > 0.3, "叠加扫描矩阵应包含虚拟目标峰值"
+    ok("模拟电子站：场景生成、自定义注入与帧叠加")
+
+
+def test_zone_hit_and_map_toggle() -> None:
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt5.QtCore import QPoint
+    from PyQt5.QtWidgets import QApplication
+    from radarscope.core.maptiles import TileStore
+    from radarscope.ui.maplayer import MapLayer
+    from radarscope.ui.ppi import PPIWidget
+
+    app = QApplication.instance() or QApplication([])
+    ppi = PPIWidget()
+    ppi.resize(600, 600)
+    ppi.set_capabilities(Capabilities(name="Test", range_min=0.3, range_max=8.0,
+                                      has_scan=True, has_azimuth=True))
+    ppi.show_zones = True
+    ppi.set_alarm_zones([(0.0, 4.0, 1.2, "alarm", "z1")])
+    # _geometry(): cx=300, cy=300, R = 600*0.47 = 282; yy = 300 - (4.0/8.0)*282 = 159
+    hit_center = QPoint(300, 159)
+    assert ppi._zone_at(hit_center) == "z1", f"圆心应命中 z1，实际 {ppi._zone_at(hit_center)}"
+    h_move = ppi._hit_zone_handle(hit_center)
+    assert h_move == ("move", (0.0, 4.0, 1.2, "alarm", "z1")), f"中心手柄应为 move，实际 {h_move}"
+    # 边界：radius_px = 1.2/8.0 * 282 = 42.3 -> x=300+42=342 应在边缘手柄范围内
+    h_resize = ppi._hit_zone_handle(QPoint(342, 159))
+    assert h_resize is not None and h_resize[0] == "resize", f"边缘手柄应为 resize，实际 {h_resize}"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ml = MapLayer(Path(tmp))
+        ml.set_provider("carto_light")
+        assert ml.store.provider == "carto_light"
+        ml.set_provider("carto_dark")
+        assert ml.store.provider == "carto_dark"
+        ml.enabled = False
+        ml.update_for(30.0, 120.0, 100.0, 500)
+        ml._compose(30.0, 120.0, 15, 0, 0, 0, 0)
+        assert ml.image is None, "无本地瓦片时不应生成不透明黑块图"
+        ml.stop()
+    ok("PPI 警戒区像素命中与地图图层离线防黑屏")
+
+
 def main() -> int:
     print("RadarScope 核心测试")
     for fn in (test_codec, test_ld2450_sign, test_pipeline, test_alarm,
@@ -1018,7 +1087,7 @@ def main() -> int:
                test_cfar_adaptive, test_track_level_fusion,
                test_plugin_verification, test_timeline_queries, test_meta_schema,
                test_polygon_zone, test_report_export, test_i18n_and_version,
-               test_ws_bridge):
+               test_ws_bridge, test_electronic_station, test_zone_hit_and_map_toggle):
         fn()
     print(f"\n全部通过：{PASS} 组")
     return 0

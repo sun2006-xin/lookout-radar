@@ -27,6 +27,10 @@ PROVIDERS = {
         "url": "https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
         "attribution": "地图 © OpenStreetMap 贡献者 · © CARTO",
     },
+    "carto_light": {
+        "url": "https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
+        "attribution": "地图 © OpenStreetMap 贡献者 · © CARTO",
+    },
     "osm": {
         "url": "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
         "attribution": "地图 © OpenStreetMap 贡献者",

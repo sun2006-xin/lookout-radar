@@ -32,7 +32,7 @@
 | `data/` | 运行时生成，**不进版本库**：见下表 |
 | `plugins/` | 用户插件目录，丢 `.py` 即生效 |
 | `tools/` | 开发/文档工具（下面单列） |
-| `tests/` | `test_core.py`（21 组测试）+ `fixtures/`（5 份 `.bin`/`.rad` 回归夹具与 `manifest.json`） |
+| `tests/` | `test_core.py`（34 组测试）+ `fixtures/`（5 份 `.bin`/`.rad` 回归夹具与 `manifest.json`） |
 | `docs/` | 全部文档（下面单列） |
 | `installer/` | `radarscope.iss` 安装包脚本与 `Lookout.spec` 构建配置 |
 | `firmware/` | `hc_sr04_servo.ino`，HC-SR04 + 舵机扫描的 Arduino 示例 |
@@ -77,6 +77,7 @@
 | `maptiles.py` | Web Mercator 换算、瓦片下载、磁盘缓存 | `zoom_for_range()` **从 z=18 往下找**第一个装得下的；`prune(200MB)` 清最旧；UA 与归属见 `PROVIDERS` |
 | `selftest.py` | `run_core_checks()`：跑真实驱动 + 算法，返回 `(ok, 摘要)` | 三个入口共用：`main.py --selftest`、帮助菜单、`tools/check.py` |
 | `paths.py` | 开发/打包两套数据目录解析 | `data_dir()`；打包版落到 `%LOCALAPPDATA%\Lookout\data` |
+| `sim_targets.py` | 模拟电子站引擎：`ElectronicStation` 动态场景 + 虚拟移动目标帧叠加 | `set_scenario()`、`inject()`、`merge_into_frame()`；无硬件也能测防区/CPA/多目标 |
 
 ---
 
@@ -127,6 +128,7 @@
 | `extra.py` | 两个小对话框：`ControlDialog`（增益/STC/FTC）、`AisDialog`（端口+本船经纬度） | 设备不支持下行控制时**控件置灰并说明原因**，不假装生效 |
 | `maplayer.py` | 瓦片拼图 + 后台 `_Fetcher` 线程 | `stop()` 会 `requestInterruption()`；地图按 `-heading` 反向旋转对齐雷达 |
 | `winstyle.py` | Windows 标题栏深浅色（DWM）+ 代码生成图标 + 全局对话框标题栏跟随 | `enable_dark_titlebar()` 属性号 **20/19 都试**；`install_dialog_titlebar()` 是应用级事件过滤器（QDialog 是独立原生窗口） |
+| `simdialog.py` | 模拟电子站控制台对话框：`SimStationDialog` 管理虚拟场景与手动注入目标 | 对应 `core/sim_targets.py`；支持 `patrol / approach / crossing` 与自定义 `(X,Y,Vx,Vy)` |
 
 ---
 
@@ -145,7 +147,7 @@
 
 | 文件 | 具体职责 |
 |---|---|
-| `check.py` | **提交前必跑**：编译 + 32 组测试 + 链路自检 + 录制夹具回归，判据与 CI 一致 |
+| `check.py` | **提交前必跑**：编译 + 34 组测试 + 链路自检 + 录制夹具回归，判据与 CI 一致 |
 | `selftest.py` | 独立的无界面链路自检（含 `validate_frame_meta` 校验） |
 | `capture_check.py` | 离线校验 `.bin`/`.rad` 录制夹具（帧数/峰值/目标数/CRC 拒绝数），默认批量跑 `tests/fixtures/manifest.json` |
 | `ws_bridge.py` | 零依赖 UDP→WebSocket 桥接与静态页服务器（配合 `web_viewer.html` 做 Web 订阅端） |
@@ -163,7 +165,7 @@
 
 ## `tests/` —— 测试即规格
 
-`tests/test_core.py` 共 **32 组**，不依赖 pytest，直接 `python tests/test_core.py`。
+`tests/test_core.py` 共 **34 组**，不依赖 pytest，直接 `python tests/test_core.py`。
 **不打桩、不 mock**：直接跑真实算法与真实 SQLite。
 
 | 组 | 盯的是什么 |

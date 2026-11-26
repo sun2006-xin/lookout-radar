@@ -25,6 +25,7 @@ from ..core import cpa, pipeline
 from ..core.aisfeed import AisFeed
 from ..core.forwarder import Forwarder
 from ..core.alarm import DEFAULT_RULES, AlarmEngine, merge_rules, rules_from_json
+from .. import drivers as _builtin_drivers  # noqa: F401  保证单独实例化 MainWindow 也能注册内置驱动
 from ..core.driver import available_drivers
 from ..core.model import Capabilities
 from ..core.plugins import PluginManager
@@ -109,6 +110,9 @@ class MainWindow(ConnectionController, ExportController,
         # AIS
         self.ais = AisFeed()
         self._ais_ref = (39.9, 116.4)
+        # 模拟电子站（动态虚拟目标叠加）
+        from ..core.sim_targets import ElectronicStation
+        self.sim_station = ElectronicStation()
         # 联网地图（懒创建，只在开启时建）
         self.map_layer: MapLayer | None = None
         self._map_t = 0.0
@@ -443,6 +447,7 @@ class MainWindow(ConnectionController, ExportController,
         m_tool.addAction("统计分析…", self._open_stats)
         m_tool.addAction("设备控制…", self._open_control)
         m_tool.addAction("AIS 接入…", self._open_ais)
+        m_tool.addAction("模拟电子站（目标注入）…", self._open_sim_station)
         m_tool.addAction("插件管理…", self._open_plugins)
 
         # 视图：面板显隐。用户不该被固定布局绑死——投屏要大字、
@@ -722,6 +727,9 @@ class MainWindow(ConnectionController, ExportController,
         self._last_ts = now
         self._last_frame_mono = time.monotonic()
 
+        if self.sim_station.active():
+            f = self.sim_station.merge_into_frame(f, self.caps, dt)
+
         period = f.meta.get("scan_period")
         if period:
             self.tracker.max_missed_s = max(2.5, 1.6 * float(period))
@@ -976,6 +984,8 @@ class MainWindow(ConnectionController, ExportController,
                 self.pal_combo.setCurrentIndex(i)
 
         enable_dark_titlebar(int(self.winId()), self._theme == "dark")
+        if self.map_layer is not None:
+            self.map_layer.set_provider("carto_light" if self._theme == "light" else "carto_dark")
         self._refresh_alarm_bar()
         self.log.push("info", f"主题：{THEMES[self._theme]['name']}")
 
@@ -985,17 +995,33 @@ class MainWindow(ConnectionController, ExportController,
             if self.map_layer is None:
                 self.map_layer = MapLayer(paths.data_dir() / "tiles", self)
                 self.map_layer.ready.connect(self.ppi.update)
+            self.map_layer.set_provider("carto_light" if self._theme == "light" else "carto_dark")
             self.map_layer.enabled = True
             self.ppi.map_layer = self.map_layer
             lat, lon = self._ais_ref
             self.map_layer.request(lat, lon, float(self.range_spin.value()),
                                    max(200, self.ppi.width()))
-            self.log.push("ok", f"联网地图已开启（中心 {lat:.5f}, {lon:.5f}）；"
-                                "换位置请到「工具→AIS 接入」改经纬度")
-        elif self.map_layer is not None:
-            self.map_layer.enabled = False
-            self.map_layer.stop()
+            hint = f"联网地图已开启（中心 {lat:.5f}, {lon:.5f}）"
+            if float(self.range_spin.value()) < 30.0:
+                hint += "；提示：街道地图仅在 30m 以上室外/海图量程有细节，离线时自动保持透明"
+            self.log.push("ok", hint)
+        else:
+            if self.map_layer is not None:
+                self.map_layer.enabled = False
+                self.map_layer.stop()
+            self.ppi.map_layer = None
+            self.ppi2.map_layer = None
+            self.log.push("info", "联网地图底图已关闭")
         self.ppi.update()
+        self.ppi2.update()
+
+    def _open_sim_station(self) -> None:
+        from .simdialog import SimStationDialog
+
+        dlg = SimStationDialog(self.sim_station, float(self.range_spin.value()), self)
+        dlg.exec_()
+        if self.sim_station.active():
+            self.log.push("ok", f"模拟电子站：当前活跃 {len(self.sim_station.objects)} 个虚拟目标")
 
     def _toggle_true_motion(self, on: bool) -> None:
         self.ppi.true_motion = bool(on)

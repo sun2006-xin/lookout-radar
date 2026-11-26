@@ -236,6 +236,8 @@ class MyRadarDriver(RadarDriver):
 | 工具栏留下没有控件的孤字 | 控件搬进面板后 QLabel 还在，hide 不拆 action | 干脆删掉那些 `tb.addWidget(QLabel(...))` |
 | 点「录像」实际动了「录制帧」 | 两个按钮都叫 `btn_rec`，后者覆盖前者 | 录像改名 `btn_clip` |
 | 工具栏中间出现空白条且「设置」弹窗右侧空白 | 先 `tb.addWidget(w)` 再 `form.addRow(..., w)`，Qt 把 `QWidgetAction` 留在了工具栏且把原控件设为隐藏 | 只往弹窗 `form` 里加控件，不要先 `tb.addWidget()` |
+| 开启「联网地图底图」后 PPI 变全黑且关闭后仍是黑的 | `MapLayer._compose` 用了不透明 `QColor(12,16,20)` `RGB32` 底图且离线 0 瓦片也生成图像；`_toggle_map(False)` 未置空 `ppi.map_layer` | `_compose` 改用透明 `ARGB32` 画布，无已加载瓦片保持 `image = None`；关闭底图显式置 `ppi.map_layer = None`；浅/深主题配对 `carto_light`/`carto_dark` |
+| 右键 PPI 警戒区弹不出编辑/删除菜单 | `_zone_at` 用了 `_screen_to_body`（线性映射且无 `true_motion` 平移与边缘容差），与 `_draw_zones` 像素坐标口径不一致 | `_zone_at` 与 `_hit_zone_handle` 统一按 `_draw_zones` 像素口径与 10px 边缘容差判定 |
 
 ---
 

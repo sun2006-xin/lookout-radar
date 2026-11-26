@@ -206,6 +206,9 @@ class ConnectionController:
                 self.drv_combo.addItem(cls.label, did)
 
         idx = self.drv_combo.findData(want) if want else -1
+        if idx < 0 and src == "sim":
+            # 模拟源优先默认选中内置「模拟器 · 合成雷达」，而不是 1D 单波束插件示例
+            idx = self.drv_combo.findData("sim")
         if idx < 0:
             idx = next((i for i in range(self.drv_combo.count())
                         if self.drv_combo.itemData(i) is not None), 0)

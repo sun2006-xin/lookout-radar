@@ -691,17 +691,25 @@ class PPIWidget(QWidget):
                 best = (d, t.tid)
         return best[1] if best else -1
 
+    def _zone_offset_px(self, cx: float, cy: float, R: float) -> tuple[float, float]:
+        if not self.true_motion:
+            return 0.0, 0.0
+        rmax = max(1e-6, self._caps.range_max)
+        return self.origin[0] / rmax * R, -self.origin[1] / rmax * R
+
     def _hit_zone_handle(self, pos) -> tuple[str, tuple] | None:
         """命中检测：优先边缘调半径（resize），其次圆内移动（move）。"""
         if not self.show_zones or not self._zones:
             return None
         cx, cy, R = self._geometry()
+        offpx, offpy = self._zone_offset_px(cx, cy, R)
         rmax = max(1e-6, self._caps.range_max)
         for z in reversed(self._zones):
             if len(z) < 5:
                 continue
             x, y, r = float(z[0]), float(z[1]), float(z[2])
             ctr = self._pt(cx, cy, hypot(x, y) / rmax * R, atan2(x, y))
+            ctr = QPointF(ctr.x() - offpx, ctr.y() - offpy)
             rad_px = max(3.0, r / rmax * R)
             dist_px = hypot(pos.x() - ctr.x(), pos.y() - ctr.y())
             if abs(dist_px - rad_px) <= 10.0:
@@ -860,19 +868,35 @@ class PPIWidget(QWidget):
         self.update()
 
     def _zone_at(self, pos) -> str:
-        """返回点击位置落在哪个警戒区里；重叠时取最小的那个。"""
-        body = self._screen_to_body(QPointF(pos.x(), pos.y()))
-        if body is None:
+        """返回点击位置落在哪个警戒区里（像素坐标对齐绘制，重叠时取最小半径的）。"""
+        if not self.show_zones:
             return ""
+        cx, cy, R = self._geometry()
+        offpx, offpy = self._zone_offset_px(cx, cy, R)
+        rmax = max(1e-6, self._caps.range_max)
         best, best_r = "", 1e18
         for z in self._zones:
             if len(z) < 5:
                 continue
-            x, y, r, _level, rid = z[0], z[1], z[2], z[4]
-            d = ((body[0] - x) ** 2 + (body[1] - y) ** 2) ** 0.5
-            if d <= r and r < best_r:
+            x, y, r, _level, rid = float(z[0]), float(z[1]), float(z[2]), z[3], z[4]
+            ctr = self._pt(cx, cy, hypot(x, y) / rmax * R, atan2(x, y))
+            ctr = QPointF(ctr.x() - offpx, ctr.y() - offpy)
+            rad_px = max(3.0, r / rmax * R)
+            if hypot(pos.x() - ctr.x(), pos.y() - ctr.y()) <= rad_px + 10.0 and r < best_r:
                 best, best_r = str(rid), r
-        return best
+        if best:
+            return best
+        for pts, _level, rid in self._poly_zones:
+            if len(pts) < 3:
+                continue
+            poly = QPolygonF([
+                QPointF(self._pt(cx, cy, hypot(x, y) / rmax * R, atan2(x, y)).x() - offpx,
+                        self._pt(cx, cy, hypot(x, y) / rmax * R, atan2(x, y)).y() - offpy)
+                for x, y in pts
+            ])
+            if poly.containsPoint(QPointF(pos), Qt.OddEvenFill):
+                return str(rid)
+        return ""
 
     def _screen_to_body(self, pt: QPointF) -> tuple[float, float] | None:
         cx, cy, R = self._geometry()
@@ -943,7 +967,7 @@ class PPIWidget(QWidget):
         北向模式下净旋转是 0（正北朝上）。漏掉这一步地图就会和回波错开。
         """
         m = self.map_layer
-        if m is None or getattr(m, "image", None) is None:
+        if m is None or not getattr(m, "enabled", True) or getattr(m, "image", None) is None:
             return
         img = m.image
         mpp = float(getattr(m, "mpp", 0.0))
