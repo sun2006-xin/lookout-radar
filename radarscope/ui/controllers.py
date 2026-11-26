@@ -64,10 +64,10 @@ LOG = logging.getLogger("radarscope")
 
 
 PRESET_ENDPOINTS = [
-    "tcp://192.168.4.1:8080",
-    "udp://0.0.0.0:9000",
     "serial://COM3?baud=256000",
     "ble://",
+    "tcp://192.168.4.1:8080",
+    "udp://0.0.0.0:9000",
 ]
 
 ALARM_STYLE = {
@@ -202,6 +202,25 @@ class ConnectionController:
         sim = bool(getattr(cls, "simulated", False))
         self.endpoint_combo.setEnabled(not sim)
         self.mode_combo.setEnabled(did == "sim")
+        src = getattr(cls, "source", "device")
+        if sim:
+            self.endpoint_combo.setToolTip("模拟数据源无需填写端点")
+        else:
+            self.endpoint_combo.setToolTip(
+                "支持：serial://COM3?baud=256000 ｜ ble://MAC ｜ tcp://ip:port ｜ udp://0.0.0.0:port\n"
+                "文件回放：文件路径或 file://路径；任何端点都可以加 &record=capture.bin 录原始流"
+            )
+            cur = self.endpoint_combo.currentText().strip()
+            if src == "replay" and not cur.lower().endswith((".rad", ".bin")):
+                rads = sorted(self.data_dir.glob("*.rad"))
+                if rads:
+                    self.endpoint_combo.setCurrentText(str(rads[-1]))
+            elif src == "device" and cur.lower().endswith(".rad"):
+                for i in range(self.endpoint_combo.count()):
+                    t = self.endpoint_combo.itemText(i)
+                    if t.startswith("serial://"):
+                        self.endpoint_combo.setCurrentIndex(i)
+                        break
         try:
             caps = cls().resolve_capabilities()
         except Exception:

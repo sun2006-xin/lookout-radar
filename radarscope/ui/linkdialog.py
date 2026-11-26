@@ -206,6 +206,8 @@ class LinkDialog(QDialog):
         self.cb_net.addItem("TCP 客户端（连雷达）", "tcp")
         self.cb_net.addItem("UDP 监听（雷达主动推）", "udp")
         self.cb_net.currentIndexChanged.connect(self._refresh_preview)
+        self.ed_host.textChanged.connect(self._refresh_preview)
+        self.sp_port.valueChanged.connect(self._refresh_preview)
         form.addRow("方式", self.cb_net)
         tip = QLabel("UDP 监听时地址填 0.0.0.0 表示接收本机所有网卡的数据。\n"
                      "ESP32 做热点时通常是 192.168.4.1:8080。")
@@ -345,7 +347,15 @@ class LinkDialog(QDialog):
 
     def _refresh_preview(self, *_args) -> None:
         ep = self._current_endpoint()
-        self.preview.setText(ep or "（尚未选择）")
+        if ep:
+            self.preview.setText(ep)
+            return
+        hints = {
+            0: "serial://（未检测到串口，请插上设备或点刷新）",
+            2: "ble://（请先扫描或输入设备地址）",
+            3: "file://（请选择 .rad / .bin 录制文件）",
+        }
+        self.preview.setText(hints.get(self.tabs.currentIndex(), "（尚未选择）"))
 
     # ------------------------------------------------------------------ #
     def _test(self) -> None:

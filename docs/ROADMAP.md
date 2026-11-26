@@ -103,17 +103,13 @@
 
 ## 2. 阶段 B —— 算法深水区（`难度深` 的主战场）
 
-### B1 · 瀑布图重设计 `难度 ★★★ 数据形态`
+### [x] B1 · 瀑布图重设计（**已完成，2026-11-26**） `难度 ★★★ 数据形态`
 
-- **问题**：`waterfall.py` 用 `range_profile = scan.max(axis=0)`（各方位最大值）。
-  6 站融合时目标被抹宽、多站叠加 → 整片接近峰值，看起来是一个发亮的 X。
-  AGC / gamma 都调过，**不是动态范围问题，是投影方式错了**。
-- **方案 A（推荐）**：改成"每个航迹一条距离轨迹线"——从 `tracker.tracks`
-  按 `tid` 取 `rng`，在 (时间, 距离) 平面上画折线，背景留空。这样多目标不会互相糊。
-- **方案 B**：按方位分块（每 30° 一条带），适合看扇区遮挡。
-- **涉及**：`ui/waterfall.py`、`ui/ppi.py`（共享配色）、`ui/mainwindow.py` 的帧分发。
-- **验收**：6 站融合演示下能数清 5 条独立航迹；静止目标是一条直线，不会随时间变宽。
-- **配套**：加 `test_waterfall_projection`（输入 5 个目标，断言 5 条独立轨迹）。
+- **问题**：`waterfall.py` 原先用 `range_profile = scan.max(axis=0)`（各方位最大值），6 站融合时目标被抹宽、多站叠加整片饱和。
+- **实现与实测结论**：
+  - `radarscope/ui/waterfall.py` 已按方案 A 重写为「每条航迹一条距离-时间折线」，背景留空、最新位置标注 `T{tid}`。
+  - `MainWindow._on_frame` 已将 `all_tracks` 传入 `waterfall.push_frame(f, all_tracks)`。
+  - `tests/test_core.py` 新增 `test_waterfall_projection`（5 个独立目标、8 帧滚动，断言 5 条独立轨迹且静止目标距离恒定）。
 
 ### B2 · CFAR 参数随场景自适应 `难度 ★★★★ 信号处理`
 

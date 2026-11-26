@@ -215,8 +215,8 @@ QMainWindow, QWidget { background: @bg@; color: @text@;
 QToolBar { background: @surface@; border: none; spacing: 6px; padding: 5px 8px;
     border-bottom: 1px solid @border@; }
 QToolBar::separator { background: @border@; width: 1px; margin: 5px 6px; }
-QMenuBar { background: @surface@; color: @muted@; border: none; padding: 1px 4px;
-    font-size: 12px; }
+QMenuBar { background: @surface@; color: @muted@; border: none; padding: 2px 6px;
+    border-bottom: 1px solid @border@; font-size: 12px; }
 QMenuBar::item { background: transparent; padding: 5px 11px; border-radius: 5px; }
 QMenuBar::item:selected { background: @hover@; color: @text@; }
 QMenu { background: @surface@; color: @text@; border: 1px solid @border@;

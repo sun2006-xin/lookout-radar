@@ -752,6 +752,58 @@ def test_capture_fixtures() -> None:
     ok("录制夹具：.bin / .rad 离线回放与 CRC 拒绝数回归")
 
 
+def test_ble_transport() -> None:
+    """BLE 传输层：端点解析、空地址拦截、后台通知队列桥接。"""
+    from radarscope.core.transport import BleTransport, TransportError
+
+    spec = parse_spec("ble://AA:BB:CC:DD:EE:FF?char=0000ffe1-0000-1000-8000-00805f9b34fb")
+    assert spec["scheme"] == "ble" and spec["target"] == "AA:BB:CC:DD:EE:FF"
+
+    tr_empty = BleTransport("")
+    try:
+        tr_empty.open()
+        raise AssertionError("空 BLE 地址应抛出 TransportError")
+    except TransportError:
+        pass
+
+    tr = BleTransport("AA:BB:CC:DD:EE:FF", timeout=0.01)
+    assert tr.read() == b""
+    tr._q.put_nowait(b"\xaa\xff\x03\x00")
+    assert tr.read() == b"\xaa\xff\x03\x00"
+    tr.close()
+    ok("BLE 传输：端点解析 / 空地址拦截 / 队列桥接")
+
+
+def test_waterfall_projection() -> None:
+    """瀑布图 B1：5 个独立航迹在距离-时间平面各自成线，静止目标距离恒定。"""
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt5.QtWidgets import QApplication
+    from radarscope.ui.waterfall import WaterfallWidget
+
+    app = QApplication.instance() or QApplication([])
+    wf = WaterfallWidget()
+    wf.set_range(20.0)
+    for step in range(8):
+        tracks = [
+            Target(x=0.0, y=3.0, tid=1),                  # 静止 3m
+            Target(x=0.0, y=5.0 + step * 0.3, tid=2),     # 远离
+            Target(x=2.0, y=8.0, tid=3),
+            Target(x=-3.0, y=10.0, tid=4),
+            Target(x=4.0, y=12.0 - step * 0.2, tid=5),    # 接近
+        ]
+        wf.push_frame(RadarFrame(timestamp=float(step), targets=tracks), tracks)
+
+    series = wf.track_series()
+    assert len(series) == 5, f"应有 5 条独立航迹，实际 {len(series)}"
+    assert all(len(pts) == 8 for pts in series.values())
+    t1_ranges = [r for _age, r in series[1]]
+    assert max(t1_ranges) - min(t1_ranges) < 1e-6, "静止目标距离不应随时间变化"
+    del app
+    ok("瀑布图 B1：5 条独立航迹折线投影")
+
+
 def main() -> int:
     print("RadarScope 核心测试")
     for fn in (test_codec, test_ld2450_sign, test_pipeline, test_alarm,
@@ -759,7 +811,8 @@ def main() -> int:
                test_fusion, test_fusion_triangulation, test_calibration,
                test_lidar_protocol, test_viewmath, test_stats_queries, test_cpa,
                test_forwarder, test_ais, test_control_channel, test_maptiles,
-               test_noise_floor_stable, test_capture_fixtures):
+               test_noise_floor_stable, test_capture_fixtures,
+               test_ble_transport, test_waterfall_projection):
         fn()
     print(f"\n全部通过：{PASS} 组")
     return 0

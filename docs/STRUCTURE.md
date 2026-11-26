@@ -115,7 +115,7 @@
 | `theme.py` | 6 套雷达色板 + 2 套 UI 主题 + 样式表生成 | `PALETTES`（daylight/ice/mono/green/amber/cyan）、`THEMES`（light 默认/dark）、`build_stylesheet(mode, scale)` 用 `@bg@` 占位符替换（**不要用 f-string，QSS 全是花括号**）；`LIGHT_PALETTES = {"daylight"}` 用于主题配对 |
 | `ppi.py` | 环视显示器：LUT 光栅、余晖、尾迹、警戒区、AIS、地图、EBL/VRM、真运动、点击锁定 | 最复杂的控件。`_ctable_for()` 把低电平(<26)设**透明**（否则地图被盖住）；真运动裁剪 = 屏幕圆 ∩ 天线圆；`zoneDeleteRequested(rule_id)` 删点中的圈 |
 | `ascope.py` | A 显（距离剖面） | `set_capabilities()` / `set_threshold()` |
-| `waterfall.py` | 距离-时间瀑布 | 当前用 `scan.max(axis=0)`，6 站融合下偏亮 —— **数据形态问题，见 ROADMAP B1** |
+| `waterfall.py` | 距离-时间瀑布图（按航迹 `tid` 画独立距离折线，B1 已重设计） | `push_frame(frame, tracks)` / `track_series()` |
 | `rdscope.py` | 距离-多普勒热图 | 数组第 0 行是 `-V_MAX`，显示前 `arr[::-1]` |
 | `tracktable.py` | 航迹表，列随 `Capabilities` 变化 | `configure(caps)` / `refresh(tracks)` / `set_locked(tid)` |
 | `sensorpanel.py` | 多站传感器状态表 | `update_sensors(list[dict])`；单站驱动由主窗口合成一行回退数据，避免空表 |

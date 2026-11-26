@@ -393,6 +393,11 @@ class BleTransport(Transport):
 
     # ---- Transport 接口 ----
     def open(self) -> None:
+        if not self.address or not self.address.strip():
+            raise TransportError(
+                "BLE 需要指定设备地址，例如 ble://AA:BB:CC:DD:EE:FF\n"
+                "可点「连接设置 → 蓝牙 BLE → 扫描附近的 BLE 设备」自动获取地址。"
+            )
         try:
             import bleak  # noqa: F401
         except ImportError as exc:

@@ -35,11 +35,21 @@ def enable_dark_titlebar(hwnd: int, dark: bool = True) -> bool:
 
 
 def make_app_icon() -> QIcon:
-    """用代码画一个雷达图标，省得往仓库里塞二进制资源。
+    """优先加载项目 logo（assets/app.ico 或 assets/logo.png），找不到再退回代码绘制。"""
+    from pathlib import Path
 
-    实际上窗口图标、任务栏图标、Alt+Tab 都取它，缺了会显示成一个空白方块，
-    在一堆窗口里很难认。
-    """
+    roots = [Path(__file__).resolve().parents[2]]
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        roots.insert(0, Path(meipass))
+    for root in roots:
+        for rel in ("assets/app.ico", "assets/logo.png"):
+            p = root / rel
+            if p.exists():
+                ic = QIcon(str(p))
+                if not ic.isNull():
+                    return ic
+
     icon = QIcon()
     for size in (16, 24, 32, 48, 64, 128):
         pm = QPixmap(size, size)

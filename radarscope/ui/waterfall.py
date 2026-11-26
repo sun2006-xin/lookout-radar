@@ -1,18 +1,30 @@
-"""距离-时间瀑布图（B 显的变体）。
+"""距离-时间瀑布图（按航迹距离折线投影，ROADMAP B1）。
 
-横轴距离、纵轴时间、亮度代表回波强度。这是最能看出"目标在动"的视图：
-静止杂波是一条竖直亮线，走动的人是一条斜线。
+横轴距离、纵轴时间（最新在顶部，向下滚动），每条航迹一条独立折线，背景留空。
+相比早期的 `scan.max(axis=0)` 投影，多站融合与多目标场景下不会互相抹宽糊成一片。
 """
 from __future__ import annotations
 
-import numpy as np
-from PyQt5.QtCore import QPointF, QRectF
-from PyQt5.QtGui import QColor, QFont, QImage, QPainter, QPen
+from collections import deque
+
+from PyQt5.QtCore import QPointF
+from PyQt5.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PyQt5.QtWidgets import QSizePolicy, QWidget
 
-from ..core.model import RadarFrame
-from ..core.pipeline import range_profile
-from .theme import PALETTES, color_table, fmt_range, nice_step
+from ..core.model import RadarFrame, Target
+from .theme import PALETTES, fmt_range, nice_step
+
+# 高对比度航迹配色：浅底（daylight）与深底（ice 等）都清晰可辨
+_TRACK_COLORS = (
+    "#2563EB",  # 蓝
+    "#DC2626",  # 红
+    "#059669",  # 绿
+    "#D97706",  # 琥珀
+    "#7C3AED",  # 紫
+    "#0891B2",  # 青
+    "#DB2777",  # 粉
+    "#4F46E5",  # 靛
+)
 
 
 class WaterfallWidget(QWidget):
@@ -22,71 +34,103 @@ class WaterfallWidget(QWidget):
         super().__init__(parent)
         self.setMinimumHeight(150)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self._buf: np.ndarray | None = None
-        self._agc: float | None = None      # 自动增益：缓慢跟随峰值，避免整片饱和
+        self._history: deque[dict[int, float]] = deque(maxlen=self.ROWS)
         self._palette_name = "green"
-        self._ctable = color_table(self._palette_name)
         self._range_max = 6.0
 
     def set_palette(self, name: str) -> None:
         self._palette_name = name
-        self._ctable = color_table(name)
         self.update()
 
     def set_range(self, rmax: float) -> None:
         self._range_max = max(0.1, rmax)
+        self.update()
 
     def reset(self) -> None:
-        self._buf = None
-        self._agc = None
+        self._history.clear()
         self.update()
 
-    def push_frame(self, frame: RadarFrame) -> None:
-        prof = range_profile(frame)
-        if prof.size < 2:
-            return
-        # 自动增益（AGC）+ 开方压缩。
-        # 只用固定 gamma 时，强回波永远顶到 255，整片糊成一块亮色；
-        # 按一个缓慢跟随的峰值归一化，弱回波才浮得出来、强回波也留得住层次。
-        peak = float(prof.max())
-        if peak > 0.02:
-            self._agc = peak if self._agc is None else 0.96 * self._agc + 0.04 * peak
-        agc = max(0.12, self._agc or 0.12)
-        row = (np.clip(prof / agc, 0.0, 1.0) ** 0.75 * 255).astype(np.uint8)
-        if self._buf is None or self._buf.shape[1] != row.size:
-            self._buf = np.zeros((self.ROWS, row.size), dtype=np.uint8)
-        self._buf = np.roll(self._buf, 1, axis=0)
-        self._buf[0] = row
+    def push_frame(self, frame: RadarFrame, tracks: list[Target] | None = None) -> None:
+        """记录本帧航迹的距离快照，供距离-时间折线绘制。"""
+        src = tracks if tracks is not None else frame.targets
+        row: dict[int, float] = {}
+        for idx, t in enumerate(src):
+            tid = t.tid if t.tid >= 0 else -(idx + 1)
+            row[tid] = float(t.rng)
+        self._history.appendleft(row)
         self.update()
+
+    def track_series(self) -> dict[int, list[tuple[int, float]]]:
+        """返回每条航迹在滚动窗口内的 (行龄, 距离m) 序列，供绘制与单测使用。"""
+        series: dict[int, list[tuple[int, float]]] = {}
+        for age, row in enumerate(self._history):
+            for tid, rng in row.items():
+                series.setdefault(tid, []).append((age, rng))
+        return series
 
     def paintEvent(self, _ev) -> None:
         pal = PALETTES[self._palette_name]
         p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
         p.fillRect(self.rect(), QColor(*pal["bg"]))
         p.setFont(QFont("Consolas", 8))
         p.setPen(QPen(QColor(*pal["text"])))
-        p.drawText(QPointF(8, 12), "瀑布图 / RANGE-TIME")
+        p.drawText(QPointF(8, 12), "瀑布图 / TRACK RANGE-TIME")
 
         rc = self.rect().adjusted(34, 16, -10, -18)
-        if self._buf is None or rc.width() < 10 or rc.height() < 10:
+        if rc.width() < 10 or rc.height() < 10:
             p.end()
             return
 
-        buf = np.ascontiguousarray(self._buf)
-        img = QImage(buf.data, buf.shape[1], buf.shape[0], buf.shape[1], QImage.Format_Indexed8)
-        img.setColorTable(self._ctable)
-        p.drawImage(QRectF(rc), img)
-
-        p.setPen(QPen(QColor(*pal["grid"]), 1))
-        p.drawRect(rc)
+        # 竖向距离网格
         step = nice_step(self._range_max, 6)
         r = step
         txt = QColor(*pal["text"])
         while r < self._range_max:
             x = rc.left() + rc.width() * r / self._range_max
             p.setPen(QPen(QColor(*pal["grid_dim"]), 1))
-            p.drawLine(QPointF(x, rc.bottom()), QPointF(x, rc.bottom() + 3))
+            p.drawLine(QPointF(x, rc.top()), QPointF(x, rc.bottom() + 3))
             p.setPen(QPen(txt))
             p.drawText(QPointF(x - 10, rc.bottom() + 13), fmt_range(r, self._range_max))
             r += step
+
+        p.setPen(QPen(QColor(*pal["grid"]), 1))
+        p.drawRect(rc)
+
+        series = self.track_series()
+        if not series:
+            p.setPen(QPen(QColor(*pal["text"])))
+            p.drawText(rc.center() - QPointF(28, 0), "等待航迹…")
+            p.end()
+            return
+
+        row_h = rc.height() / max(1, self.ROWS - 1)
+        p.save()
+        p.setClipRect(rc)
+        for tid, pts in series.items():
+            color = QColor(_TRACK_COLORS[abs(tid) % len(_TRACK_COLORS)])
+            p.setPen(QPen(color, 1.8))
+            path = QPainterPath()
+            prev_age: int | None = None
+            for age, rng in pts:
+                x = rc.left() + rc.width() * max(0.0, min(1.0, rng / self._range_max))
+                y = rc.top() + age * row_h
+                if prev_age is None or age - prev_age > 3:
+                    path.moveTo(x, y)
+                else:
+                    path.lineTo(x, y)
+                prev_age = age
+            p.drawPath(path)
+
+            # 在最新位置标出航迹号
+            newest_age, newest_rng = pts[0]
+            if newest_age <= 2:
+                nx = rc.left() + rc.width() * max(0.0, min(1.0, newest_rng / self._range_max))
+                ny = rc.top() + newest_age * row_h
+                p.setBrush(color)
+                p.drawEllipse(QPointF(nx, ny), 3.0, 3.0)
+                if tid >= 0:
+                    p.drawText(QPointF(min(rc.right() - 22, nx + 5), max(rc.top() + 10, ny + 4)),
+                               f"T{tid}")
+        p.restore()
         p.end()

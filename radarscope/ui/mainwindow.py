@@ -350,8 +350,17 @@ class MainWindow(ConnectionController, ExportController,
         self.chk_reconnect.setCheckable(True)
         self.chk_reconnect.setChecked(True)
 
-        # 收敛工具栏：常用的留在外面，其余收进「更多设置」。
-        # 之前三行二十多个控件铺开，一眼找不到重点 —— 工具应该按使用频率分层。
+        self.theme_combo = QComboBox()
+        for key, th in THEMES.items():
+            self.theme_combo.addItem(th["name"], key)
+        ti = self.theme_combo.findData(self._theme)
+        if ti >= 0:
+            self.theme_combo.setCurrentIndex(ti)
+        self.theme_combo.currentIndexChanged.connect(
+            lambda _i: self._apply_theme(self.theme_combo.currentData())
+        )
+
+        # 收敛工具栏：常用的留在外面，其余收进「设置」弹窗。
         panel = QWidget()
         form = QFormLayout(panel)
         form.setContentsMargins(14, 12, 14, 12)
@@ -359,7 +368,8 @@ class MainWindow(ConnectionController, ExportController,
         form.addRow("采集模式", self.mode_combo)
         form.addRow("检测门限", self.thr_spin)
         form.addRow("显示增益", self.gain_spin)
-        form.addRow("配色方案", self.pal_combo)
+        form.addRow("界面主题", self.theme_combo)
+        form.addRow("雷达配色", self.pal_combo)
         form.addRow("航向", self.heading_spin)
         form.addRow("航速", self.speed_spin)
         opts = QWidget()
@@ -376,7 +386,7 @@ class MainWindow(ConnectionController, ExportController,
         # 直接改成独立对话框，稳定、能点、还能记住位置。
         self._settings_dlg = QDialog(self)
         self._settings_dlg.setWindowTitle("设置")
-        self._settings_dlg.resize(430, 400)
+        self._settings_dlg.resize(440, 420)
         _lay = QVBoxLayout(self._settings_dlg)
         _lay.setContentsMargins(16, 14, 16, 12)
         _lay.setSpacing(10)
@@ -386,12 +396,7 @@ class MainWindow(ConnectionController, ExportController,
         _bb.rejected.connect(self._settings_dlg.reject)
         _lay.addWidget(_bb)
 
-        self.btn_settings = QPushButton("设置")
-        self.btn_settings.setToolTip("采集模式 / 门限 / 增益 / 配色 / 航向 / 航速 / 录制帧 / 自动重连")
-        self.btn_settings.clicked.connect(self._open_settings)
-        tb.addWidget(self.btn_settings)
-
-        # 菜单
+        # 菜单：文件 / 工具 / 视图 / 设置 / 帮助（同一类系统级入口放同一排）
         m_file = self.menuBar().addMenu("文件(&F)")
         m_file.addAction("导出事件日志…", self._export_log)
         m_file.addAction("导出当前画面…", self._export_screenshot)
@@ -406,10 +411,6 @@ class MainWindow(ConnectionController, ExportController,
         m_tool.addAction("设备控制…", self._open_control)
         m_tool.addAction("AIS 接入…", self._open_ais)
         m_tool.addAction("插件管理…", self._open_plugins)
-        m_help = self.menuBar().addMenu("帮助(&H)")
-        m_help.addAction("操作说明", self._show_help)
-        m_help.addAction("快捷键", self._show_shortcuts)
-        m_help.addAction("运行自检…", self._run_selftest)
 
         # 视图：面板显隐。用户不该被固定布局绑死——投屏要大字、
         # 调试要全信息，两种场景需要不同的界面。
@@ -441,6 +442,7 @@ class MainWindow(ConnectionController, ExportController,
         m_theme = m_view.addMenu("主题")
         grp = QActionGroup(self)
         grp.setExclusive(True)
+        self._theme_actions: dict[str, QAction] = {}
         for key, th in THEMES.items():
             a = QAction(th["name"], self)
             a.setCheckable(True)
@@ -448,6 +450,7 @@ class MainWindow(ConnectionController, ExportController,
             a.triggered.connect(lambda _c, k=key: self._apply_theme(k))
             grp.addAction(a)
             m_theme.addAction(a)
+            self._theme_actions[key] = a
 
         act_map = QAction("联网地图底图", self)
         act_map.setCheckable(True)
@@ -459,6 +462,12 @@ class MainWindow(ConnectionController, ExportController,
         act_ais.toggled.connect(lambda on: (setattr(self.ppi, "show_ais", on),
                                             self.ppi.update()))
         m_view.addAction(act_ais)
+
+        self.menuBar().addAction("设置(&S)", self._open_settings)
+        m_help = self.menuBar().addMenu("帮助(&H)")
+        m_help.addAction("操作说明", self._show_help)
+        m_help.addAction("快捷键", self._show_shortcuts)
+        m_help.addAction("运行自检…", self._run_selftest)
 
         # 快捷键：高频动作不该去点按钮
         QShortcut(QKeySequence("Space"), self, self._toggle_pause)
@@ -685,7 +694,7 @@ class MainWindow(ConnectionController, ExportController,
         if self.dock_near.isVisible():
             self.ppi2.push_frame(f, all_tracks)
         self.ascope.push_frame(f)
-        self.waterfall.push_frame(f)
+        self.waterfall.push_frame(f, all_tracks)
         if self.caps.has_range_doppler:
             self.rdscope.push_frame(f)
 
@@ -846,6 +855,14 @@ class MainWindow(ConnectionController, ExportController,
     def _apply_theme(self, mode: str) -> None:
         """切换浅色/深色。样式表、标题栏、雷达色板一起换。"""
         self._theme = mode if mode in THEMES else DEFAULT_THEME
+        if hasattr(self, "theme_combo"):
+            self.theme_combo.blockSignals(True)
+            ti = self.theme_combo.findData(self._theme)
+            if ti >= 0:
+                self.theme_combo.setCurrentIndex(ti)
+            self.theme_combo.blockSignals(False)
+        if hasattr(self, "_theme_actions") and self._theme in self._theme_actions:
+            self._theme_actions[self._theme].setChecked(True)
         app = QApplication.instance()
         if app is not None:
             app.setStyleSheet(build_stylesheet(self._theme, self._font_scale))
