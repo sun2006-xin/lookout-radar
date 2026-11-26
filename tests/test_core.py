@@ -1082,7 +1082,7 @@ def test_map_geolocate_and_provider() -> None:
     from http.server import BaseHTTPRequestHandler, HTTPServer
     from radarscope.core.maptiles import geolocate_ip, resolve_provider
 
-    assert resolve_provider("auto", "light") == "carto_light"
+    assert resolve_provider("auto", "light") == "arcgis_street"
     assert resolve_provider("auto", "dark") == "carto_dark"
     assert resolve_provider("osm", "light") == "osm"
 
@@ -1128,6 +1128,10 @@ def test_statusbar_and_map_dialog() -> None:
     lat, lon, prov, on = dlg.values()
     assert abs(lat - 30.5) < 1e-6 and abs(lon - 114.3) < 1e-6
     assert prov == "osm" and on is True
+    assert dlg.auto_fit_range() is True
+    assert hasattr(w, "_m_scene") and hasattr(w, "btn_scene")
+    # 第二行工具栏按钮紧随量程排列：btn_lock 与 range_spin 之间不应存在较大空白拉伸间距
+    assert abs(w.btn_scene.x() - (w.range_spin.x() + w.range_spin.width())) < 80 or not w.isVisible()
     w.close()
     ok("状态栏防挤压约束与联网地图定位设置对话框")
 

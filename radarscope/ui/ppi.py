@@ -977,33 +977,40 @@ class PPIWidget(QWidget):
         北向模式下净旋转是 0（正北朝上）。漏掉这一步地图就会和回波错开。
         """
         m = self.map_layer
-        if m is None or not getattr(m, "enabled", True) or getattr(m, "image", None) is None:
+        if m is None or not getattr(m, "enabled", True):
             return
-        img = m.image
-        mpp = float(getattr(m, "mpp", 0.0))
-        if mpp <= 0:
-            return
+        img = getattr(m, "image", None)
         rmax = max(1e-6, self._caps.range_max)
-        scale = R / rmax                        # 屏幕像素 / 米
-        w = img.width() * mpp * scale
-        h = img.height() * mpp * scale
-        ax, ay = getattr(m, "anchor_px", (img.width() / 2, img.height() / 2))
+        if img is not None:
+            mpp = float(getattr(m, "mpp", 0.0))
+            if mpp > 0:
+                scale = R / rmax                        # 屏幕像素 / 米
+                w = img.width() * mpp * scale
+                h = img.height() * mpp * scale
+                ax, ay = getattr(m, "anchor_px", (img.width() / 2, img.height() / 2))
 
-        p.save()
-        p.translate(cx, cy)
-        p.rotate(-self._heading_deg)
-        p.translate(-cx, -cy)
-        p.setOpacity(0.9)
-        p.drawImage(QRectF(cx - ax * mpp * scale, cy - ay * mpp * scale, w, h), img)
-        p.setOpacity(1.0)
-        p.restore()
+                p.save()
+                p.translate(cx, cy)
+                p.rotate(-self._heading_deg)
+                p.translate(-cx, -cy)
+                p.setOpacity(0.9)
+                p.drawImage(QRectF(cx - ax * mpp * scale, cy - ay * mpp * scale, w, h), img)
+                p.setOpacity(1.0)
+                p.restore()
 
-        # 图源归属：用别人的瓦片必须标注，这不是可选项
+        # 图源归属与在线/量程状态提示，避免离线或超近距时用户误以为没有响应
         attr = getattr(m, "attribution", "")
-        if attr:
+        st = getattr(m, "status", "")
+        if rmax < 80.0:
+            note = f"地图已开启（{st or '已就绪'}）· 当前 {rmax:.0f}m 量程仅覆盖房屋大小，调到 ≥200m 可看清街道岸线"
+        elif img is None:
+            note = st or "正在拉取联网地图瓦片…"
+        else:
+            note = attr
+        if note:
             p.setFont(QFont("Consolas", 7))
-            p.setPen(QPen(QColor(150, 160, 170, 190)))
-            p.drawText(QPointF(cx - R * 0.70, cy + R * 0.99), attr)
+            p.setPen(QPen(QColor(*pal["muted"]) if "muted" in pal else QColor(140, 150, 165, 200)))
+            p.drawText(QPointF(cx - R * 0.72, cy + R * 0.99), note)
 
     def _draw_probe(self, p: QPainter, pal) -> None:
         """点击测距的十字与读数，就地画，不弹窗。

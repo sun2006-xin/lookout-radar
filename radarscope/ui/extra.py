@@ -182,12 +182,14 @@ class MapLocationDialog(QDialog):
 
         self.chk_enable = QCheckBox("确定后立即开启并刷新联网地图底图")
         self.chk_enable.setChecked(bool(map_enabled))
+        self.chk_fit_range = QCheckBox("开启地图且当前量程 < 100 m 时，自动切到 500 m 以便看清街道与岸线")
+        self.chk_fit_range.setChecked(True)
 
         tip = QLabel(
             "说明：\n"
-            "1. 联网地图以此处经纬度为中心下载公开 OSM/CARTO 栅格瓦片并缓存到磁盘；\n"
-            "2. 街道/岸线瓦片仅在 ≥30 m 室外或海图量程下具备细节（室内 6~15 m 量程下地图会自动保持透明）；\n"
-            "3. 自动获取通过公网 IP 定位，精度通常在城市/区级（误差约 1~10 km），室外实测建议手动填写精确坐标。"
+            "1. 联网地图以此处经纬度为中心下载开源栅格瓦片（默认 ArcGIS 世界街道，国内访问稳定）；\n"
+            "2. 6~15 m 室内量程在地球上仅占半间屋子，切到 ≥200 m（如 500 m / 2 km）才能看清道路与水系；\n"
+            "3. 自动获取通过公网 IP 定位，精度通常在城市/区级，高精度场景可手动填写精确经纬度。"
         )
         tip.setWordWrap(True)
         tip.setStyleSheet("color:#6B7280;font-size:12px;")
@@ -200,6 +202,7 @@ class MapLocationDialog(QDialog):
         lay.addLayout(form)
         lay.addLayout(geo_row)
         lay.addWidget(self.chk_enable)
+        lay.addWidget(self.chk_fit_range)
         lay.addWidget(tip, 1)
         lay.addWidget(self.buttons)
 
@@ -242,6 +245,9 @@ class MapLocationDialog(QDialog):
         if self._worker is not None and self._worker.isRunning():
             self._worker.wait(500)
         super().closeEvent(ev)
+
+    def auto_fit_range(self) -> bool:
+        return self.chk_fit_range.isChecked()
 
     def values(self) -> tuple[float, float, str, bool]:
         try:

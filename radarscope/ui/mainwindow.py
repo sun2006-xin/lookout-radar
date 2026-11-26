@@ -299,10 +299,12 @@ class MainWindow(ConnectionController, ExportController,
         self.heading_spin.setToolTip("平台航向（0=正北，顺时针）。接罗盘/IMU 后可由插件自动更新")
         self.heading_spin.valueChanged.connect(self._on_orientation_changed)
 
-        spacer = QWidget()
-        spacer.setStyleSheet("background: transparent;")
-        spacer.setSizePolicy(spacer.sizePolicy().Expanding, spacer.sizePolicy().Preferred)
-        tb.addWidget(spacer)
+        # 所有操作按钮紧随「量程」靠左紧凑排列，避免中间留白导致视线跨度过大
+        self.btn_scene = QPushButton("场景/电子战")
+        self.btn_scene.setCheckable(True)
+        self.btn_scene.setToolTip("快速打开模拟电子站 / 军方电子战干扰 / 航海与车载预设场景控制台")
+        self.btn_scene.clicked.connect(self._open_sim_station)
+        tb.addWidget(self.btn_scene)
 
         self.btn_lock = QPushButton("点目标锁定")
         self.btn_lock.setCheckable(True)
@@ -443,7 +445,7 @@ class MainWindow(ConnectionController, ExportController,
         _bb.rejected.connect(self._settings_dlg.reject)
         _lay.addWidget(_bb)
 
-        # 菜单：文件 / 工具 / 视图 / 设置 / 帮助（同一类系统级入口放同一排）
+        # 菜单按职责分区：文件 / 场景(仿真与电子战) / 视图 / 工具(硬件校准与扩展) / 设置 / 帮助
         m_file = self.menuBar().addMenu("文件(&F)")
         self._m_file = m_file
         m_file.addAction("导出事件日志…", self._export_log)
@@ -451,13 +453,55 @@ class MainWindow(ConnectionController, ExportController,
         m_file.addAction("打开数据目录", self._open_data_dir)
         m_file.addSeparator()
         m_file.addAction("退出", self.close)
+
+        m_scene = self.menuBar().addMenu("场景(&N)")
+        self._m_scene = m_scene
+        sc_grp = QActionGroup(self)
+        sc_grp.setExclusive(True)
+        self._scene_actions: dict[str, QAction] = {}
+        for key, title, rng_hint in (
+            ("none", "关闭预设场景（正常雷达显示）", 0.0),
+            ("marine", "航海轮船避碰场景（2 km · 商船/货轮会遇）", 2000.0),
+            ("automotive", "车载 77G 多车道交通流场景（80 m）", 80.0),
+            ("drone", "低空无人机 / 安防突防场景（150 m）", 150.0),
+            ("patrol", "随机出现与巡逻（动态生成/离开）", 0.0),
+            ("approach", "高速逼近 / 防撞告警演练", 0.0),
+            ("crossing", "多目标交叉会遇（航迹关联测试）", 0.0),
+        ):
+            act = QAction(title, self)
+            act.setCheckable(True)
+            act.setChecked(key == "none")
+            act.triggered.connect(lambda _c=False, k=key, r=rng_hint: self._apply_scenario(k, r))
+            sc_grp.addAction(act)
+            m_scene.addAction(act)
+            self._scene_actions[key] = act
+        m_scene.addSeparator()
+        m_ew = m_scene.addMenu("军方 / 教学电子战干扰样式")
+        ew_grp = QActionGroup(self)
+        ew_grp.setExclusive(True)
+        self._ew_actions: dict[str, QAction] = {}
+        for key, title in (
+            ("none", "关闭干扰（正常信号）"),
+            ("barrage", "宽带噪声压制（演练烧穿距离）"),
+            ("spot", "瞄准扇区压制（指定方位干扰）"),
+            ("drfm", "DRFM 多假目标欺骗"),
+            ("rgpo", "RGPO 距离波门拖引"),
+        ):
+            act = QAction(title, self)
+            act.setCheckable(True)
+            act.setChecked(key == "none")
+            act.triggered.connect(lambda _c=False, k=key: self._set_jam_mode(k))
+            ew_grp.addAction(act)
+            m_ew.addAction(act)
+            self._ew_actions[key] = act
+        m_scene.addAction("场景与电子战配置控制台…", self._open_sim_station)
+
         m_tool = self.menuBar().addMenu("工具(&T)")
         self._m_tool = m_tool
         m_tool.addAction("朝向标定…", self._open_calibration)
         m_tool.addAction("统计分析…", self._open_stats)
-        m_tool.addAction("设备控制…", self._open_control)
+        m_tool.addAction("设备下行控制 (STC/FTC)…", self._open_control)
         m_tool.addAction("AIS 接入…", self._open_ais)
-        m_tool.addAction("模拟电子站（目标注入）…", self._open_sim_station)
         m_tool.addAction("通用协议雷达适配向导…", self._open_proto_wizard)
         m_tool.addAction("插件管理…", self._open_plugins)
 
@@ -502,7 +546,6 @@ class MainWindow(ConnectionController, ExportController,
         act_map.toggled.connect(self._toggle_map)
         m_view.addAction(act_map)
         self.act_map = act_map
-        m_view.addAction("联网地图与定位设置…", self._open_map_settings)
         ais_on = self.settings.value("show_ais", True, type=bool)
         act_ais = QAction("显示 AIS 目标", self)
         act_ais.setCheckable(True)
@@ -1081,17 +1124,60 @@ class MainWindow(ConnectionController, ExportController,
         self.settings.setValue("ais_lat", lat)
         self.settings.setValue("ais_lon", lon)
         self.settings.setValue("map_provider", prov)
+        if want_on and dlg.auto_fit_range() and float(self.range_spin.value()) < 100.0:
+            self.range_spin.setValue(500.0)
         if self.map_layer is not None:
             self.map_layer._key = None
         self._toggle_map(want_on)
         if not want_on:
             self.log.push("ok", f"已保存地图与定位中心：{lat:.5f}, {lon:.5f}")
 
+    def _sync_scene_ui(self) -> None:
+        sc = self.sim_station.scenario
+        jm = self.sim_station.jam_mode
+        act_s = getattr(self, "_scene_actions", {}).get(sc)
+        if act_s is not None:
+            act_s.setChecked(True)
+        act_j = getattr(self, "_ew_actions", {}).get(jm)
+        if act_j is not None:
+            act_j.setChecked(True)
+        if hasattr(self, "btn_scene"):
+            on = self.sim_station.active()
+            self.btn_scene.blockSignals(True)
+            self.btn_scene.setChecked(on)
+            self.btn_scene.blockSignals(False)
+            if jm != "none":
+                self.btn_scene.setText(f"干扰:{jm.upper()}")
+            elif sc != "none":
+                self.btn_scene.setText(f"场景:{sc}")
+            elif self.sim_station.objects:
+                self.btn_scene.setText(f"目标:{len(self.sim_station.objects)}")
+            else:
+                self.btn_scene.setText("场景/电子战")
+
+    def _apply_scenario(self, key: str, suggested_range: float = 0.0) -> None:
+        if suggested_range > 0.0 and abs(float(self.range_spin.value()) - suggested_range) > 1.0:
+            self.range_spin.setValue(suggested_range)
+        self.sim_station.set_scenario(key, float(self.range_spin.value()))
+        self._sync_scene_ui()
+        if key == "none":
+            self.log.push("info", "已关闭预设演练场景")
+        else:
+            self.log.push("ok", f"已开启场景「{key}」，当前目标 {len(self.sim_station.objects)} 个（若未连接请先点「连接」）")
+
+    def _set_jam_mode(self, mode: str) -> None:
+        self.sim_station.jam_mode = mode
+        self.sim_station._jam_t = 0.0
+        self._sync_scene_ui()
+        self.log.push("info" if mode == "none" else "warn",
+                      f"电子战干扰样式已切换：{mode}")
+
     def _open_sim_station(self) -> None:
         from .simdialog import SimStationDialog
 
         dlg = SimStationDialog(self.sim_station, float(self.range_spin.value()), self)
         dlg.exec_()
+        self._sync_scene_ui()
         if self.sim_station.active():
             self.log.push("ok", f"模拟电子站：活跃目标 {len(self.sim_station.objects)} 个 · 干扰 {self.sim_station.jam_mode}")
 

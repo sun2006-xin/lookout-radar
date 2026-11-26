@@ -24,8 +24,13 @@ EARTH_C = 156543.03392          # 赤道处 z=0 的米/像素
 
 #: 联网瓦片图源。换成别的图源只要改这几个模板。
 PROVIDERS = {
+    "arcgis_street": {
+        "label": "ArcGIS 世界街道图（推荐白昼 · 国内稳定高清）",
+        "url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+        "attribution": "地图 © Esri · World Street Map",
+    },
     "carto_light": {
-        "label": "CARTO 浅色街道（适合白昼）",
+        "label": "CARTO 浅色街道（极简底图）",
         "url": "https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
         "attribution": "地图 © OpenStreetMap 贡献者 · © CARTO",
     },
@@ -40,22 +45,23 @@ PROVIDERS = {
         "attribution": "地图 © OpenStreetMap 贡献者",
     },
 }
-DEFAULT_PROVIDER = "carto_dark"
+DEFAULT_PROVIDER = "arcgis_street"
 
 
 def resolve_provider(choice: str, theme: str = "light") -> str:
     """将用户图源选择（含 auto 自动跟随主题）解析为真实图源键名。"""
     if choice in PROVIDERS:
         return choice
-    return "carto_light" if theme == "light" else "carto_dark"
+    return "arcgis_street" if theme == "light" else "carto_dark"
 
 
 def geolocate_ip(timeout: float = 4.0,
                  urls: tuple[str, ...] | None = None) -> tuple[float, float, str]:
     """通过公网 IP 接口粗略获取当前经纬度（仅适合城市/区级参考）。"""
     endpoints = urls or (
-        "https://ipwho.is/",
+        "http://ip-api.com/json/?lang=zh-CN",
         "https://ipapi.co/json/",
+        "https://ipwho.is/",
     )
     last_err = ""
     for url in endpoints:
@@ -67,7 +73,7 @@ def geolocate_ip(timeout: float = 4.0,
             with urllib.request.urlopen(req, timeout=float(timeout)) as resp:
                 raw = resp.read().decode("utf-8", errors="replace")
             data = json.loads(raw)
-            if data.get("success") is False:
+            if data.get("success") is False or data.get("status") == "fail":
                 raise ValueError(str(data.get("message") or "接口返回失败"))
             lat = float(data["latitude"] if "latitude" in data else data["lat"])
             lon = float(data["longitude"] if "longitude" in data else data["lon"])

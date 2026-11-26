@@ -109,8 +109,10 @@ class MapLayer(QObject):
         self.mpp = meters_per_pixel(lat, z)
         xc, yc = lonlat_to_tile(lat, lon, z)
         self.anchor_px = ((xc - x0) * TILE_PX, (yc - y0) * TILE_PX)
-        self.status = (f"z{z} · {self.store.describe()}"
-                       + (f" · 待补 {len(missing)}" if missing else ""))
+        total = max(0, cols * rows)
+        err = f"（失败: {self.store.last_error}）" if (loaded == 0 and self.store.last_error) else ""
+        self.status = (f"z{z} · {self.store.provider} · 瓦片 {loaded}/{total}"
+                       + (f" · 下载中 {len(missing)}" if missing else "") + err)
         self.ready.emit()
 
         if missing:
