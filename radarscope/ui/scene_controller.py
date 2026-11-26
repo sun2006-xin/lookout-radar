@@ -9,7 +9,7 @@
 """
 from __future__ import annotations
 
-from PyQt5.QtWidgets import QDialog, QMessageBox
+from PyQt5.QtWidgets import QDialog, QMessageBox, QWidget
 
 from .. import paths
 from ..core.maptiles import resolve_provider
@@ -20,6 +20,60 @@ from .maplayer import MapLayer
 
 class SceneAndMapController:
     """场景 / 电子战 / 海图 / 定位控制器 mixin，运行时依附于 MainWindow 实例。"""
+
+    def _sync_dock_chrome(self) -> None:
+        """只有常规波形台时隐藏多余的 Dock 标题栏；展开特定场景面板时恢复标签切换。"""
+        dock_scope = getattr(self, "dock_scope", None)
+        dock_ew = getattr(self, "dock_ew", None)
+        dock_zones = getattr(self, "dock_zones", None)
+        if dock_scope is None:
+            return
+        extra_visible = bool(
+            (dock_ew is not None and not dock_ew.isHidden())
+            or (dock_zones is not None and not dock_zones.isHidden())
+        )
+        if extra_visible:
+            if dock_scope.titleBarWidget() is not None:
+                dock_scope.setTitleBarWidget(None)
+        else:
+            empty = getattr(self, "_empty_dock_title", None)
+            if empty is None:
+                empty = QWidget(self)
+                empty.setFixedHeight(0)
+                self._empty_dock_title = empty
+            dock_scope.setTitleBarWidget(empty)
+
+    def _update_scene_banner(self, banner_text: str = "") -> None:
+        banner = getattr(self, "scene_banner", None)
+        lbl = getattr(self, "lbl_scene_banner", None)
+        if banner is None or lbl is None:
+            return
+        sc = self.sim_station.scenario
+        jm = self.sim_station.jam_mode
+        if not banner_text:
+            if jm != "none":
+                banner_text = f"电子战对抗演练 ({jm.upper()}) · 已展开电子战控制台 · 可对比 CA / OS / GO-CFAR 与烧穿曲线"
+            elif sc != "none":
+                prof = recommended_profile(sc) or {}
+                banner_text = str(prof.get("banner") or f"当前场景：{sc}")
+        show = bool(banner_text) and (sc != "none" or jm != "none")
+        lbl.setText(banner_text if show else "")
+        banner.setVisible(show)
+
+    def _exit_scenario_to_classic(self) -> None:
+        """一键退出专项场景/电子战，还原为日常纯净雷达显控界面。"""
+        if self.sim_station.jam_mode != "none":
+            self._set_jam_mode("none")
+        if self.sim_station.scenario != "none" or self.sim_station.objects:
+            self._apply_scenario("none")
+        else:
+            if hasattr(self, "dock_ew"):
+                self.dock_ew.hide()
+            if hasattr(self, "dock_zones"):
+                self.dock_zones.hide()
+            self._sync_dock_chrome()
+            self._update_scene_banner("")
+            self._sync_scene_ui()
 
     def _ensure_sim_running(self, reason: str = "") -> bool:
         """若当前未连接且位于模拟源（或用户触发仿真场景），自动连接以消除「点了没画面」断层。"""
@@ -55,7 +109,9 @@ class SceneAndMapController:
             elif self.sim_station.objects:
                 self.btn_scene.setText(f"目标:{len(self.sim_station.objects)}")
             else:
-                self.btn_scene.setText("场景/电子战")
+                from ..core.i18n import tr
+                self.btn_scene.setText(tr("场景"))
+        self._update_scene_banner()
         ew_w = getattr(self, "ew_widget", None)
         if ew_w is not None:
             ew_w.sync_from_station(float(self.range_spin.value()))
@@ -101,12 +157,20 @@ class SceneAndMapController:
     def _apply_scenario(self, key: str, suggested_range: float = 0.0) -> None:
         prof = recommended_profile(key)
         started = self._ensure_sim_running(key) if key != "none" else False
+
+        # 若该场景指定了雷达工作形态（如无人机→3D俯仰、车载→前向凝视、航海→旋转扫描），先联动切换
+        want_mode = prof.get("sim_mode") if prof else None
+        if want_mode and str(self.mode_combo.currentData()) != want_mode:
+            self._set_sim_mode(str(want_mode))
+        elif key == "none" and self.sim_station.jam_mode == "none" and str(self.mode_combo.currentData()) == "rhi_3d":
+            self._set_sim_mode("rotating")
+
         rng_hint = float(suggested_range or (prof["range_m"] if prof else 0.0))
         if rng_hint > 0.0 and abs(float(self.range_spin.value()) - rng_hint) > 1.0:
             self.range_spin.setValue(rng_hint)
         self.sim_station.set_scenario(key, float(self.range_spin.value()))
 
-        # 场景预设 <-> 检测算法 / 杂波抑制 / 跟踪滤波参数自动协同联动
+        # 场景预设 <-> 检测算法 / 杂波抑制 / 跟踪滤波 / 专用面板 自动协同切换
         if prof is not None:
             cfar_val = prof.get("cfar_mode")
             if cfar_val and hasattr(self, "cfar_combo"):
@@ -120,22 +184,57 @@ class SceneAndMapController:
             want_clut = bool(prof.get("clutter_enabled", False))
             if hasattr(self, "btn_clutter") and self.clutter_map.enabled != want_clut:
                 self.btn_clutter.setChecked(want_clut)
-            self.tracker.configure(
-                gate_m=prof.get("gate_m"),
-                filter_mode=prof.get("filter_mode"),
-                confirm_hits=prof.get("confirm_hits"),
-                confirm_window=prof.get("confirm_window"),
-            )
+            if prof.get("gate_m") or prof.get("filter_mode"):
+                self.tracker.configure(
+                    gate_m=prof.get("gate_m"),
+                    filter_mode=prof.get("filter_mode"),
+                    confirm_hits=prof.get("confirm_hits"),
+                    confirm_window=prof.get("confirm_window"),
+                )
+            elif key == "none":
+                self.tracker.configure(gate_m=1.5, filter_mode="kalman3d", confirm_hits=1, confirm_window=1)
             zp = getattr(self, "zones_panel", None)
             if zp is not None:
                 zp.sync_tracker(
                     self.tracker.filter_mode, self.tracker.assoc_mode,
                     self.tracker.confirm_hits, self.tracker.confirm_window,
                 )
+            if "show_cov" in prof and hasattr(self, "_set_ppi_flag"):
+                self._set_ppi_flag("show_cov", bool(prof["show_cov"]))
+            if "show_zones" in prof and prof["show_zones"] is not None and hasattr(self, "_set_ppi_flag"):
+                self._set_ppi_flag("show_zones", bool(prof["show_zones"]))
+            if "enable_map" in prof and (prof["enable_map"] or key == "none"):
+                cur_map = bool(self.map_layer is not None and self.map_layer.enabled)
+                if cur_map != bool(prof["enable_map"]):
+                    self._toggle_map(bool(prof["enable_map"]))
+            if "land_mask" in prof:
+                self._toggle_land_mask(bool(prof["land_mask"]))
+
+            # 按场景需要显隐专用停靠面板：常态 "none" 隐藏 dock_ew / dock_zones，还原纯净雷达页面
+            want_docks = set(prof.get("docks") or ())
+            if self.sim_station.jam_mode != "none":
+                want_docks.add("ew")
+            if hasattr(self, "dock_ew"):
+                if "ew" in want_docks:
+                    self.dock_ew.show()
+                    self.dock_ew.raise_()
+                else:
+                    self.dock_ew.hide()
+            if hasattr(self, "dock_zones"):
+                if "zones" in want_docks:
+                    self.dock_zones.show()
+                    if "ew" not in want_docks:
+                        self.dock_zones.raise_()
+                else:
+                    self.dock_zones.hide()
+            if not want_docks and hasattr(self, "dock_scope"):
+                self.dock_scope.show()
+                self.dock_scope.raise_()
+            self._sync_dock_chrome()
 
         self._sync_scene_ui()
         if key == "none":
-            self.log.push("info", "已关闭预设演练场景")
+            self.log.push("info", "已退出预设场景，恢复日常雷达监控界面")
         else:
             suffix = "" if started or self.reader is not None else "（请先切换模拟源或点击「连接」）"
             extra = (f" · 联动 CFAR={self._cfar_mode.upper()}, 滤波={self.tracker.filter_mode}, "
@@ -177,6 +276,16 @@ class SceneAndMapController:
     def _set_jam_mode(self, mode: str) -> None:
         self.sim_station.jam_mode = mode
         self.sim_station._jam_t = 0.0
+        if hasattr(self, "dock_ew"):
+            if mode != "none":
+                self.dock_ew.show()
+                self.dock_ew.raise_()
+            elif self.sim_station.scenario == "none":
+                self.dock_ew.hide()
+                if hasattr(self, "dock_scope"):
+                    self.dock_scope.show()
+                    self.dock_scope.raise_()
+            self._sync_dock_chrome()
         self._sync_scene_ui()
         if mode != "none":
             self._ensure_sim_running(f"干扰:{mode.upper()}")

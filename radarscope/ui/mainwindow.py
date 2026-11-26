@@ -218,15 +218,30 @@ class MainWindow(ConnectionController, ExportController,
         pl.setContentsMargins(6, 6, 6, 6)
         pl.addWidget(self.ppi)
 
+        # 场景上下文提示条：日常常规模式隐藏，仅在激活电子战 / 3D 无人机 / 航海等专用场景时出现，方便一键退回经典界面
+        self.scene_banner = QFrame()
+        self.scene_banner.setObjectName("panelCard")
+        sb_lay = QHBoxLayout(self.scene_banner)
+        sb_lay.setContentsMargins(10, 4, 8, 4)
+        sb_lay.setSpacing(8)
+        self.lbl_scene_banner = QLabel("")
+        self.lbl_scene_banner.setObjectName("hintLabel")
+        self.btn_exit_scene = QPushButton("返回日常雷达")
+        self.btn_exit_scene.clicked.connect(self._exit_scenario_to_classic)
+        sb_lay.addWidget(self.lbl_scene_banner, 1)
+        sb_lay.addWidget(self.btn_exit_scene)
+        self.scene_banner.setVisible(False)
+
         central = QWidget()
         cv = QVBoxLayout(central)
         cv.setContentsMargins(8, 8, 8, 8)
-        cv.setSpacing(8)
+        cv.setSpacing(6)
+        cv.addWidget(self.scene_banner)
         cv.addWidget(self.alarm_bar)
         cv.addWidget(ppi_card, 1)
         self.setCentralWidget(central)
 
-        # 可停靠右侧工作区：波形/航迹台 + 电子战控制台 + 防区与滤波操作台 + 近距窗
+        # 可停靠右侧工作区：默认只显示经典波形与航迹台；电子战与防区操作台按场景按需展开
         self.setDockOptions(QMainWindow.AllowTabbedDocks | QMainWindow.AnimatedDocks)
         self.setTabPosition(Qt.RightDockWidgetArea, QTabWidget.North)
 
@@ -265,8 +280,11 @@ class MainWindow(ConnectionController, ExportController,
 
         self.tabifyDockWidget(self.dock_scope, self.dock_ew)
         self.tabifyDockWidget(self.dock_scope, self.dock_zones)
+        self.dock_ew.hide()
+        self.dock_zones.hide()
         self.dock_scope.show()
         self.dock_scope.raise_()
+        self._sync_dock_chrome()
 
         # 近距小量程窗：大范围看态势，小窗看细节，放在右侧避免垂直挤压主图
         self.ppi2 = PPIWidget()
@@ -389,9 +407,9 @@ class MainWindow(ConnectionController, ExportController,
         self.heading_spin.valueChanged.connect(self._on_orientation_changed)
 
         # 所有操作按钮紧随「量程」靠左紧凑排列，避免中间留白导致视线跨度过大
-        self.btn_scene = QPushButton("场景/电子战")
+        self.btn_scene = QPushButton("场景")
         self.btn_scene.setCheckable(True)
-        self.btn_scene.setToolTip("快速打开模拟电子站 / 军方电子战干扰 / 航海与车载预设场景控制台")
+        self.btn_scene.setToolTip("默认是日常纯净雷达显控；点击可选择预设场景（电子战/航海/车载/低空无人机）并展开对应专用界面")
         self.btn_scene.clicked.connect(self._open_sim_station)
         tb.addWidget(self.btn_scene)
 
@@ -798,6 +816,10 @@ class MainWindow(ConnectionController, ExportController,
         if wstate is not None:
             self.restoreState(wstate)
             self.dock_scope.show()
+        if not self.sim_station.active():
+            self.dock_ew.hide()
+            self.dock_zones.hide()
+            self._sync_dock_chrome()
         # 防止恢复后的窗口高度/宽度超出桌面可用工作区，避免底部状态栏被任务栏挡住或挤压
         scr = QGuiApplication.primaryScreen()
         if scr is not None and not self.isMaximized():
@@ -939,11 +961,14 @@ class MainWindow(ConnectionController, ExportController,
             self.tabs.setCurrentWidget(self.sensors_panel)
             self.dock_zones.show()
             self.dock_zones.raise_()
-        else:  # full
+        else:  # full (日常标准全功能界面：经典双图+列表，隐藏额外场景面板)
             self.ascope.setVisible(True)
             self.waterfall.setVisible(True)
+            self.dock_ew.hide()
+            self.dock_zones.hide()
             self.dock_scope.show()
             self.dock_scope.raise_()
+        self._sync_dock_chrome()
         self.log.push("info", f"已切换工作区布局预设：{preset}")
 
     def _on_range_changed(self, v: float) -> None:
@@ -982,6 +1007,8 @@ class MainWindow(ConnectionController, ExportController,
         ):
             btn.setText(tr(key))
         self.btn_mission.setText(tr("停止任务" if self.btn_mission.isChecked() else "任务录制"))
+        self.btn_exit_scene.setText(tr("返回日常雷达"))
+        self._sync_scene_ui()
         for dock, key in (
             (self.dock_scope, "雷达波形与航迹台"),
             (self.dock_ew, "电子战与场景控制台"),

@@ -1638,6 +1638,12 @@ def test_workspace_docks_canvas_edit_and_i18n() -> None:
     w = MainWindow()
     w.show()
     try:
+        # 0. 默认日常启动：保持纯净经典视图，不显示电子战/防区 Dock 与场景横幅
+        _app.processEvents()
+        assert w.dock_ew.isHidden() and w.dock_zones.isHidden() and w.scene_banner.isHidden(), (
+            "默认日常监控模式应隐藏电子战与场景横幅，还原经典雷达页面"
+        )
+
         # 1. 停靠工作区与一键预设切换
         w._apply_workspace_preset("ew")
         _app.processEvents()
@@ -1647,13 +1653,25 @@ def test_workspace_docks_canvas_edit_and_i18n() -> None:
         assert not w.dock_zones.isHidden(), "多站排障预设应激活防区与滤波 Dock"
         w._apply_workspace_preset("full")
         _app.processEvents()
+        assert w.dock_ew.isHidden() and w.dock_zones.isHidden()
 
-        # 2. 场景预设 <-> 检测参数 / 杂波 / IMM 滤波器协同联动
+        # 2. 场景预设 <-> 扫描模式 / 专用 Dock / 检测参数协同联动，及退出场景还原经典视图
         w._apply_scenario("drone")
         _app.processEvents()
         assert w._cfar_mode == "auto" and w.clutter_map.enabled
         assert w.tracker.filter_mode == "imm3d" and w.tracker.confirm_hits == 3
         assert abs(w.range_spin.value() - 150.0) < 1e-3
+        assert not w.rhiscope.isHidden() and not w.dock_zones.isHidden() and not w.scene_banner.isHidden()
+
+        w._set_jam_mode("isrj")
+        _app.processEvents()
+        assert not w.dock_ew.isHidden()
+
+        w._exit_scenario_to_classic()
+        _app.processEvents()
+        assert w.dock_ew.isHidden() and w.dock_zones.isHidden() and w.scene_banner.isHidden(), (
+            "退出场景后应彻底恢复日常经典雷达显示"
+        )
 
         # 3. PPI 画布直放目标 + 2σ 置信椭圆渲染 + 多边形顶点修改回写
         before_objs = len(w.sim_station.objects)
