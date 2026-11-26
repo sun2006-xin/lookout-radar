@@ -175,7 +175,9 @@ def test_transport_parse() -> None:
     assert parse_spec("ble://AA:BB:CC")["scheme"] == "ble"
     p = parse_spec("file://C:/tmp/x.bin")
     assert "x.bin" in p["target"], p
-    ok("端点解析：串口 / TCP / UDP / BLE / 文件")
+    assert parse_spec("file:///Users/runner/work/a.bin")["target"] == "/Users/runner/work/a.bin"
+    assert parse_spec("file:///D:/work/a.bin")["target"] == "D:/work/a.bin"
+    ok("端点解析：串口 / TCP / UDP / BLE / 文件（含 POSIX 路径）")
 
 
 def test_file_transport() -> None:
@@ -1130,6 +1132,99 @@ def test_statusbar_and_map_dialog() -> None:
     ok("状态栏防挤压约束与联网地图定位设置对话框")
 
 
+def test_ew_jamming_and_clutter_map() -> None:
+    from radarscope.core.pipeline import ClutterMap
+    from radarscope.core.sim_targets import ElectronicStation
+
+    st = ElectronicStation(seed=99)
+    for sc in ("marine", "automotive", "drone"):
+        st.set_scenario(sc, range_max=100.0)
+        assert st.objects, f"场景 {sc} 应生成目标"
+
+    st.set_scenario("patrol", range_max=10.0)
+    st.jam_mode = "drfm"
+    st.jam_jsr = 0.85
+    caps = Capabilities(name="Sim", source="sim", form="sector",
+                        range_min=0.3, range_max=10.0, az_fov=180.0)
+    frame = RadarFrame(
+        timestamp=time.monotonic(),
+        scan=np.zeros((45, 50), dtype=np.float32),
+        az_axis=np.radians(np.linspace(-90.0, 90.0, 45)).astype(np.float32),
+        r_axis=np.linspace(0.3, 10.0, 50, dtype=np.float32),
+        targets=[Target(x=0.0, y=3.0, snr=0.90)],
+    )
+    out = st.merge_into_frame(frame, caps, dt=0.1, threshold=0.25, cfar_mode="ca")
+    assert len(out.targets) >= 2, f"DRFM 欺骗干扰开启后应检出假回波，实际 {len(out.targets)}"
+
+    cm = ClutterMap(alpha=0.5, gain=0.9, warmup=4)
+    cm.enabled = True
+    static_wall = np.zeros((20, 30), dtype=np.float32)
+    static_wall[:, 10] = 0.8
+    for _ in range(5):
+        f = RadarFrame(scan=static_wall.copy())
+        cm.apply(f)
+    assert float(f.scan[:, 10].max()) < 0.2, f"静止杂波学习后应被明显抑制，实际 {f.scan[:, 10].max()}"
+    moving_add = static_wall.copy()
+    moving_add[10, 22] = 0.95
+    f_mov = RadarFrame(scan=moving_add)
+    cm.apply(f_mov)
+    assert float(f_mov.scan[10, 22]) > 0.7, "新增运动目标回波不应被静态杂波图误删"
+    ok("电子对抗教学干扰波形（DRFM/压制）与静态杂波背景抑制")
+
+
+def test_custom_proto_and_nmea_ttm() -> None:
+    from radarscope.core.custom_proto import (
+        CustomProtocolSpec, builtin_presets, load_custom_specs, preview_sample, save_custom_specs,
+    )
+    from radarscope.core.driver import available_drivers
+
+    presets = {s.id: s for s in builtin_presets()}
+    ttm = preview_sample(presets["nmea_ttm"], "$RATTM,01,1.25,045.0,T,12.5,210.0,T,0.3,4.2,N,VESSEL_A,T,,*46")
+    assert len(ttm) == 1 and abs(ttm[0].rng - 1.25 * 1852.0) < 2.0, f"NMEA TTM 换算错误: {ttm}"
+
+    csv_tgts = preview_sample(presets["traffic_csv"], "$TGT,1.8,12.5,-0.5,-1.2,0.88")
+    assert len(csv_tgts) == 1 and abs(csv_tgts[0].x - 1.8) < 1e-4
+
+    bin_tgts = preview_sample(presets["uart_bin_cm"], "AA 55 96 00 C8 01 58 00 0D 0A")
+    assert len(bin_tgts) == 1 and abs(bin_tgts[0].x - 1.50) < 1e-3 and abs(bin_tgts[0].y - 4.56) < 1e-3
+
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "custom.json"
+        s = CustomProtocolSpec(id="test_p", label="Test Proto", mode="csv_xy")
+        save_custom_specs(p, [s])
+        loaded = {x.id: x for x in load_custom_specs(p)}
+        assert "test_p" in loaded and "nmea_ttm" in loaded
+    assert "nmea_ttm" in available_drivers()
+    ok("零代码通用雷达协议适配器（NMEA TTM / CSV / 二进制帧）")
+
+
+def test_protowizard_and_sim_ew_ui() -> None:
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt5.QtWidgets import QApplication
+    from radarscope.ui.mainwindow import MainWindow
+    from radarscope.ui.protodialog import ProtoWizardDialog
+    from radarscope.ui.simdialog import SimStationDialog
+
+    _app = QApplication.instance() or QApplication([])
+    pw = ProtoWizardDialog()
+    pw._test_parse()
+    assert "成功解析" in pw.lbl_preview.text(), pw.lbl_preview.text()
+    pw.close()
+
+    w = MainWindow()
+    assert hasattr(w, "clutter_map") and hasattr(w, "btn_clutter")
+    assert hasattr(w.ppi, "doppler_color")
+    sd = SimStationDialog(w.sim_station, range_max=w.range_spin.value(), parent=w)
+    idx_rgpo = sd.cb_jam.findData("rgpo")
+    assert idx_rgpo >= 0
+    sd.cb_jam.setCurrentIndex(idx_rgpo)
+    assert w.sim_station.jam_mode == "rgpo"
+    sd.close()
+    w.close()
+    ok("通用协议适配向导与模拟电子战界面集成")
+
+
 def main() -> int:
     print("RadarScope 核心测试")
     for fn in (test_codec, test_ld2450_sign, test_pipeline, test_alarm,
@@ -1143,7 +1238,9 @@ def main() -> int:
                test_plugin_verification, test_timeline_queries, test_meta_schema,
                test_polygon_zone, test_report_export, test_i18n_and_version,
                test_ws_bridge, test_electronic_station, test_zone_hit_and_map_toggle,
-               test_map_geolocate_and_provider, test_statusbar_and_map_dialog):
+               test_map_geolocate_and_provider, test_statusbar_and_map_dialog,
+               test_ew_jamming_and_clutter_map, test_custom_proto_and_nmea_ttm,
+               test_protowizard_and_sim_ew_ui):
         fn()
     print(f"\n全部通过：{PASS} 组")
     return 0

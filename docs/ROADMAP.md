@@ -15,18 +15,18 @@
 |---|---|
 | 项目根 | `D:\workbudy\2026-11-25-19-11-27\radarscope`（见 HANDOVER 第 0 节） |
 | 产品名 | 瞭望 Lookout（Python 包名仍是 `radarscope`，**不要改包名**） |
-| 源码 | 约 12 700 行 / 70 个 Python 文件 / 36 组测试 |
+| 源码 | 约 13 200 行 / 73 个 Python 文件 / 39 组测试 |
 | 主窗口 | `ui/mainwindow.py` + `ui/controllers.py`（三个 mixin） |
 | 打包产物 | `dist/Lookout/Lookout.exe`（PyInstaller，带 `assets/app.ico`，Release `v1.1.0`） |
 | 桌面入口 | `桌面\瞭望 Lookout.lnk`（`tools/make_shortcut.py`，WScript.Shell 优先 + MS-SHLLINK 回退） |
 | 仓库 | https://github.com/sun2006-xin/lookout-radar （public, main, MIT） |
 | 主题 | 现代白（默认，色板 daylight）/ 深色（色板 ice） |
-| 已闭环 | [REVIEW.md](REVIEW.md) 20 项、A5 夹具、B1~B3、C1~C4、D1~D6、模拟电子站与联网地图定位设置 |
+| 已闭环 | [REVIEW.md](REVIEW.md) 20 项、A5 夹具、B1~B3、C1~C4、D1~D6、E1~E4（软件适配/EW 教学/杂波抑制/多普勒着色） |
 
 **开工前必须跑**（三条都过才算环境正常）：
 
 ```bat
-.venv\Scripts\python.exe tests\test_core.py     :: 36 组全过
+.venv\Scripts\python.exe tests\test_core.py     :: 39 组全过
 .venv\Scripts\python.exe tools\check.py         :: 编译 + 测试 + 链路自检 + 夹具回归
 .venv\Scripts\python.exe main.py --selftest     :: 退出码 0，不弹窗
 ```
@@ -165,8 +165,21 @@
 | D2 | 报表导出 | `[x]` 已完成 | 新增 `core/report.py`（自包含 HTML 含 SVG 航迹图 + CSV 汇总，零重量级依赖），接入 `ui/history.py`；`test_report_export` 覆盖 |
 | D3 | 英文界面（i18n） | `[x]` 已完成 | 新增 `core/i18n.py` 与「设置 → 界面语言（中文/English）」实时切换；`test_i18n_and_version` 覆盖 |
 | D4 | 安装包脚本 + 版本探测 | `[x]` 已完成 | 新增 `radarscope/version.py`（`__version__` + `check_latest_release` 超时检查 + `帮助 → 检查更新…`），`installer/radarscope.iss` 对齐 `Lookout` |
-| D5 | CI 扩展到 Linux / macOS | `[x]` 已完成 | `.github/workflows/ci.yml` 矩阵已覆盖 `windows-latest / ubuntu-latest / macos-latest`（无头 `QT_QPA_PLATFORM=offscreen`） |
+| D5 | CI 扩展到 Linux / macOS | `[x]` 已完成 | `.github/workflows/ci.yml` 矩阵已覆盖 `windows-latest / ubuntu-latest / macos-latest`（已修复 `cp1252` 与 POSIX `file:///` 解析） |
 | D6 | Web 订阅端 | `[x]` 已完成 | 新增零依赖 `tools/ws_bridge.py`（UDP→RFC 6455 WebSocket 桥）+ `tools/web_viewer.html` 单页实时态势；`test_ws_bridge` 覆盖 |
+
+---
+
+## 4.5 阶段 E —— 通用雷达生态、专业显控与教学演练（软件层先做完）
+
+| 编号 | 任务 | 状态 | 实现与验收要点 |
+|---|---|---|---|
+| E1 | 多普勒趋近着色 & 静态杂波抑制 | `[x]` 已完成 | 借鉴 `OpenCPN radar_pi` 与 `Smart Radar`：`ui/ppi.py` 按径向接近速率着暖红/青蓝；`core/pipeline.py` 新增 `ClutterMap` 学习静态背景杂波并抑制 |
+| E2 | 电子对抗 / 无线电干扰教学仿真 | `[x]` 已完成 | **纯软件信号建模，无射频发射**：`core/sim_targets.py` + `ui/simdialog.py` 支持宽带压制/扇区瞄准/DRFM多假目标/RGPO距离拖引，实时对比 `CA/OS/GO-CFAR` |
+| E3 | 零代码通用雷达协议适配器 | `[x]` 已完成 | 新增 `core/custom_proto.py`、`drivers/custom_generic.py`、`ui/protodialog.py`，内置 NMEA `$RATTM` 航海雷达、77G `$TGT` CSV 与二进制结构体帧，开箱即用 |
+| E4 | 航海 / 车载 / 无人机预设场景 | `[x]` 已完成 | `ElectronicStation` 新增 `marine`（航道避碰）、`automotive`（77G 多车道）、`drone`（低空周界突防）动态演练场景 |
+| E5 | 原始报文实时窥视与离线 MBTiles 海图 | `[ ]` 排期 | 在「连接设置 → 测试连接」旁展示实时十六进制/ASCII 流切帧状态，并支持离线 `.mbtiles` 航海海图包导入 |
+| E6 | 3D 俯仰 RHI 显示（Distance-Height） | `[ ]` 排期 | 针对未来 4D 成像毫米波/3D 激光（`Capabilities.has_elevation`），扩展距离-高度剖面视图 |
 
 ---
 

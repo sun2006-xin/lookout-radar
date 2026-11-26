@@ -84,6 +84,7 @@ class PPIWidget(QWidget):
         self._trails: dict[int, deque] = {}
         self.trail_len = 36
         self.show_trails = True
+        self.doppler_color = True
         #: 告警禁入区 (cx, cy, r, level)，与 alarm 规则里的 zone 同源
         #: (cx, cy, r, level, rule_id)
         self._zones: list[tuple] = []
@@ -577,7 +578,7 @@ class PPIWidget(QWidget):
             pt = self._pt(cx, cy, r, a)
             x, y = pt.x(), pt.y()
 
-            # 颜色：锁定 > 威胁等级 > 默认。威胁分级来自雷达本身，没有就退回默认色
+            # 颜色：锁定 > 威胁等级 > 多普勒趋近/远离着色 > 默认色
             if t.locked:
                 col = lc
             elif t.threat >= 3:
@@ -586,6 +587,15 @@ class PPIWidget(QWidget):
                 col = QColor(255, 138, 40)
             elif t.threat == 1:
                 col = QColor(232, 176, 66)
+            elif self.doppler_color and t.speed >= 0.08 and t.rng > 1e-4:
+                # 径向接近速率 >0 表示靠近本平台（暖红告警），远离表示拉开（青蓝安全）
+                vr = -(t.x * t.vx + t.y * t.vy) / t.rng
+                if vr > 0.08:
+                    col = QColor(235, 82, 58)
+                elif vr < -0.08:
+                    col = QColor(2, 132, 199) if sum(pal["bg"]) > 384 else QColor(56, 189, 248)
+                else:
+                    col = tc
             else:
                 col = tc
 

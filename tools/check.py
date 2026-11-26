@@ -10,6 +10,7 @@ CI 里也跑它（见 .github/workflows/ci.yml），保证本地和 CI 判据完
 from __future__ import annotations
 
 import compileall
+import os
 import subprocess
 import sys
 import time
@@ -17,12 +18,21 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# 英文 Windows GitHub Runner 默认 stdout 可能是 cp1252，输出中文日志前强制切 UTF-8
+for _s in (sys.stdout, sys.stderr):
+    if _s is not None and hasattr(_s, "reconfigure"):
+        try:
+            _s.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
 
 def run(title: str, cmd: list[str]) -> tuple[bool, float, str]:
     print(f"\n=== {title} ===")
     t0 = time.perf_counter()
+    env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
     r = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8",
-                       errors="replace")
+                       errors="replace", env=env)
     dt = time.perf_counter() - t0
     ok = r.returncode == 0
     tail = (r.stdout or "").strip().splitlines()[-6:]

@@ -112,9 +112,11 @@ class MainWindow(ConnectionController, ExportController,
         self.ais = AisFeed()
         self._ais_ref = (39.9, 116.4)
         self._map_provider = "auto"
-        # 模拟电子站（动态虚拟目标叠加）
+        # 模拟电子站（动态虚拟目标与电子对抗教学叠加）
         from ..core.sim_targets import ElectronicStation
         self.sim_station = ElectronicStation()
+        self.clutter_map = pipeline.ClutterMap()
+        self.clutter_map.enabled = bool(self.settings.value("clutter_suppress", False, type=bool))
         # 联网地图（懒创建，只在开启时建）
         self.map_layer: MapLayer | None = None
         self._map_t = 0.0
@@ -363,6 +365,12 @@ class MainWindow(ConnectionController, ExportController,
         self.chk_reconnect.setCheckable(True)
         self.chk_reconnect.setChecked(True)
 
+        self.btn_clutter = QPushButton("杂波抑制")
+        self.btn_clutter.setCheckable(True)
+        self.btn_clutter.setChecked(self.clutter_map.enabled)
+        self.btn_clutter.setToolTip("学习静态建筑/地形背景杂波并抑制，只突出移动目标（借鉴船用 Smart Radar）")
+        self.btn_clutter.toggled.connect(self._toggle_clutter)
+
         self.theme_combo = QComboBox()
         for key, th in THEMES.items():
             self.theme_combo.addItem(th["name"], key)
@@ -415,7 +423,7 @@ class MainWindow(ConnectionController, ExportController,
         ol = QHBoxLayout(opts)
         ol.setContentsMargins(0, 0, 0, 0)
         ol.setSpacing(6)
-        for w in (self.btn_north, self.btn_rec, self.chk_reconnect):
+        for w in (self.btn_north, self.btn_rec, self.btn_clutter, self.chk_reconnect):
             ol.addWidget(w)
         ol.addStretch(1)
         form.addRow("选项", opts)
@@ -450,6 +458,7 @@ class MainWindow(ConnectionController, ExportController,
         m_tool.addAction("设备控制…", self._open_control)
         m_tool.addAction("AIS 接入…", self._open_ais)
         m_tool.addAction("模拟电子站（目标注入）…", self._open_sim_station)
+        m_tool.addAction("通用协议雷达适配向导…", self._open_proto_wizard)
         m_tool.addAction("插件管理…", self._open_plugins)
 
         # 视图：面板显隐。用户不该被固定布局绑死——投屏要大字、
@@ -467,6 +476,7 @@ class MainWindow(ConnectionController, ExportController,
         self._view_actions: dict[str, QAction] = {}
         for text, attr, default in (
             ("尾迹", "show_trails", True),
+            ("多普勒趋近着色", "doppler_color", True),
             ("告警禁入区", "show_zones", False),
             ("电子方位线 EBL/VRM", "show_ebl", True),
         ):
@@ -727,6 +737,7 @@ class MainWindow(ConnectionController, ExportController,
         self.table.configure(self.caps)
         self.tracker.reset()
         self.alarm.reset()
+        self.clutter_map.reset()
         self._locked_id = -1
         self.status_left.setText(f"{caps.name} ｜ {caps.summary()} ｜ {caps.notes}")
 
@@ -752,8 +763,19 @@ class MainWindow(ConnectionController, ExportController,
         self._last_ts = now
         self._last_frame_mono = time.monotonic()
 
+        if self.clutter_map.enabled and f.has_scan:
+            f = self.clutter_map.apply(f)
+            if self.clutter_map.frames >= self.clutter_map.warmup:
+                f.targets = pipeline.detect_targets(
+                    f, threshold=self._thresh,
+                    max_targets=max(8, self.caps.max_targets or 8),
+                    cfar_mode=self._cfar_mode,
+                )
+
         if self.sim_station.active():
-            f = self.sim_station.merge_into_frame(f, self.caps, dt)
+            f = self.sim_station.merge_into_frame(
+                f, self.caps, dt, threshold=self._thresh, cfar_mode=self._cfar_mode
+            )
 
         period = f.meta.get("scan_period")
         if period:
@@ -1071,7 +1093,21 @@ class MainWindow(ConnectionController, ExportController,
         dlg = SimStationDialog(self.sim_station, float(self.range_spin.value()), self)
         dlg.exec_()
         if self.sim_station.active():
-            self.log.push("ok", f"模拟电子站：当前活跃 {len(self.sim_station.objects)} 个虚拟目标")
+            self.log.push("ok", f"模拟电子站：活跃目标 {len(self.sim_station.objects)} 个 · 干扰 {self.sim_station.jam_mode}")
+
+    def _toggle_clutter(self, on: bool) -> None:
+        self.clutter_map.enabled = bool(on)
+        self.clutter_map.reset()
+        self.settings.setValue("clutter_suppress", bool(on))
+        self.log.push("info", "静态杂波背景抑制已开启（前 5 帧自动学习环境底噪）" if on else "静态杂波背景抑制已关闭")
+
+    def _open_proto_wizard(self) -> None:
+        from .protodialog import ProtoWizardDialog
+
+        dlg = ProtoWizardDialog(self)
+        if dlg.exec_() == QDialog.Accepted:
+            self._rebuild_driver_combo(keep=dlg.ed_id.text().strip() or None)
+            self.log.push("ok", f"已注册/更新通用协议适配器：{dlg.ed_label.text().strip()}")
 
     def _toggle_true_motion(self, on: bool) -> None:
         self.ppi.true_motion = bool(on)

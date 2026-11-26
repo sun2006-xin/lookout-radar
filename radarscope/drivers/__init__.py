@@ -11,6 +11,7 @@ from .replay import ReplayDriver
 from .sim_aesa import AesaSimDriver
 from .simulator import SimulatorDriver
 from .ultrasonic import UltrasonicDriver
+from . import custom_generic as _custom_generic  # noqa: F401  自动注册通用协议适配器
 
 __all__ = [
     "LD2410Driver", "LD2450Driver", "LDLidarDriver",

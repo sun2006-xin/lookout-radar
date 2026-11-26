@@ -269,3 +269,35 @@ def range_profile(frame: RadarFrame) -> np.ndarray:
     if not frame.has_scan:
         return np.zeros(1, dtype=np.float32)
     return frame.scan.max(axis=0)
+
+
+class ClutterMap:
+    """静态杂波背景图（EMA 均值学习与静止背景抑制，借鉴 Smart Radar 杂波掩膜）。"""
+
+    def __init__(self, alpha: float = 0.12, gain: float = 0.85, warmup: int = 5) -> None:
+        self.alpha = float(alpha)
+        self.gain = float(gain)
+        self.warmup = int(warmup)
+        self.enabled: bool = False
+        self._bg: np.ndarray | None = None
+        self.frames: int = 0
+
+    def reset(self) -> None:
+        self._bg = None
+        self.frames = 0
+
+    def apply(self, frame: RadarFrame) -> RadarFrame:
+        if not self.enabled or not frame.has_scan or frame.scan is None:
+            return frame
+        scan = frame.scan.astype(np.float32, copy=False)
+        if self._bg is None or self._bg.shape != scan.shape:
+            self._bg = scan.copy()
+            self.frames = 1
+            return frame
+        self.frames += 1
+        # 先用上一帧学到的静止背景做减法，再用缓慢 EMA 更新背景，避免把刚进入的运动目标也当成背景减掉
+        bg_prev = self._bg
+        self._bg = (1.0 - self.alpha) * self._bg + self.alpha * scan
+        if self.frames >= self.warmup:
+            frame.scan = np.clip(scan - self.gain * bg_prev, 0.0, 1.0)
+        return frame

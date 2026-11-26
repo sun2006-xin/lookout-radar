@@ -22,7 +22,7 @@
 | Git 仓库 | https://github.com/sun2006-xin/lookout-radar （public / main / MIT） |
 | 当前版本 | `v1.1.0`（2026-11-26，具体提交以 `git log -1` 为准） |
 
-**当前状态**：70 个 Python 文件 / 约 12 700 行 / **36 组测试全过** /
+**当前状态**：73 个 Python 文件 / 约 13 200 行 / **39 组测试全过** /
 `tools/check.py` 全绿 / `Lookout.exe --selftest` 退出码 0。
 产品名「瞭望 Lookout」，默认主题现代白（色板 daylight），可切深色（ice）。
 
@@ -36,7 +36,7 @@
 ```bat
 cd /d D:\workbudy\2026-11-25-19-11-27\radarscope
 .venv\Scripts\python.exe -m pip install -r requirements.txt
-rem 36 组测试，必须全绿
+rem 39 组测试，必须全绿
 .venv\Scripts\python.exe tests\test_core.py
 rem 编译 + 测试 + 链路自检 + 夹具回归，提交前必跑
 .venv\Scripts\python.exe tools\check.py
@@ -54,7 +54,7 @@ rem 启动图形界面（会弹窗口）
 
 1. 这是个**分层**项目：传输 / 协议 / 驱动 / 数据 / 处理 / 呈现，单向依赖。
 2. 界面是**能力驱动**的：显示什么由 `Capabilities` 决定，不按型号写分支。
-3. 有 **36 组测试**，改完必须全绿。测试就是规格文档，不打桩不 mock。
+3. 有 **39 组测试**，改完必须全绿。测试就是规格文档，不打桩不 mock。
 
 ---
 
@@ -238,6 +238,7 @@ class MyRadarDriver(RadarDriver):
 | 开启「联网地图底图」后 PPI 变全黑且关闭后仍是黑的 | `MapLayer._compose` 用了不透明 `QColor(12,16,20)` `RGB32` 底图且离线 0 瓦片也生成图像；`_toggle_map(False)` 未置空 `ppi.map_layer` | `_compose` 改用透明 `ARGB32` 画布，无已加载瓦片保持 `image = None`；关闭底图显式置 `ppi.map_layer = None`；浅/深主题配对 `carto_light`/`carto_dark` |
 | 右键 PPI 警戒区弹不出编辑/删除菜单 | `_zone_at` 用了 `_screen_to_body`（线性映射且无 `true_motion` 平移与边缘容差），与 `_draw_zones` 像素坐标口径不一致 | `_zone_at` 与 `_hit_zone_handle` 统一按 `_draw_zones` 像素口径与 10px 边缘容差判定 |
 | 底部状态栏文字过长或窗口超出屏幕导致状态栏被挤压裁切 | `status_left` 默认 `Preferred` 策略按文本撑宽，`MainWindow(1340,880)` 在高 DPI 小屏会顶到任务栏 | `status_left` 设 `MinimumWidth(0)` + `QSizePolicy.Ignored`，`_restore()` 按 `availableGeometry()` 限幅并固定状态栏最小高度 |
+| 跨平台 CI 在 Windows 报 `cp1252` 编码错、在 macOS/Linux 报 `file:///` 文件不存在 | 英文 Windows stdout 默认 `cp1252`；`parse_spec` 的 `lstrip("/")` 误删了 POSIX `file:///Users/...` 的前导 `/` | `tools/check.py` 强制 `UTF-8` 输出并在 CI 设 `PYTHONUTF8=1`；`parse_spec` 仅对 `file:///C:/...` 盘符删前导 `/` |
 
 ---
 

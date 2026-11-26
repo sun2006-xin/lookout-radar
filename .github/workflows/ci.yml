@@ -35,6 +35,8 @@ jobs:
       - name: 编译 + 单元测试 + 链路自检 + 录制夹具回归
         env:
           QT_QPA_PLATFORM: offscreen
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: utf-8
         run: python tools/check.py
 
       - name: 性能基准（只记录，不作为门禁）

@@ -26,7 +26,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 
 class TransportError(RuntimeError):
@@ -480,10 +480,17 @@ def parse_spec(spec: str) -> dict:
     opts = {k: v[0] for k, v in parse_qs(u.query).items()}
     target = u.netloc or u.path.lstrip("/")
     if u.scheme == "file":
-        target = u.path.lstrip("/") if u.netloc in ("", "localhost") else f"{u.netloc}{u.path}"
-        # Windows 盘符：file://C:/x.bin 会被解析成 netloc="C:"
-        if len(u.netloc) == 2 and u.netloc[1] == ":":
-            target = f"{u.netloc}{u.path}"
+        p = unquote(u.path)
+        if u.netloc in ("", "localhost"):
+            # Windows file:///C:/x.bin -> C:/x.bin；POSIX file:///Users/x.bin 必须保留前导 '/'
+            if len(p) >= 3 and p[0] == "/" and p[1].isalpha() and p[2] == ":":
+                target = p[1:]
+            else:
+                target = p
+        elif len(u.netloc) == 2 and u.netloc[1] == ":":
+            target = f"{u.netloc}{p}"
+        else:
+            target = f"{u.netloc}{p}"
     return {"scheme": u.scheme, "target": target, "options": opts}
 
 

@@ -4,11 +4,11 @@ from __future__ import annotations
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QAbstractItemView, QComboBox, QDialog, QDoubleSpinBox, QFormLayout,
-    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPushButton, QTableWidget,
-    QTableWidgetItem, QVBoxLayout,
+    QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPushButton,
+    QTableWidget, QTableWidgetItem, QVBoxLayout,
 )
 
-from ..core.sim_targets import SCENARIOS, ElectronicStation
+from ..core.sim_targets import JAMMING_MODES, SCENARIOS, ElectronicStation
 
 
 class SimStationDialog(QDialog):
@@ -18,8 +18,8 @@ class SimStationDialog(QDialog):
 
     def __init__(self, station: ElectronicStation, range_max: float = 8.0, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("模拟电子站 · 动态目标仿真与注入")
-        self.resize(680, 480)
+        self.setWindowTitle("模拟电子站 · 动态目标与电子对抗教学仿真")
+        self.resize(700, 560)
         self.station = station
         self.range_max = max(2.0, float(range_max))
 
@@ -103,8 +103,60 @@ class SimStationDialog(QDialog):
         lay.addLayout(top)
         lay.addWidget(self.table, 1)
         lay.addLayout(inj)
+
+        ew_box = QGroupBox("电子对抗 / 无线电干扰教学仿真（纯软件信号数学建模，无射频发射）")
+        ew_form = QFormLayout(ew_box)
+        self.cb_jam = QComboBox()
+        for k, label in JAMMING_MODES.items():
+            self.cb_jam.addItem(label, k)
+        ji = self.cb_jam.findData(self.station.jam_mode)
+        if ji >= 0:
+            self.cb_jam.setCurrentIndex(ji)
+        self.cb_jam.currentIndexChanged.connect(self._on_ew)
+
+        ew_row = QHBoxLayout()
+        self.sp_jsr = QDoubleSpinBox()
+        self.sp_jsr.setRange(0.1, 1.0)
+        self.sp_jsr.setSingleStep(0.1)
+        self.sp_jsr.setValue(self.station.jam_jsr)
+        self.sp_jsr.valueChanged.connect(lambda v: setattr(self.station, "jam_jsr", float(v)))
+
+        self.sp_jaz = QDoubleSpinBox()
+        self.sp_jaz.setRange(-180.0, 180.0)
+        self.sp_jaz.setSingleStep(10.0)
+        self.sp_jaz.setSuffix("°")
+        self.sp_jaz.setValue(self.station.jam_az_deg)
+        self.sp_jaz.valueChanged.connect(lambda v: setattr(self.station, "jam_az_deg", float(v)))
+
+        self.sp_jbw = QDoubleSpinBox()
+        self.sp_jbw.setRange(10.0, 120.0)
+        self.sp_jbw.setSingleStep(5.0)
+        self.sp_jbw.setSuffix("°")
+        self.sp_jbw.setValue(self.station.jam_bw_deg)
+        self.sp_jbw.valueChanged.connect(lambda v: setattr(self.station, "jam_bw_deg", float(v)))
+
+        ew_row.addWidget(QLabel("干扰强度"))
+        ew_row.addWidget(self.sp_jsr)
+        ew_row.addWidget(QLabel("扇区方位"))
+        ew_row.addWidget(self.sp_jaz)
+        ew_row.addWidget(QLabel("波束宽"))
+        ew_row.addWidget(self.sp_jbw)
+        ew_form.addRow("干扰样式", self.cb_jam)
+        ew_form.addRow("干扰参数", ew_row)
+        ew_tip = QLabel(
+            "教学用法：开启干扰后，切换主窗口「设置 → 检测算法 (CA / OS / GO-CFAR)」与「杂波抑制」，\n"
+            "可直观对比不同抗干扰算法下的虚警抑制、烧穿距离与假目标甄别效果。"
+        )
+        ew_tip.setWordWrap(True)
+        ew_tip.setStyleSheet("color:#6B7280;font-size:11px;")
+        ew_form.addRow(ew_tip)
+        lay.addWidget(ew_box)
         lay.addLayout(btns)
         self._refresh()
+
+    def _on_ew(self) -> None:
+        self.station.jam_mode = str(self.cb_jam.currentData() or "none")
+        self.station._jam_t = 0.0
 
     def _on_scene(self) -> None:
         sc = str(self.cb_scene.currentData() or "none")
@@ -128,6 +180,9 @@ class SimStationDialog(QDialog):
         self.cb_scene.blockSignals(True)
         self.cb_scene.setCurrentIndex(0)
         self.cb_scene.blockSignals(False)
+        self.cb_jam.blockSignals(True)
+        self.cb_jam.setCurrentIndex(0)
+        self.cb_jam.blockSignals(False)
         self._refresh()
 
     def _refresh(self) -> None:
