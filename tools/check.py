@@ -72,7 +72,7 @@ def main() -> int:
         print(f"失败：{', '.join(bad)}")
         return 1
     print("全部通过。可以提交了。")
-    print("提交前记得：改了 core/ 就同步 docs/，新踩的坑写进 HANDOVER 第 6 节。")
+    print("提交前记得：如涉及 core/ 架构或模块变动，同步更新 docs/。")
     return 0
 
 

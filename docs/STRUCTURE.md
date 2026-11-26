@@ -1,11 +1,10 @@
 # 项目文件具体解释
 
-> 一个文件只干一件事。**想改功能先看这张表**，别靠猜。
-> 源码约 13 200 行 / 73 个 Python 文件 / 39 组测试（不含依赖与打包产物）。
-> 产品名「瞭望 Lookout」，但 **Python 包名仍是 `radarscope`** —— 这是内部标识，不要改。
+> 一个文件只干一件事。想定位模块职责或改动入口可先查下表。
+> 源码约 13 500 行 / 73 个 Python 文件 / 39 组核心单元测试（不含依赖与打包产物）。
+> 产品名「瞭望 Lookout」，Python 包名 `radarscope`。
 >
-> 配套：[ROADMAP.md](ROADMAP.md) 未来计划 · [HANDOVER.md](HANDOVER.md) 怎么改与禁忌 ·
-> [ARCHITECTURE.md](ARCHITECTURE.md) 分层与数据契约 · [REVIEW.md](REVIEW.md) 已闭环的审查。
+> 配套：[ARCHITECTURE.md](ARCHITECTURE.md) 架构与数据契约 · [ROADMAP.md](ROADMAP.md) 开发路线图。
 
 ---
 
@@ -196,44 +195,36 @@
 
 ---
 
-## `docs/` —— 文档
+## `docs/` —— 公开文档
 
-| 文件 | 内容 | 什么时候读 |
+| 文件 | 内容 | 说明 |
 |---|---|---|
-| **ROADMAP.md** | **未来开发计划**：阶段 A~D 共 18 项，每项含目标/文件/路径/验收/风险 | **接手先读**，选任务 |
-| HANDOVER.md | 交接：路径、30 秒上手、驱动模板、七条禁忌、已知坑、提交规范 | 动手前读第 4/6 节 |
-| STRUCTURE.md | 本文件：逐文件职责 | 找代码位置 |
-| ARCHITECTURE.md | 分层、数据契约、扩展点、性能预算、取舍 | 改 `core/model.py` 前 |
-| PLAN.md | 里程碑历史、优先级方法、能力差距表、已知显示瑕疵 | 了解来龙去脉 |
-| REVIEW.md | 五视角审查（2026-11-26 已全部闭环）+ 4 条剩余风险 | 评估技术债 |
-| ADR/0001-language-choice.md | 为什么选 Python + PyQt5（附实测数据） | — |
-| ADR/0002-product-positioning.md | 定位：教学/DIY 为入口、工程留证为深度 + 5 条取舍规则 | 决定"做不做"某个功能时 |
-| screenshot.png | 现代白主题界面截图 | — |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | 系统分层、数据契约、扩展点与线程模型 | 扩展核心数据/架构前必读 |
+| [STRUCTURE.md](STRUCTURE.md) | 逐文件职责解释与目录导航 | 定位源码入口 |
+| [ROADMAP.md](ROADMAP.md) | 开发计划与未来路线图（阶段 A~F） | 查看已落地能力与后续排期 |
+| [ADR/0001-language-choice.md](ADR/0001-language-choice.md) | 技术栈选型依据（Python + PyQt5 + NumPy 性能剖析） | — |
+| [ADR/0002-product-positioning.md](ADR/0002-product-positioning.md) | 产品定位与取舍原则 | — |
+| `screenshot.png` | 主界面展示截图 | 用于 README 展示 |
 
 ---
 
-## 还没做的 / 已知限制
+## 已知边界与待验证项
 
 | 项 | 状态 | 详见 |
 |---|---|---|
-| 4 个驱动 + 真实多站组网未接硬件 | **最大未知数** | ROADMAP 阶段 A |
-| 瀑布图 6 站融合偏亮 | 数据形态问题，需重设计 | ROADMAP B1 |
-| 真运动边缘在极大量程的观感 | 需实机确认 | REVIEW 剩余风险 1 |
-| 地图瓦片真实下载链路 | 沙箱无外网，用假瓦片验过拼图/对齐/旋转 | REVIEW 剩余风险 3 |
-| 桌面 `.lnk` 双击启动 | 二进制结构已校验，未实点 | REVIEW 剩余风险 4 |
-| 真信号处理（ADC→FFT） | 需要 IWR6843 + DCA1000 等硬件 | ROADMAP B4 |
-| 3D 点云 / 矢量地图编辑 / i18n / 签名安装包 | 明确排期 | ROADMAP 阶段 C/D |
-| 覆盖率门槛 | 当前按关键路径写测试，未做覆盖率统计 | ROADMAP D 系列 |
+| 实体外设联调（LD19 / LD2450 / LD2410 / BLE / 多站组网） | 有录制样本回归，待真实硬件实地联调 | [ROADMAP.md](ROADMAP.md) 阶段 A |
+| 原始 ADC → FFT 距离-多普勒信号处理链 | 需配合相参硬件（如 IWR6843 + DCA1000）启动 | [ROADMAP.md](ROADMAP.md) B4 |
+| 离线 MBTiles 海图、3D RHI 俯仰视图与电子战 F1~F3 进阶 | 已纳入软件主线排期 | [ROADMAP.md](ROADMAP.md) 阶段 E / F |
 
 ---
 
-## 可以删的东西
+## 本地构建与运行时目录（不进 Git）
 
 | 路径 | 说明 |
 |---|---|
-| `build/` `dist_prev/` | PyInstaller 中间产物 / 打包前旧产物 |
-| `dist/` | 打包产物，`2-打包EXE.bat` 可完全重建（129 MB） |
-| `data/` | 运行时数据，**删掉会丢历史记录、布站配置与自绘警戒区** |
-| `assets/tiles` 缓存 | 在 `data/tiles/`，可随时删，会自动重下 |
-| `__pycache__/` | 解释器缓存，随时删 |
+| `build/` | PyInstaller 编译临时缓存，可随时删除 |
+| `dist/Lookout/` | `pyinstaller --noconfirm --clean installer/Lookout.spec` 打包产物 |
+| `data/` | 开发期运行时数据（SQLite、帧归档、`rules.json`、`custom_drivers.json`）；打包版位于 `%LOCALAPPDATA%\Lookout\data` |
+| `data/tiles/` | 地图瓦片磁盘缓存（上限 200 MB 自动清理） |
+| `__pycache__/` | Python 字节码缓存，可随时删除 |
 | `.venv/` | 虚拟环境，`1-安装依赖.bat` 可重建 |

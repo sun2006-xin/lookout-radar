@@ -1,5 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
 from PyInstaller.utils.hooks import collect_submodules
+
+ASSETS_DIR = os.path.abspath(os.path.join(SPECPATH, '..', 'assets'))
 
 hiddenimports = []
 hiddenimports += collect_submodules('radarscope')
@@ -10,7 +13,7 @@ a = Analysis(
     ['../main.py'],
     pathex=[],
     binaries=[],
-    datas=[('D:/workbudy/2026-11-25-19-11-27/radarscope/assets', 'assets')],
+    datas=[(ASSETS_DIR, 'assets')],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
@@ -37,7 +40,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['D:/workbudy/2026-11-25-19-11-27/radarscope/assets/app.ico'],
+    icon=[os.path.join(ASSETS_DIR, 'app.ico')],
 )
 coll = COLLECT(
     exe,

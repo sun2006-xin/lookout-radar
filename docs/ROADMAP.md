@@ -1,37 +1,30 @@
 # 开发路线图与未来计划
 
-> 版本：2026-11-26 · 状态：**软件侧功能与审查已闭环，下一阶段主战场是硬件与算法深水区**
-> 本文件是给"接手继续开发的人 / AI"的主入口。每个任务都写了**目标、涉及文件、
-> 实现路径、验收标准、风险**，可以直接照着开工，不需要再问一遍上下文。
+> 版本：v1.1.0（2026-11-26）· 状态：**软件核心、工程化与通用适配主线（B1~B3、C1~C4、D1~D6、E1~E4、A5）已落地；下一阶段聚焦纯软件生态/电子战拓展及实机硬件联调**。
 >
-> 读之前先看：[HANDOVER.md](HANDOVER.md)（怎么改、禁忌、坑）、
-> [STRUCTURE.md](STRUCTURE.md)（每个文件干什么）、[ARCHITECTURE.md](ARCHITECTURE.md)（分层与数据契约）。
+> 配套文档：[ARCHITECTURE.md](ARCHITECTURE.md)（系统分层与数据契约）· [STRUCTURE.md](STRUCTURE.md)（代码文件索引）。
 
 ---
 
-## 0. 当前快照（接手时先确认这几件事）
+## 0. 项目概览与开发环境自检
 
 | 项 | 值 |
 |---|---|
-| 项目根 | `D:\workbudy\2026-11-25-19-11-27\radarscope`（见 HANDOVER 第 0 节） |
-| 产品名 | 瞭望 Lookout（Python 包名仍是 `radarscope`，**不要改包名**） |
-| 源码 | 约 13 200 行 / 73 个 Python 文件 / 39 组测试 |
-| 主窗口 | `ui/mainwindow.py` + `ui/controllers.py`（三个 mixin） |
-| 打包产物 | `dist/Lookout/Lookout.exe`（PyInstaller，带 `assets/app.ico`，Release `v1.1.0`） |
-| 桌面入口 | `桌面\瞭望 Lookout.lnk`（`tools/make_shortcut.py`，WScript.Shell 优先 + MS-SHLLINK 回退） |
-| 仓库 | https://github.com/sun2006-xin/lookout-radar （public, main, MIT） |
-| 主题 | 现代白（默认，色板 daylight）/ 深色（色板 ice） |
-| 已闭环 | [REVIEW.md](REVIEW.md) 20 项、A5 夹具、B1~B3、C1~C4、D1~D6、E1~E4（软件适配/EW 教学/杂波抑制/多普勒着色） |
+| 产品名 | 瞭望 Lookout（Python 包名 `radarscope`） |
+| 源码规模 | 约 13 500 行 / 73 个 Python 文件 / 39 组单元测试 |
+| 主窗口结构 | `ui/mainwindow.py` + `ui/controllers.py`（三控制器 mixin） |
+| 打包方式 | `pyinstaller --noconfirm --clean installer/Lookout.spec`（生成 `dist/Lookout/Lookout.exe`） |
+| 开源仓库 | https://github.com/sun2006-xin/lookout-radar （MIT） |
+| 默认视觉 | 现代白（色板 daylight） / 深色（色板 ice） |
+| 已完成阶段 | A5 录制夹具回归、B1~B3 核心算法、C1~C4 架构增强、D1~D6 工程化、E1~E4 通用适配与电子战教学初版 |
 
-**开工前必须跑**（三条都过才算环境正常）：
+**本地开发检查命令**（提交或发版前确保全部通过）：
 
 ```bat
-.venv\Scripts\python.exe tests\test_core.py     :: 39 组全过
-.venv\Scripts\python.exe tools\check.py         :: 编译 + 测试 + 链路自检 + 夹具回归
-.venv\Scripts\python.exe main.py --selftest     :: 退出码 0，不弹窗
+.venv\Scripts\python.exe tests\test_core.py     :: 39 组单元测试
+.venv\Scripts\python.exe tools\check.py         :: 字节码编译 + 单元测试 + 无窗口链路自检 + 夹具回归
+.venv\Scripts\python.exe main.py --selftest     :: 打包前/后无界面自检（退出码 0）
 ```
-
-改完 `core/` 必须跑前两条；改完驱动还要在界面里连一次；打包后跑 `Lookout.exe --selftest`。
 
 ---
 
@@ -202,37 +195,24 @@
 - **不改名 Python 包**：`radarscope` 是内部标识，产品名 `瞭望 Lookout` 只影响 UI/exe/文档。
   改包名会破坏所有 import、插件、PyInstaller 收集规则，收益为零。
 - **不引入账号 / 云端**：定位见 [ADR-0002](ADR/0002-product-positioning.md)，本地工具。
-- **不做矢量地图编辑**：在线/离线栅格瓦片（含后续 MBTiles 与掩膜层）够用，见 REVIEW 剩余风险 3。
+- **不做矢量地图编辑**：在线/离线栅格瓦片（含后续 MBTiles 与掩膜层）可满足显控需求。
 - **不追 AIS 静态航程冗余报文**：聚焦位置报告（1/2/3/18/19）与航海 TTM/GGA/HDT 对显控真正有用的报文。
 
 ---
 
-## 6. 建议的开工顺序（给下一位 AI）
+## 6. 建议的演进顺序
 
-> **当前进度（2026-11-26）**：`A5`、`B1~B3`、`C1~C4`、`D1~D6`、`E1~E4` 已全部完成并有 39 组测试兜底；以下为后续优先级顺序（**在未安排硬件联调前优先推进纯软件部分**）：
+> **当前进度（2026-11-26）**：`A5`、`B1~B3`、`C1~C4`、`D1~D6`、`E1~E4` 已全部完成并有 39 组测试兜底；以下按纯软件主线与硬件主线分层推进：
 
 ```
 软件主线 1（航海/通用零代码生态）：E5（原始流窥视排障）→ E9（扩充零代码驱动模板库）→ E6（离线 MBTiles + NMEA 本船定位 + 陆地掩膜）
-软件主线 2（电子战教学与信号对照）：F1（VGPO/箔条/ISRJ 干扰样式）→ F2（烧穿距离圈 + 捷变抗干扰对比）→ F3（多站抗欺骗与 ESM 方位指示）
+软件主线 2（电子战教学与信号对照）：F1（VGPO/箔条/ISRJ 干扰样式）→ F2（烧穿距离圈 + 捷变抗干扰对照/模拟火控推演）→ F3（多站抗欺骗与 ESM 方位指示）
 软件主线 3（机器人/三维扩展）：  E8（ROS/Foxglove 生态互通）→ E7（俯仰 RHI 剖面）
 硬件主线（实体硬件到位后再开）：A1 → A2 → A3 → A4（真机联调与样本录制）→ B4（IWR6843+DCA1000 原始 ADC→FFT）
 ```
 
-**每一项的收尾动作**（硬性）：
-1. 加一组会失败的断言 → 再改 → 测试全绿
-2. 更新 `STRUCTURE.md`（新文件/职责变化）、`HANDOVER.md` 第 6 节（新坑）、
-   `ROADMAP.md`（勾选本项 + 写实测结论）
-3. 打包后 `Lookout.exe --selftest` 退出码 0
-4. commit 正文写"为什么"，不是"改了什么"（HANDOVER 第 10 节）
-
----
-
-## 7. 决策门槛（什么时候该停下来问）
-
-- 要改 `core/model.py` 的三个数据契约 → **先读 ARCHITECTURE 第二节并写一条 ADR**
-- 要引入新运行时依赖 → 先确认能否进 PyInstaller 包体，且 `requirements.txt` 与
-  `requirements-dev.txt` 分清楚
-- 要改 UI 线程模型（C1）→ 先跑 `tools/bench.py` 留基线数据
-- 沙箱/网络不通时 → 用离屏渲染与假瓦片验证逻辑，**不要假装验证过网络链路**
-  （REVIEW 剩余风险 3 就是这样留下的）
-- 需要启动 GUI 才能确认的观感问题 → 明确写"待用户实机确认"，别替用户下结论
+**开发收尾规范**：
+1. 新功能或缺陷修复先补回归断言，确认 `tools/check.py` 全绿；
+2. 有结构、文件或排期变更时同步更新 `STRUCTURE.md`、`ROADMAP.md` 与 `README.md`；
+3. 重新打包桌面程序后执行 `Lookout.exe --selftest`（退出码 `0`）；
+4. 涉及 `core/model.py` 核心数据契约变更或新增大型运行时依赖时，先补充一条 ADR 说明设计取舍。

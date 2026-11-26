@@ -4,7 +4,7 @@
 ; 装到 Program Files 也不会因为目录不可写而失败（程序会自动退到 %LOCALAPPDATA%）。
 ;
 ; 用法：
-;   1. 先跑 2-打包EXE.bat 生成 dist\RadarScope\
+;   1. 先跑 pyinstaller --noconfirm --clean installer\Lookout.spec 生成 dist\Lookout\
 ;   2. 装 Inno Setup 6（https://jrsoftware.org/isdl.php）
 ;   3. 右键本文件 → Compile，产物在 installer\Output\
 ;
@@ -24,7 +24,7 @@ AppVerName={#AppName} {#AppVer}
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 OutputDir=Output
-OutputBaseFilename=RadarScope-Setup-{#AppVer}
+OutputBaseFilename=Lookout-Setup-{#AppVer}
 Compression=lzma2/max
 SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64compatible
