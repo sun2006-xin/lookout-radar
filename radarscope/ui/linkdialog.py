@@ -20,10 +20,47 @@ import time
 
 from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
-    QComboBox, QDialog, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSpinBox, QTabWidget,
-    QVBoxLayout, QWidget,
+    QComboBox, QDialog, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
+    QPlainTextEdit, QPushButton, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
+
+#: 常见雷达协议魔数签名，用于原始流排障时自动识别波特率与驱动匹配情况
+KNOWN_SIGNATURES: tuple[tuple[bytes, str], ...] = (
+    (b"\x54\x2c", "思岚/乐动 LD19·LD06 (54 2C)"),
+    (b"\xaa\xff\x03\x00", "海凌科 LD2450 (AA FF 03 00)"),
+    (b"\xf4\xf3\xf2\xf1", "海凌科 LD2410 (F4 F3 F2 F1)"),
+    (b"\xaa\x55", "通用 MCU 帧 (AA 55)"),
+    (b"\x59\x59", "北醒 TF 系列 (59 59)"),
+    (b"$RATTM", "航海 ARPA NMEA ($RATTM)"),
+    (b"$TGT", "车载/交通 ASCII ($TGT)"),
+    (b"$SCAN", "极坐标文本流 ($SCAN)"),
+)
+
+
+def format_hex_ascii(data: bytes, start_offset: int = 0, width: int = 16) -> str:
+    """将原始字节流格式化为经典的 Offset | Hex | ASCII 三栏诊断视图。"""
+    if not data:
+        return ""
+    lines: list[str] = []
+    for off in range(0, len(data), width):
+        chunk = data[off:off + width]
+        hex_part = " ".join(f"{b:02X}" for b in chunk)
+        ascii_part = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
+        lines.append(f"{start_offset + off:04X}: {hex_part:<{width * 3 - 1}}  |{ascii_part}|")
+    return "\n".join(lines)
+
+
+def detect_frame_hints(data: bytes) -> list[str]:
+    """统计原始流中命中的已知雷达帧头签名。"""
+    if not data:
+        return []
+    hits: list[str] = []
+    for sig, name in KNOWN_SIGNATURES:
+        cnt = data.count(sig)
+        if cnt > 0:
+            hits.append(f"{name} ×{cnt}")
+    return hits
 
 BAUDS = ["256000", "230400", "115200", "921600", "460800", "57600", "38400", "9600"]
 
@@ -96,7 +133,7 @@ class LinkDialog(QDialog):
     def __init__(self, endpoint: str = "", parent=None):
         super().__init__(parent)
         self.setWindowTitle("连接设置")
-        self.resize(560, 420)
+        self.resize(620, 560)
         self._endpoint = endpoint
         self._ble_thread: _BleScan | None = None
 
@@ -108,15 +145,43 @@ class LinkDialog(QDialog):
 
         self.preview = QLineEdit()
         self.preview.setReadOnly(True)
-        self.preview.setStyleSheet("font-family:Consolas;color:#9BF5BE;")
+        self.preview.setStyleSheet("font-family:Consolas;")
 
-        self.btn_test = QPushButton("测试连接")
-        self.btn_test.setToolTip("尝试打开并读取约 1 秒；再点一次可提前停止")
+        # E5：原始报文实时窥视与字节切帧诊断区（支持串口/网络/回放即时排障与探针唤醒）
+        diag_box = QGroupBox("原始报文实时窥视与切帧诊断 (Hex / ASCII)")
+        dl = QVBoxLayout(diag_box)
+        dl.setContentsMargins(10, 14, 10, 8)
+        dl.setSpacing(6)
+        self.lbl_diag = QLabel("未测试：点击「测试连接」将实时滚动显示原始字节与自动识别的雷达帧头")
+        self.lbl_diag.setWordWrap(True)
+        dl.addWidget(self.lbl_diag)
+
+        self.raw_view = QPlainTextEdit()
+        self.raw_view.setReadOnly(True)
+        self.raw_view.setMaximumHeight(128)
+        self.raw_view.setStyleSheet("font-family: 'Cascadia Mono', Consolas, monospace; font-size: 11px;")
+        self.raw_view.setPlaceholderText("0000: 54 2C ... |T,...|（点击「测试连接」抓取前 4 KB 原始帧流）")
+        dl.addWidget(self.raw_view)
+
+        probe_row = QHBoxLayout()
+        self.ed_probe = QLineEdit()
+        self.ed_probe.setPlaceholderText("可选唤醒探针（Hex 如 AA 55 01 0D 0A，或文本如 START\\n）")
+        self.btn_send_probe = QPushButton("发送探针")
+        self.btn_send_probe.setEnabled(False)
+        self.btn_send_probe.setToolTip("测试连接打开通道后，向模块发送初始化/唤醒指令")
+        self.btn_send_probe.clicked.connect(self._send_probe)
+        probe_row.addWidget(self.ed_probe, 1)
+        probe_row.addWidget(self.btn_send_probe)
+        dl.addLayout(probe_row)
+
+        self.btn_test = QPushButton("测试连接 / 窥视流")
+        self.btn_test.setToolTip("打开通道并实时窥视约 2.5 秒原始字节流；再点一次可提前停止")
         self.btn_test.clicked.connect(self._test)
         self._test_timer: QTimer | None = None
         self._test_tr = None
         self._test_got = b""
         btn_ok = QPushButton("确定")
+        btn_ok.setObjectName("primaryBtn")
         btn_ok.clicked.connect(self._accept)
         btn_cancel = QPushButton("取消")
         btn_cancel.clicked.connect(self.reject)
@@ -130,6 +195,7 @@ class LinkDialog(QDialog):
         lay.addWidget(QLabel("端点（传输层只认这个字符串，其余都是帮你拼它的界面）："))
         lay.addWidget(self.preview)
         lay.addWidget(self.tabs, 1)
+        lay.addWidget(diag_box)
         lay.addLayout(bottom)
 
         self._parse_initial(endpoint)
@@ -384,12 +450,45 @@ class LinkDialog(QDialog):
 
         self._test_ep = ep
         self._test_got = b""
-        self._test_deadline = time.monotonic() + 1.2
+        self._test_deadline = time.monotonic() + 2.5
+        self.raw_view.clear()
+        self.lbl_diag.setText(f"正在窥视 {ep} …")
         self.btn_test.setText("停止测试")
+        self.btn_send_probe.setEnabled(hasattr(self._test_tr, "write"))
         t = QTimer(self)
         t.timeout.connect(self._test_tick)
-        t.start(20)
+        t.start(25)
         self._test_timer = t
+
+    def _send_probe(self) -> None:
+        tr = self._test_tr
+        txt = self.ed_probe.text().strip()
+        if tr is None or not txt or not hasattr(tr, "write"):
+            return
+        payload: bytes
+        try:
+            clean = txt.replace(" ", "").replace("0x", "").replace("0X", "")
+            if clean and all(c in "0123456789abcdefABCDEF" for c in clean) and len(clean) % 2 == 0:
+                payload = bytes.fromhex(clean)
+            else:
+                payload = txt.encode("utf-8").decode("unicode_escape").encode("latin1")
+            tr.write(payload)
+            self.lbl_diag.setText(f"已发送探针 {len(payload)} 字节，等待模块回应…")
+        except Exception as exc:
+            self.lbl_diag.setText(f"发送探针失败：{exc}")
+
+    def _update_raw_diag(self) -> None:
+        got = self._test_got
+        if not got:
+            return
+        tail = got[-1024:]
+        off = max(0, len(got) - len(tail))
+        self.raw_view.setPlainText(format_hex_ascii(tail, start_offset=off))
+        sb = self.raw_view.verticalScrollBar()
+        sb.setValue(sb.maximum())
+        hints = detect_frame_hints(got)
+        hint_str = " · 嗅探到：" + "，".join(hints) if hints else " · 暂未匹配常见固定帧头（可检查波特率或改用协议适配向导）"
+        self.lbl_diag.setText(f"已抓取 {len(got)} 字节{hint_str}")
 
     def _test_tick(self) -> None:
         tr = self._test_tr
@@ -397,15 +496,16 @@ class LinkDialog(QDialog):
             self._finish_test()
             return
         try:
-            chunk = tr.read(256)
+            chunk = tr.read(512)
             if chunk:
-                self._test_got += chunk
+                self._test_got = (self._test_got + chunk)[:4096]
+                self._update_raw_diag()
         except Exception as exc:
+            self.lbl_diag.setText(f"读取失败：{exc}")
             QMessageBox.warning(self, "读取失败", str(exc))
             self._finish_test()
             return
-        if (len(self._test_got) >= 64
-                or time.monotonic() >= self._test_deadline):
+        if len(self._test_got) >= 2048 or time.monotonic() >= self._test_deadline:
             self._finish_test()
 
     def _finish_test(self, cancelled: bool = False) -> None:
@@ -418,21 +518,24 @@ class LinkDialog(QDialog):
             except Exception:
                 pass
             self._test_tr = None
-        self.btn_test.setText("测试连接")
+        self.btn_test.setText("测试连接 / 窥视流")
+        self.btn_send_probe.setEnabled(False)
         if cancelled:
+            self.lbl_diag.setText(f"已停止窥视（共收到 {len(self._test_got)} 字节）")
             return
         got = self._test_got
         if got:
-            head = " ".join(f"{b:02X}" for b in got[:16])
-            QMessageBox.information(
-                self, "连接正常", f"收到 {len(got)} 字节。前 16 字节：\n{head}")
+            self._update_raw_diag()
         else:
+            self.lbl_diag.setText(
+                "通道已打开但未收到数据：常见原因为波特率不匹配、TX/RX 接反或需先发送唤醒探针。"
+            )
             QMessageBox.information(
                 self, "连上了但没数据",
-                "端口能打开，但 1 秒内没收到任何字节。常见原因：\n"
+                "端口能打开，但窥视期间没收到任何字节。常见原因：\n"
                 "· 波特率不对（这类模块常见 256000 / 230400 / 115200）\n"
                 "· 板子没上电，或 TX/RX 接反\n"
-                "· 需要先发指令才会开始吐数据")
+                "· 需要先在下方的「发送探针」框输入指令才会开始吐数据")
 
     def closeEvent(self, ev) -> None:
         # 对话框关掉时别把端口留在后台

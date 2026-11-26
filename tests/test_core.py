@@ -1294,6 +1294,114 @@ def test_multi_themes_and_palettes() -> None:
     ok("多套现代 UI 主题与雷达色板切换")
 
 
+def test_raw_stream_inspector_and_presets() -> None:
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt5.QtWidgets import QApplication
+    from radarscope.core.custom_proto import builtin_presets, preview_sample
+    from radarscope.ui.linkdialog import LinkDialog, detect_frame_hints, format_hex_ascii
+
+    sample = b"\xaa\xff\x03\x00\x10\x00\x20\x00$RATTM,01"
+    dump = format_hex_ascii(sample, start_offset=0)
+    assert "0000: AA FF 03 00" in dump and "|...... .$RATTM,0|" in dump and "0010: 31" in dump, dump
+    hints = detect_frame_hints(sample)
+    assert any("LD2450" in h for h in hints) and any("NMEA" in h for h in hints)
+
+    _app = QApplication.instance() or QApplication([])
+    dlg = LinkDialog("tcp://127.0.0.1:9000")
+    assert hasattr(dlg, "raw_view") and hasattr(dlg, "ed_probe")
+    dlg._test_got = sample
+    dlg._update_raw_diag()
+    assert "AA FF 03 00" in dlg.raw_view.toPlainText()
+    assert "LD2450" in dlg.lbl_diag.text()
+    dlg.close()
+
+    presets = {s.id: s for s in builtin_presets()}
+    assert len(presets) >= 7, f"预期至少 7 套预设模板，实际 {len(presets)}"
+    assert len(preview_sample(presets["polar_scan_ascii"], "$SCAN,4.25,042.0,0.86")) == 1
+    tf_t = preview_sample(presets["tf_point_bin"], "59 59 5E 01 20 03 00 00 A0")
+    assert len(tf_t) == 1 and abs(tf_t[0].rng - 3.50) < 1e-2
+    udp_t = preview_sample(presets["can_udp_77g"], "AB CD 00 00 00 40 00 00 20 41 00 00 80 BF 00 00 00 40 0D 0A")
+    assert len(udp_t) == 1 and abs(udp_t[0].x - 2.0) < 1e-3 and abs(udp_t[0].y - 10.0) < 1e-3
+    mod_t = preview_sample(presets["modbus_u16_dist"], "01 03 02 0D AC B8 1D")
+    assert len(mod_t) == 1 and abs(mod_t[0].rng - 3.50) < 1e-3
+    ok("E5 原始报文窥视排障与 E9 通用协议模板库 (7 套)")
+
+
+def test_ew_f1_f2_f3_and_deception() -> None:
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt5.QtWidgets import QApplication
+    from radarscope.core.fusion import FusionEngine, SensorSpec
+    from radarscope.core.model import Capabilities, RadarFrame, Target
+    from radarscope.core.sim_targets import ElectronicStation, compute_ew_metrics
+    from radarscope.ui.ppi import PPIWidget
+
+    m_off = compute_ew_metrics("chaff", 0.8, 20.0, 30.0, 40.0, eccm_agility=False)
+    m_on = compute_ew_metrics("chaff", 0.8, 20.0, 30.0, 40.0, eccm_agility=True)
+    assert m_on["burn_through_m"] > m_off["burn_through_m"], "开启 ECCM 捷变后烧穿距离应增大"
+    assert m_on["jsr_db"] < m_off["jsr_db"], "开启 ECCM 捷变后有效干信比应降低"
+
+    es = ElectronicStation(seed=99)
+    es.inject(0.0, 6.0, 0.4, -0.5, amp=0.9)
+    es.fc_sim = True
+    caps = Capabilities(name="相控阵", range_min=0.2, range_max=12.0,
+                        has_scan=True, has_azimuth=True, has_range_doppler=True)
+    az = np.linspace(-np.pi / 3, np.pi / 3, 61, dtype=np.float32)
+    r_ax = np.linspace(0.2, 12.0, 96, dtype=np.float32)
+    v_ax = np.linspace(-10.0, 10.0, 32, dtype=np.float32)
+
+    for jmode in ("vgpo", "chaff", "isrj"):
+        es.jam_mode = jmode
+        fr = RadarFrame(
+            timestamp=1.0,
+            scan=np.zeros((61, 96), dtype=np.float32),
+            az_axis=az,
+            r_axis=r_ax,
+            rd=np.zeros((32, 96), dtype=np.float32),
+            rd_v_axis=v_ax,
+        )
+        out = es.merge_into_frame(fr, caps, 0.1, threshold=0.28, cfar_mode="os")
+        assert "ew" in out.meta and out.meta["ew"]["jam_mode"] == jmode
+        if jmode == "vgpo":
+            assert float(np.max(out.rd)) > 0.4, "VGPO 应在 RD 速度维注入拖引峰"
+        else:
+            assert float(np.max(out.scan)) > 0.4, f"{jmode} 应在扫描矩阵注入特征能量"
+        assert "fc_solution" in out.meta and out.meta["fc_solution"]["simulated_only"]
+
+    # F3 多站共视重叠扇区下，单站孤立目标标为疑似欺骗，两站共视真实目标不标
+    fe = FusionEngine(n_az=120, n_rng=80, range_max=12.0)
+
+    class _MockDev:
+        def __init__(self, tgts):
+            self._tgts = tgts
+
+        def capabilities(self):
+            return Capabilities(name="Mock", has_scan=False, has_targets=True, range_max=12.0)
+
+        def read(self):
+            return RadarFrame(timestamp=time.monotonic(), scan=None, targets=list(self._tgts))
+
+        def close(self):
+            pass
+
+    fe.attach(SensorSpec(name="L", x=-1.0, y=0.0, bearing_deg=0.0, fov_deg=120.0),
+              _MockDev([Target(x=1.0, y=5.0, snr=0.9), Target(x=-0.5, y=4.0, snr=0.8)]))
+    fe.attach(SensorSpec(name="R", x=1.0, y=0.0, bearing_deg=0.0, fov_deg=120.0),
+              _MockDev([Target(x=-1.0, y=5.0, snr=0.9)]))
+    ff = fe.poll()
+    assert ff is not None and len(ff.meta["deception_points"]) == 1, f"应检出 1 个孤立疑似欺骗: {ff.meta}"
+
+    _app = QApplication.instance() or QApplication([])
+    ppi = PPIWidget()
+    ppi.set_capabilities(caps)
+    ppi.push_frame(out, out.targets)
+    ppi._deception_pts = list(ff.meta["deception_points"])
+    ppi.resize(300, 300)
+    ppi.grab()
+    ok("F1/F2/F3 电子战进阶波形、烧穿距离、模拟火控引导与多站抗欺骗")
+
+
 def main() -> int:
     print("RadarScope 核心测试")
     for fn in (test_codec, test_ld2450_sign, test_pipeline, test_alarm,
@@ -1309,7 +1417,8 @@ def main() -> int:
                test_ws_bridge, test_electronic_station, test_zone_hit_and_map_toggle,
                test_map_geolocate_and_provider, test_statusbar_and_map_dialog,
                test_ew_jamming_and_clutter_map, test_custom_proto_and_nmea_ttm,
-               test_protowizard_and_sim_ew_ui, test_multi_themes_and_palettes):
+               test_protowizard_and_sim_ew_ui, test_multi_themes_and_palettes,
+               test_raw_stream_inspector_and_presets, test_ew_f1_f2_f3_and_deception):
         fn()
     print(f"\n全部通过：{PASS} 组")
     return 0

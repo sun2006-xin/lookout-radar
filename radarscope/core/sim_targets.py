@@ -32,7 +32,61 @@ JAMMING_MODES = {
     "spot": "瞄准扇区压制（指定方位强干扰掩蔽目标）",
     "drfm": "DRFM 多假目标欺骗（同方位注入周期假回波）",
     "rgpo": "RGPO 距离波门拖引（假回波缓慢向外漂移）",
+    "vgpo": "VGPO 速度波门拖引（RD 多普勒维速度牵引欺骗）",
+    "chaff": "箔条云（Chaff）面状散射（高强度弥散面杂波演练）",
+    "isrj": "ISRJ 间歇采样转发干扰（主目标前后等距梳状假峰）",
 }
+
+
+def compute_ew_metrics(
+    jam_mode: str,
+    jam_jsr: float,
+    range_max: float,
+    jam_az_deg: float,
+    jam_bw_deg: float,
+    eccm_agility: bool = False,
+) -> dict:
+    """计算教学级电子战压制信干比 JSR(dB) 与烧穿距离 R_bt。"""
+    raw_jsr = max(0.05, min(1.0, float(jam_jsr)))
+    eff_jsr = raw_jsr * (0.35 if eccm_agility else 1.0)
+    jsr_db = round(20.0 * math.log10(max(0.05, eff_jsr) / 0.25), 1)
+    rmax = max(1.0, float(range_max))
+    bt = rmax * min(0.92, 0.78 / (1.0 + 2.4 * eff_jsr))
+    return {
+        "jam_mode": jam_mode,
+        "jsr_eff": round(eff_jsr, 3),
+        "jsr_db": jsr_db,
+        "burn_through_m": round(max(0.2, bt), 2),
+        "jam_az_deg": float(jam_az_deg),
+        "jam_bw_deg": float(jam_bw_deg),
+        "eccm_agility": bool(eccm_agility),
+    }
+
+
+def compute_fire_control_solution(
+    target: Target,
+    interceptor_speed: float = 0.0,
+) -> dict | None:
+    """计算教学级模拟拦截前置点、提前角与预计交会时间（纯数学推演）。"""
+    if target is None or target.rng <= 1e-4:
+        return None
+    v_int = max(0.5, float(interceptor_speed) if interceptor_speed > 0 else max(1.5, target.speed * 1.8))
+    tti = min(30.0, target.rng / v_int)
+    ix = target.x + target.vx * tti * 0.65
+    iy = target.y + target.vy * tti * 0.65
+    az_tgt = math.degrees(math.atan2(target.x, target.y))
+    az_lead = math.degrees(math.atan2(ix, iy))
+    lead_deg = (az_lead - az_tgt + 180.0) % 360.0 - 180.0
+    return {
+        "tid": int(target.tid),
+        "tx": float(target.x),
+        "ty": float(target.y),
+        "ix": float(ix),
+        "iy": float(iy),
+        "lead_deg": round(lead_deg, 1),
+        "tti_s": round(tti, 1),
+        "simulated_only": True,
+    }
 
 
 @dataclass(slots=True)
@@ -64,10 +118,12 @@ class ElectronicStation:
         self.jam_jsr: float = 0.55       # 干扰压制/假目标相对强度 0.1~1.0
         self.jam_az_deg: float = 15.0    # 扇区干扰中心方位（度）
         self.jam_bw_deg: float = 36.0    # 扇区干扰波束宽度（度）
+        self.eccm_agility: bool = False  # 模拟频率捷变/PRF 参差抗干扰教学开关
+        self.fc_sim: bool = False        # 模拟火控前置角引导推演开关（纯软件教学）
         self._jam_t: float = 0.0
 
     def active(self) -> bool:
-        return self.scenario != "none" or bool(self.objects) or self.jam_mode != "none"
+        return self.scenario != "none" or bool(self.objects) or self.jam_mode != "none" or self.fc_sim
 
     def set_scenario(self, scenario: str, range_max: float = 8.0) -> None:
         self.scenario = scenario if scenario in SCENARIOS else "none"
@@ -180,19 +236,26 @@ class ElectronicStation:
             for o in self.objects
         ]
 
+    def ew_metrics(self, range_max: float) -> dict:
+        return compute_ew_metrics(
+            self.jam_mode, self.jam_jsr, range_max,
+            self.jam_az_deg, self.jam_bw_deg, self.eccm_agility,
+        )
+
     def _apply_jamming(
         self,
         frame: RadarFrame,
         caps: Capabilities,
         dt: float,
     ) -> None:
-        """在软件层向扫描矩阵注入教学级电子对抗（噪声压制/DRFM/RGPO）波形。"""
+        """在软件层向扫描/RD矩阵注入教学级电子对抗（压制/DRFM/RGPO/VGPO/箔条/ISRJ）波形。"""
         if self.jam_mode == "none" or not frame.has_scan or frame.scan is None:
             return
         self._jam_t += max(0.01, min(0.5, float(dt)))
         scan = frame.scan.astype(np.float32, copy=True)
         n_az, n_r = scan.shape
-        jsr = max(0.1, min(1.0, float(self.jam_jsr)))
+        raw_jsr = max(0.1, min(1.0, float(self.jam_jsr)))
+        jsr = raw_jsr * (0.35 if self.eccm_agility else 1.0)
 
         if self.jam_mode == "barrage":
             noise = self._np_rng.uniform(0.0, jsr * 0.72, size=scan.shape).astype(np.float32)
@@ -204,30 +267,66 @@ class ElectronicStation:
             mask_a = np.exp(-0.5 * (da / (bw * 0.45)) ** 2).astype(np.float32)[:, None]
             strobe = self._np_rng.uniform(0.25, 1.0, size=scan.shape).astype(np.float32)
             scan = np.maximum(scan, jsr * mask_a * strobe)
-        elif self.jam_mode in ("drfm", "rgpo") and frame.az_axis is not None and frame.r_axis is not None:
-            # 围绕已有主回波生成同方位假目标串（DRFM）或逐帧外拖假回波（RGPO）
+        elif self.jam_mode == "chaff" and frame.az_axis is not None and frame.r_axis is not None:
+            az_c = math.radians(self.jam_az_deg)
+            spread = 1.0 + min(0.8, self._jam_t * 0.08)
+            bw = math.radians(max(14.0, self.jam_bw_deg * 0.85 * spread))
+            da = (frame.az_axis - az_c + math.pi) % (2 * math.pi) - math.pi
+            prof_a = np.exp(-0.5 * (da / (bw * 0.5)) ** 2).astype(np.float32)
+            r_center = caps.range_min + (caps.range_max - caps.range_min) * 0.48
+            r_sigma = max(0.35, (caps.range_max - caps.range_min) * 0.11 * spread)
+            prof_r = np.exp(-0.5 * ((frame.r_axis - r_center) / r_sigma) ** 2).astype(np.float32)
+            speckle = self._np_rng.uniform(0.45, 1.0, size=scan.shape).astype(np.float32)
+            scan = np.maximum(scan, (0.45 + 0.50 * jsr) * np.outer(prof_a, prof_r) * speckle)
+        elif self.jam_mode in ("drfm", "rgpo", "isrj") and frame.az_axis is not None and frame.r_axis is not None:
             anchors = frame.targets[:2] if frame.targets else [
                 Target(x=0.0, y=max(caps.range_min + 0.5, caps.range_max * 0.35), snr=0.85)
             ]
             sigma_r = max(0.10, (caps.range_max - caps.range_min) / max(1, n_r) * 1.1)
             sigma_a = math.radians(3.2)
+            span_r = max(0.5, caps.range_max - caps.range_min)
             for t in anchors:
                 da = (frame.az_axis - t.az + math.pi) % (2 * math.pi) - math.pi
                 prof_a = np.exp(-0.5 * (da / sigma_a) ** 2).astype(np.float32)
                 if self.jam_mode == "drfm":
-                    step_r = (caps.range_max - caps.range_min) * 0.14
+                    step_r = span_r * 0.14
                     offsets = (step_r, 2.0 * step_r, -step_r)
                     amp_j = 0.55 + 0.40 * jsr
-                else:
-                    span_r = max(0.5, (caps.range_max - caps.range_min) * 0.55)
-                    pull = (self._jam_t * 0.35 * span_r) % span_r
+                elif self.jam_mode == "rgpo":
+                    pull = (self._jam_t * 0.35 * span_r * 0.55) % (span_r * 0.55)
                     offsets = (pull,)
                     amp_j = 0.65 + 0.32 * jsr
+                else:
+                    comb = max(0.25, span_r * 0.08)
+                    offsets = (-2.0 * comb, -comb, comb, 2.0 * comb)
+                    amp_j = 0.48 + 0.42 * jsr
                 for off in offsets:
                     rf = t.rng + off
                     if caps.range_min * 0.8 <= rf <= caps.range_max * 0.98:
                         prof_r = np.exp(-0.5 * ((frame.r_axis - rf) / sigma_r) ** 2).astype(np.float32)
                         scan = np.maximum(scan, amp_j * np.outer(prof_a, prof_r))
+        elif self.jam_mode == "vgpo":
+            # VGPO 在多普勒维注入随时间牵引的假速度峰；无 RD 时伴随微弱距离维脉冲抖动
+            if frame.rd is not None and frame.rd_v_axis is not None and frame.r_axis is not None:
+                rd = frame.rd.astype(np.float32, copy=True)
+                vmax = max(1.0, float(np.max(np.abs(frame.rd_v_axis))))
+                r0 = frame.targets[0].rng if frame.targets else caps.range_max * 0.4
+                v0 = frame.targets[0].speed if frame.targets else 0.0
+                v_pull = ((v0 + self._jam_t * 1.4) % (1.8 * vmax)) - 0.9 * vmax
+                sig_v = max(0.5, vmax * 0.10)
+                sig_r = max(0.15, (caps.range_max - caps.range_min) * 0.04)
+                pv = np.exp(-0.5 * ((frame.rd_v_axis - v_pull) / sig_v) ** 2).astype(np.float32)
+                pr = np.exp(-0.5 * ((frame.r_axis - r0) / sig_r) ** 2).astype(np.float32)
+                rd = np.maximum(rd, (0.55 + 0.40 * jsr) * np.outer(pv, pr))
+                frame.rd = np.clip(rd, 0.0, 1.0)
+            elif frame.r_axis is not None and frame.az_axis is not None:
+                r0 = frame.targets[0].rng if frame.targets else caps.range_max * 0.4
+                az0 = frame.targets[0].az if frame.targets else 0.0
+                da = (frame.az_axis - az0 + math.pi) % (2 * math.pi) - math.pi
+                prof_a = np.exp(-0.5 * (da / math.radians(3.5)) ** 2).astype(np.float32)
+                jit = math.sin(self._jam_t * 3.5) * max(0.15, caps.range_max * 0.03)
+                prof_r = np.exp(-0.5 * ((frame.r_axis - (r0 + jit)) / 0.25) ** 2).astype(np.float32)
+                scan = np.maximum(scan, (0.50 + 0.40 * jsr) * np.outer(prof_a, prof_r))
         frame.scan = np.clip(scan, 0.0, 1.0)
 
     def merge_into_frame(
@@ -259,13 +358,20 @@ class ElectronicStation:
                         scan = np.maximum(scan, t.snr * np.outer(prof_a, prof_r))
                 frame.scan = np.clip(scan, 0.0, 1.0)
 
-        if self.jam_mode != "none" and frame.has_scan:
-            self._apply_jamming(frame, caps, dt)
-            # 干扰开启时按当前 CFAR 算法重跑检测，以直观对比 CA / OS / GO 抗干扰能力
-            frame.targets = pipeline.detect_targets(
-                frame,
-                threshold=threshold,
-                max_targets=max(8, caps.max_targets or 8),
-                cfar_mode=cfar_mode,
-            )
+        if self.jam_mode != "none":
+            if frame.has_scan:
+                self._apply_jamming(frame, caps, dt)
+                # 干扰开启时按当前 CFAR 算法重跑检测，以直观对比 CA / OS / GO 抗干扰能力
+                frame.targets = pipeline.detect_targets(
+                    frame,
+                    threshold=threshold,
+                    max_targets=max(8, caps.max_targets or 8),
+                    cfar_mode=cfar_mode,
+                )
+            frame.meta["ew"] = self.ew_metrics(caps.range_max)
+        if self.fc_sim and frame.targets:
+            pri = min(frame.targets, key=lambda t: t.rng)
+            sol = compute_fire_control_solution(pri)
+            if sol is not None:
+                frame.meta["fc_solution"] = sol
         return frame

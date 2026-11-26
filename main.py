@@ -75,8 +75,9 @@ def main() -> int:
     from PyQt5.QtCore import QSettings
 
     from radarscope.ui.theme import DEFAULT_THEME, build_stylesheet
-    from radarscope.ui.winstyle import make_app_icon
+    from radarscope.ui.winstyle import apply_modern_style, make_app_icon
 
+    apply_modern_style(app)
     app.setWindowIcon(make_app_icon())
     theme = str(QSettings("RadarScope", "Console").value("theme", DEFAULT_THEME))
     app.setStyleSheet(build_stylesheet(theme))

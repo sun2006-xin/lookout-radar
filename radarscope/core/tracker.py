@@ -65,6 +65,7 @@ class Tracker:
             trk.threat = det.threat
             trk.cls = det.cls or trk.cls
             trk.rcs = det.rcs or trk.rcs
+            trk.views = det.views
             trk.missed = 0.0
             used_t.add(ti)
             used_d.add(di)

@@ -54,7 +54,7 @@ from .theme import (DEFAULT_PALETTE, DEFAULT_THEME, LIGHT_PALETTE_KEYS, PALETTES
 from .tracktable import TrackTable
 from .extra import AisDialog, ControlDialog, MapLocationDialog
 from .waterfall import WaterfallWidget
-from .winstyle import enable_dark_titlebar, install_dialog_titlebar, make_app_icon
+from .winstyle import apply_modern_style, enable_dark_titlebar, install_dialog_titlebar, make_app_icon
 
 LOG = logging.getLogger("radarscope")
 
@@ -510,6 +510,9 @@ class MainWindow(ConnectionController, ExportController,
             ("spot", "瞄准扇区压制（指定方位干扰）"),
             ("drfm", "DRFM 多假目标欺骗"),
             ("rgpo", "RGPO 距离波门拖引"),
+            ("vgpo", "VGPO 速度波门拖引"),
+            ("chaff", "箔条云 (Chaff) 面散射"),
+            ("isrj", "ISRJ 间歇采样转发干扰"),
         ):
             act = QAction(title, self)
             act.setCheckable(True)
@@ -657,6 +660,7 @@ class MainWindow(ConnectionController, ExportController,
         self._on_palette_changed()          # 让所有面板启动时配色一致
         self._sync_zones()                  # 界面就绪后把禁入区画上去
         # 窗口标题栏是 Windows 画的，PyQt 的样式表管不到，得单独调 DWM
+        apply_modern_style(QApplication.instance())
         self.setWindowIcon(make_app_icon())
         # 对话框标题栏统一跟随主题（新增对话框不用再单独处理）
         self._dlg_filter = install_dialog_titlebar(lambda: self._theme)

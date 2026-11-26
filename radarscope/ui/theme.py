@@ -382,18 +382,44 @@ QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left;
     padding: 0 6px; left: 10px; color: @accent@; }
 QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit, QPlainTextEdit {
     background: @input@; border: 1px solid @border_hi@; border-radius: 7px;
-    padding: 4px 10px; color: @text@; font-size: 12px; min-height: 22px;
+    padding: 3px 10px; color: @text@; font-size: 12px; min-height: 20px;
     selection-background-color: @accent@; selection-color: #FFFFFF; }
+QComboBox { padding-right: 26px; }
+QSpinBox, QDoubleSpinBox { padding-right: 26px; }
 QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover, QLineEdit:hover {
     border-color: @accent@; }
 QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QLineEdit:focus {
     border: 1.5px solid @accent@; }
-QComboBox::drop-down { border: none; width: 20px; }
+QComboBox::drop-down {
+    subcontrol-origin: padding; subcontrol-position: top right; width: 22px;
+    border: none; border-left: 1px solid @border@;
+    border-top-right-radius: 6px; border-bottom-right-radius: 6px;
+    background: @surface2@; }
+QComboBox::drop-down:hover { background: @accent_soft@; }
+QComboBox::drop-down:pressed { background: @checked_bg@; }
+QComboBox::down-arrow { image: url(@arr_down@); width: 10px; height: 10px; }
+QSpinBox::up-button, QDoubleSpinBox::up-button {
+    subcontrol-origin: padding; subcontrol-position: top right; width: 22px;
+    border: none; border-left: 1px solid @border@; border-bottom: 1px solid @border@;
+    border-top-right-radius: 6px; background: @surface2@; }
+QSpinBox::down-button, QDoubleSpinBox::down-button {
+    subcontrol-origin: padding; subcontrol-position: bottom right; width: 22px;
+    border: none; border-left: 1px solid @border@;
+    border-bottom-right-radius: 6px; background: @surface2@; }
+QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
+    background: @accent_soft@; }
+QSpinBox::up-button:pressed, QDoubleSpinBox::up-button:pressed,
+QSpinBox::down-button:pressed, QDoubleSpinBox::down-button:pressed {
+    background: @checked_bg@; }
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow { image: url(@arr_up@); width: 10px; height: 8px; }
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow { image: url(@arr_down@); width: 10px; height: 8px; }
 QComboBox QAbstractItemView { background: @surface@; color: @text@;
     selection-background-color: @accent_soft@; selection-color: @accent@;
     border: 1px solid @border_hi@; border-radius: 8px; padding: 4px; outline: none; }
 QPushButton { background: @surface@; border: 1px solid @border_hi@;
-    border-radius: 7px; padding: 5px 14px; color: @text@; font-size: 12px; font-weight: 500; }
+    border-radius: 7px; padding: 4px 13px; min-height: 20px; color: @text@;
+    font-size: 12px; font-weight: 500; }
 QPushButton:hover { background: @hover@; border-color: @accent@; }
 QPushButton:pressed { background: @grid@; }
 QPushButton:checked { background: @checked_bg@; border-color: @accent@;
@@ -433,7 +459,7 @@ QDockWidget::title { background: @surface2@; padding: 6px 10px;
 QCheckBox { color: @text@; font-size: 12px; spacing: 6px; }
 QCheckBox::indicator { width: 15px; height: 15px; border-radius: 4px;
     border: 1px solid @border_hi@; background: @input@; }
-QCheckBox::indicator:checked { background: @accent@; border-color: @accent@; }
+QCheckBox::indicator:checked { background: @accent@; border-color: @accent@; image: url(@chk_on@); }
 QToolTip { background: @surface@; color: @text@; border: 1px solid @border_hi@;
     padding: 6px 10px; border-radius: 8px; font-size: 12px; }
 QScrollBar:vertical { background: transparent; width: 8px; margin: 2px; }
@@ -446,10 +472,64 @@ QScrollBar::handle:horizontal { background: @border_hi@; border-radius: 4px;
 """
 
 
+def _ensure_ui_icons(mode: str, color_hex: str) -> dict[str, str]:
+    """用 QImage 离屏生成 2x 抗锯齿矢量箭头与对勾 PNG 供 QSS url() 使用（无需提前建 QApplication）。"""
+    try:
+        from PyQt5.QtCore import QPointF, Qt
+        from PyQt5.QtGui import QColor, QImage, QPainter, QPen
+        from .. import paths
+
+        icon_dir = paths.data_dir() / "ui_icons"
+        icon_dir.mkdir(parents=True, exist_ok=True)
+        tag = "".join(ch for ch in f"{mode}_{color_hex}" if ch.isalnum() or ch in ("_", "-"))
+        p_up = icon_dir / f"{tag}_up.png"
+        p_dn = icon_dir / f"{tag}_dn.png"
+        p_chk = icon_dir / "chk_on.png"
+
+        def _draw_chevron(path, up: bool) -> None:
+            if path.exists():
+                return
+            img = QImage(24, 24, QImage.Format_ARGB32_Premultiplied)
+            img.fill(0)
+            p = QPainter(img)
+            p.setRenderHint(QPainter.Antialiasing, True)
+            p.setPen(QPen(QColor(color_hex), 3.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            if up:
+                p.drawLine(QPointF(6.0, 15.0), QPointF(12.0, 9.0))
+                p.drawLine(QPointF(12.0, 9.0), QPointF(18.0, 15.0))
+            else:
+                p.drawLine(QPointF(6.0, 9.0), QPointF(12.0, 15.0))
+                p.drawLine(QPointF(12.0, 15.0), QPointF(18.0, 9.0))
+            p.end()
+            img.save(str(path), "PNG")
+
+        _draw_chevron(p_up, True)
+        _draw_chevron(p_dn, False)
+        if not p_chk.exists():
+            img = QImage(24, 24, QImage.Format_ARGB32_Premultiplied)
+            img.fill(0)
+            p = QPainter(img)
+            p.setRenderHint(QPainter.Antialiasing, True)
+            p.setPen(QPen(QColor("#FFFFFF"), 3.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.drawLine(QPointF(5.5, 12.5), QPointF(10.2, 17.2))
+            p.drawLine(QPointF(10.2, 17.2), QPointF(18.5, 7.2))
+            p.end()
+            img.save(str(p_chk), "PNG")
+        return {
+            "arr_up": p_up.as_posix(),
+            "arr_down": p_dn.as_posix(),
+            "chk_on": p_chk.as_posix(),
+        }
+    except Exception:
+        return {"arr_up": "", "arr_down": "", "chk_on": ""}
+
+
 def build_stylesheet(mode: str = DEFAULT_THEME, scale: float = 1.0) -> str:
     """生成样式表。scale 用于 Ctrl+= / Ctrl+- 的字号缩放。"""
-    t = dict(THEMES.get(mode, THEMES[DEFAULT_THEME]))
+    key = mode if mode in THEMES else DEFAULT_THEME
+    t = dict(THEMES[key])
     t["font"] = FONT_UI
+    t.update(_ensure_ui_icons(key, str(t.get("muted", "#64748B"))))
     qss = _QSS
     for k, v in t.items():
         if isinstance(v, (str, int, float)) and not isinstance(v, bool):

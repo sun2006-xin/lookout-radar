@@ -16,8 +16,16 @@ from ..drivers.custom_generic import reload_custom_drivers
 _SAMPLES = {
     "nmea_ttm": "$RATTM,01,1.25,045.0,T,12.5,210.0,T,0.3,4.2,N,VESSEL_A,T,,*46",
     "csv_xy": "$TGT,1.8,12.5,-0.5,-1.2,0.88",
-    "csv_polar": "$TGT,18.4,042.0,0.0,0.0,0.85",
+    "csv_polar": "$SCAN,4.25,042.0,0.86",
     "binary_fixed": "AA 55 96 00 C8 01 58 00 0D 0A",
+    "binary_point": "59 59 5E 01 20 03 00 00 A0",
+}
+
+_PRESET_SAMPLES = {
+    "polar_scan_ascii": "$SCAN,4.25,042.0,0.86",
+    "tf_point_bin": "59 59 5E 01 20 03 00 00 A0",
+    "can_udp_77g": "AB CD 00 00 00 40 00 00 20 41 00 00 80 BF 00 00 00 40 0D 0A",
+    "modbus_u16_dist": "01 03 02 0D AC B8 1D",
 }
 
 
@@ -50,7 +58,8 @@ class ProtoWizardDialog(QDialog):
             ("nmea_ttm", "航海 NMEA TTM ($RATTM 目标报文)"),
             ("csv_xy", "文本行 · 笛卡尔坐标 (X, Y, Vx, Vy)"),
             ("csv_polar", "文本行 · 极坐标 (距离, 方位°)"),
-            ("binary_fixed", "二进制 · 固定帧长/帧头结构体"),
+            ("binary_fixed", "二进制 · 坐标结构体 (X, Y / Vx, Vy)"),
+            ("binary_point", "二进制 · 单点测距 (距离, 强度)"),
         ):
             self.cb_mode.addItem(v, k)
         self.cb_form = QComboBox()
@@ -179,7 +188,7 @@ class ProtoWizardDialog(QDialog):
         self.sp_offset.setValue(spec.payload_offset)
         self.ed_fmt.setText(spec.struct_fmt)
         self.sp_scale.setValue(spec.scale)
-        self.ed_sample.setPlainText(_SAMPLES.get(spec.mode, ""))
+        self.ed_sample.setPlainText(_PRESET_SAMPLES.get(spec.id, _SAMPLES.get(spec.mode, "")))
 
     def _build_spec(self) -> CustomProtocolSpec:
         return CustomProtocolSpec(

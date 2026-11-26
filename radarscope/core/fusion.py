@@ -281,6 +281,8 @@ class FusionEngine:
         else:
             fused_targets = self._fuse_targets(obs)
 
+        deception_pts = self._detect_single_station_deception(fused_targets, now)
+
         return RadarFrame(
             timestamp=now,
             scan=self._close_gaps(),
@@ -294,8 +296,33 @@ class FusionEngine:
                 "fusion": True,
                 "fusion_mode": self.fusion_mode,
                 "fusion_stats": dict(self.stats),
+                "deception_points": deception_pts,
             },
         )
+
+    def _detect_single_station_deception(
+        self, targets: list[Target], now: float
+    ) -> list[tuple[float, float]]:
+        """F3 多站交叉抗欺骗：在 >=2 台在线传感器共视重叠扇区内，孤立单站目标标为疑似欺骗。"""
+        active = [
+            c.spec for c in self._children
+            if c.spec.enabled and c.frame is not None and (now - c.last_frame_t) <= self.stale_s
+        ]
+        if len(active) < 2:
+            return []
+        suspect: list[tuple[float, float]] = []
+        for t in targets:
+            if getattr(t, "views", 1) >= 2:
+                continue
+            az_deg = degrees(atan2(t.x, t.y))
+            cover_cnt = 0
+            for s in active:
+                diff = abs(((az_deg - s.bearing_deg + 180.0) % 360.0) - 180.0)
+                if diff <= s.fov_deg * 0.5 and t.rng <= max(self.range_max, 1.0):
+                    cover_cnt += 1
+            if cover_cnt >= 2:
+                suspect.append((float(t.x), float(t.y)))
+        return suspect
 
     # ------------------------------------------------------------------ #
     def _close_gaps(self) -> np.ndarray:

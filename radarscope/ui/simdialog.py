@@ -3,12 +3,12 @@ from __future__ import annotations
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
-    QAbstractItemView, QComboBox, QDialog, QDoubleSpinBox, QFormLayout,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFormLayout,
     QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPushButton,
     QTableWidget, QTableWidgetItem, QVBoxLayout,
 )
 
-from ..core.sim_targets import JAMMING_MODES, SCENARIOS, ElectronicStation
+from ..core.sim_targets import JAMMING_MODES, SCENARIOS, ElectronicStation, compute_ew_metrics
 
 
 class SimStationDialog(QDialog):
@@ -119,7 +119,7 @@ class SimStationDialog(QDialog):
         self.sp_jsr.setRange(0.1, 1.0)
         self.sp_jsr.setSingleStep(0.1)
         self.sp_jsr.setValue(self.station.jam_jsr)
-        self.sp_jsr.valueChanged.connect(lambda v: setattr(self.station, "jam_jsr", float(v)))
+        self.sp_jsr.valueChanged.connect(self._on_jsr)
 
         self.sp_jaz = QDoubleSpinBox()
         self.sp_jaz.setRange(-180.0, 180.0)
@@ -141,11 +141,28 @@ class SimStationDialog(QDialog):
         ew_row.addWidget(self.sp_jaz)
         ew_row.addWidget(QLabel("波束宽"))
         ew_row.addWidget(self.sp_jbw)
+
+        eccm_row = QHBoxLayout()
+        self.chk_eccm = QCheckBox("ECCM 模拟频率捷变抗干扰")
+        self.chk_eccm.setChecked(self.station.eccm_agility)
+        self.chk_eccm.toggled.connect(self._on_eccm)
+        self.chk_fc = QCheckBox("模拟火控拦截前置角引导推演 [教学]")
+        self.chk_fc.setChecked(self.station.fc_sim)
+        self.chk_fc.toggled.connect(lambda on: setattr(self.station, "fc_sim", bool(on)))
+        eccm_row.addWidget(self.chk_eccm)
+        eccm_row.addWidget(self.chk_fc)
+        eccm_row.addStretch(1)
+
+        self.lbl_ew_info = QLabel("")
+        self.lbl_ew_info.setStyleSheet("color:#0F766E;font-size:12px;")
+
         ew_form.addRow("干扰样式", self.cb_jam)
         ew_form.addRow("干扰参数", ew_row)
+        ew_form.addRow("抗干扰与推演", eccm_row)
+        ew_form.addRow("烧穿评估", self.lbl_ew_info)
         ew_tip = QLabel(
-            "教学用法：开启干扰后，切换主窗口「设置 → 检测算法 (CA / OS / GO-CFAR)」与「杂波抑制」，\n"
-            "可直观对比不同抗干扰算法下的虚警抑制、烧穿距离与假目标甄别效果。"
+            "教学用法：开启干扰后，切换主窗口「设置 → 检测算法 (CA / OS / GO-CFAR)」与「ECCM 捷变抗干扰」，\n"
+            "可实时观察 PPI 上的烧穿距离圈、ESM 干扰方位弧段与 RD 多普勒 VGPO 拖引效果。"
         )
         ew_tip.setWordWrap(True)
         ew_tip.setStyleSheet("color:#6B7280;font-size:11px;")
@@ -153,10 +170,33 @@ class SimStationDialog(QDialog):
         lay.addWidget(ew_box)
         lay.addLayout(btns)
         self._refresh()
+        self._update_ew_label()
+
+    def _on_jsr(self, v: float) -> None:
+        self.station.jam_jsr = float(v)
+        self._update_ew_label()
+
+    def _on_eccm(self, on: bool) -> None:
+        self.station.eccm_agility = bool(on)
+        self._update_ew_label()
+
+    def _update_ew_label(self) -> None:
+        if self.station.jam_mode == "none":
+            self.lbl_ew_info.setText("未注入干扰（正常信号传播）")
+            return
+        m = compute_ew_metrics(
+            self.station.jam_mode, self.station.jam_jsr, self.range_max,
+            self.station.jam_az_deg, self.station.jam_bw_deg, self.station.eccm_agility,
+        )
+        tag = "（ECCM 捷变已抑制干扰）" if m["eccm_agility"] else "（未开 ECCM）"
+        self.lbl_ew_info.setText(
+            f"JSR = {m['jsr_db']:+.1f} dB ｜ 理论烧穿距离 = {m['burn_through_m']:.2f} m {tag}"
+        )
 
     def _on_ew(self) -> None:
         self.station.jam_mode = str(self.cb_jam.currentData() or "none")
         self.station._jam_t = 0.0
+        self._update_ew_label()
 
     def _on_scene(self) -> None:
         sc = str(self.cb_scene.currentData() or "none")

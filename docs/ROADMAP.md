@@ -1,6 +1,6 @@
 # 开发路线图与未来计划
 
-> 版本：v1.1.2（2026-11-26）· 状态：**软件核心、工程化、多主题现代化界面与通用适配主线（B1~B3、C1~C4、D1~D6、E1~E4、A5）已落地；下一阶段聚焦纯软件生态/电子战拓展及实机硬件联调**。
+> 版本：v1.1.3（2026-11-26）· 状态：**软件生态（E1~E5、E9）、电子战教学全线（F1~F3）、现代多主题与微调控件体系已落地；下一阶段聚焦离线海图 E6、ROS/RHI（E7~E8）及实机硬件联调**。
 >
 > 配套文档：[ARCHITECTURE.md](ARCHITECTURE.md)（系统分层与数据契约）· [STRUCTURE.md](STRUCTURE.md)（代码文件索引）。
 
@@ -11,17 +11,17 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | 瞭望 Lookout（Python 包名 `radarscope`） |
-| 源码规模 | 约 13 700 行 / 73 个 Python 文件 / 40 组单元测试 |
+| 源码规模 | 约 14 200 行 / 73 个 Python 文件 / 42 组单元测试 |
 | 主窗口结构 | `ui/mainwindow.py` + `ui/controllers.py`（三控制器 mixin） |
 | 打包方式 | `pyinstaller --noconfirm --clean installer/Lookout.spec`（生成 `dist/Lookout/Lookout.exe`） |
 | 开源仓库 | https://github.com/sun2006-xin/lookout-radar （MIT） |
-| 默认视觉 | 7 套现代 UI 主题（晨曦白/北欧海雾/深空夜蓝/石墨工业/航海夜视/战术夜绿/琥珀指挥）× 8 套雷达色板 |
-| 已完成阶段 | A5 录制夹具回归、B1~B3 核心算法、C1~C4 架构增强、D1~D6 工程化、E1~E4 通用适配与电子战教学初版 |
+| 默认视觉 | 7 套现代 UI 主题 × 8 套雷达色板 + 矢量微调控件 |
+| 已完成阶段 | A5、B1~B3、C1~C4、D1~D6、E1~E5、E9、F1~F3 |
 
 **本地开发检查命令**（提交或发版前确保全部通过）：
 
 ```bat
-.venv\Scripts\python.exe tests\test_core.py     :: 40 组单元测试
+.venv\Scripts\python.exe tests\test_core.py     :: 42 组单元测试
 .venv\Scripts\python.exe tools\check.py         :: 字节码编译 + 单元测试 + 无窗口链路自检 + 夹具回归
 .venv\Scripts\python.exe main.py --selftest     :: 打包前/后无界面自检（退出码 0）
 ```
@@ -171,11 +171,11 @@
 | E2 | 电子对抗 / 无线电干扰教学仿真 | `[x]` 已完成 | **纯软件信号建模，无射频发射**：`core/sim_targets.py` + `ui/simdialog.py` 支持宽带压制/扇区瞄准/DRFM多假目标/RGPO距离拖引，实时对比 `CA/OS/GO-CFAR` |
 | E3 | 零代码通用雷达协议适配器 | `[x]` 已完成 | 新增 `core/custom_proto.py`、`drivers/custom_generic.py`、`ui/protodialog.py`，内置 NMEA `$RATTM` 航海雷达、77G `$TGT` CSV 与二进制结构体帧，开箱即用 |
 | E4 | 航海 / 车载 / 无人机预设场景 | `[x]` 已完成 | `ElectronicStation` 新增 `marine`（航道避碰）、`automotive`（77G 多车道）、`drone`（低空周界突防）动态演练场景 |
-| E5 | 原始报文实时窥视与字节切帧诊断 | `[ ]` 排期 | 借鉴 Foxglove/串口调试器：在「连接设置 → 测试连接」旁实时滚动 Hex/ASCII 原始流并标出帧头/长度匹配位，快速排障波特率/字序 |
+| E5 | 原始报文实时窥视与字节切帧诊断 | `[x]` 已完成 | `ui/linkdialog.py` 新增实时 Hex/ASCII 并排窥视区、常见雷达魔数签名嗅探（LD19/LD2450/LD2410/TF/NMEA/CSV）与唤醒探针发送 |
 | E6 | 离线 MBTiles 海图、NMEA 本船定位与陆地掩膜 | `[ ]` 排期 | 借鉴 `OpenCPN` 与 `Furuno Smart Radar`：支持离线 `.mbtiles`、解析 `$GPGGA/$GNRMC/$HEHDT/$RARSD` 自动更新本船坐标航向、陆地静止回波掩膜 |
 | E7 | 3D 俯仰 RHI 显示（Distance-Height） | `[ ]` 排期 | 借鉴 ROS RViz2：针对 4D 成像毫米波/3D 激光（`Capabilities.has_elevation`），扩展距离-高度（RHI）剖面与高度分层过滤 |
 | E8 | 机器人与遥测标准协议互通（ROS / Foxglove） | `[ ]` 排期 | 借鉴 `Foxglove Studio`：扩展 `tools/ws_bridge.py` 与导出链路，支持标准 `LaserScan / PointCloud2` JSON 及 `.mcap` 回放日志互通 |
-| E9 | 常用消费/工业雷达零代码模板扩充 | `[ ]` 排期 | 扩充 `core/custom_proto.py` 开箱预设库（思岚 RPLIDAR / 北醒 TF 系列 / 常见 Modbus-RTU / CAN-UDP 77G 帧等），选型即连 |
+| E9 | 常用消费/工业雷达零代码模板扩充 | `[x]` 已完成 | `core/custom_proto.py` 扩充至 **7 套开箱预设**：新增极坐标 `$SCAN`、北醒 TF 系列 9B 帧（`59 59`）、77G CAN-UDP 浮点帧与 Modbus-RTU 帧，并补全 `binary_point` 解析 |
 
 ---
 
@@ -183,9 +183,9 @@
 
 | 编号 | 任务 | 状态 | 实现与验收要点 |
 |---|---|---|---|
-| F1 | 进阶电子进攻（EA）与模拟射频波形扩展 | `[ ]` 排期 | 在 `E2`（barrage/spot/drfm/rgpo）基础上，补充 **VGPO 速度波门拖引**（RD 多普勒维）、**箔条云（Chaff）面状散射** 与 **ISRJ 间歇采样转发干扰** 等数字射频波形建模 |
-| F2 | ECCM 抗干扰对照、烧穿曲线与模拟火控推演 | `[ ]` 排期 | 新增烧穿距离（Burn-through Range）理论圈绘制、`JSR(dB)` 实时显示、模拟频率捷变/PRF 参差、教学级模拟跟踪锁定/截击航路推演，支持原始 vs 抗干扰同屏对比 |
-| F3 | 多站交叉抗欺骗与电子侦察（RWR/ESM） | `[ ]` 排期 | 利用 `sensors.json` 多站共视校验：无他站交叉印证的孤立假目标标黄提示「疑似欺骗」；PPI 外环增加干扰源方位截获扇区告警（ESM/RWR） |
+| F1 | 进阶电子进攻（EA）与模拟射频波形扩展 | `[x]` 已完成 | 在 `E2` 基础上新增 **VGPO 速度波门拖引**（RD 多普勒维拖引假峰）、**箔条云（Chaff）面状散射** 与 **ISRJ 间歇采样转发干扰**（等距梳状假目标列） |
+| F2 | ECCM 抗干扰对照、烧穿曲线与模拟火控推演 | `[x]` 已完成 | `ui/ppi.py` + `core/sim_targets.py` 支持 **烧穿距离圈 + `JSR(dB)`** 实时绘制、**ECCM 模拟频率捷变抗干扰对比** 与 **教学级模拟火控前置引导推演** |
+| F3 | 多站交叉抗欺骗与电子侦察（RWR/ESM） | `[x]` 已完成 | `core/fusion.py` 检测共视重叠区单站孤立目标并在 PPI 标黄「疑似欺骗」；PPI 外环同步绘制 ESM 干扰源方位截获扇区弧段 |
 
 ---
 
@@ -202,12 +202,11 @@
 
 ## 6. 建议的演进顺序
 
-> **当前进度（2026-11-26）**：`A5`、`B1~B3`、`C1~C4`、`D1~D6`、`E1~E4` 已全部完成并有 40 组测试兜底；以下按纯软件主线与硬件主线分层推进：
+> **当前进度（2026-11-26）**：`A5`、`B1~B3`、`C1~C4`、`D1~D6`、`E1~E5`、`E9`、`F1~F3` 已全部完成并有 42 组测试兜底；以下按剩余纯软件扩展与硬件联调主线推进：
 
 ```
-软件主线 1（航海/通用零代码生态）：E5（原始流窥视排障）→ E9（扩充零代码驱动模板库）→ E6（离线 MBTiles + NMEA 本船定位 + 陆地掩膜）
-软件主线 2（电子战教学与信号对照）：F1（VGPO/箔条/ISRJ 干扰样式）→ F2（烧穿距离圈 + 捷变抗干扰对照/模拟火控推演）→ F3（多站抗欺骗与 ESM 方位指示）
-软件主线 3（机器人/三维扩展）：  E8（ROS/Foxglove 生态互通）→ E7（俯仰 RHI 剖面）
+软件主线 1（航海海图生态）：E6（离线 MBTiles + NMEA 本船定位 + 陆地掩膜）
+软件主线 2（机器人/三维扩展）：E8（ROS/Foxglove 生态互通）→ E7（俯仰 RHI 剖面）
 硬件主线（实体硬件到位后再开）：A1 → A2 → A3 → A4（真机联调与样本录制）→ B4（IWR6843+DCA1000 原始 ADC→FFT）
 ```
 

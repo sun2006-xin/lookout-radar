@@ -51,21 +51,26 @@ class CustomProtocolSpec:
     endian: str = "<"               # < 小端 | > 大端
     payload_offset: int = 2         # 第一目标起始字节偏移
     struct_fmt: str = "hhh"         # 例：hh -> (x,y); hhh -> (x,y,snr); ffff -> (x,y,vx,vy)
+    transports: tuple[str, ...] = ("serial", "tcp", "udp", "file")
     notes: str = ""
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        d["transports"] = list(self.transports)
+        return d
 
     @classmethod
     def from_dict(cls, raw: dict) -> "CustomProtocolSpec":
         valid = {k: raw[k] for k in cls.__dataclass_fields__ if k in raw}
+        if "transports" in valid and isinstance(valid["transports"], list):
+            valid["transports"] = tuple(str(t) for t in valid["transports"])
         spec = cls(**valid)
         spec.id = "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in spec.id).strip("_") or "custom_proto"
         return spec
 
 
 def builtin_presets() -> list[CustomProtocolSpec]:
-    """开箱内置 3 套通用场景适配器（覆盖航海、车载与自研嵌入式串口协议）。"""
+    """开箱内置 7 套通用消费/工业/航海/车载雷达协议模板。"""
     return [
         CustomProtocolSpec(
             id="nmea_ttm",
@@ -99,6 +104,25 @@ def builtin_presets() -> list[CustomProtocolSpec]:
             notes="文本行格式：$TGT,x_m,y_m,vx_ms,vy_ms,snr（每行一个目标）",
         ),
         CustomProtocolSpec(
+            id="polar_scan_ascii",
+            label="二维激光 / 扇扫 · 极坐标 ASCII ($SCAN)",
+            mode="csv_polar",
+            form="omni",
+            vendor="通用激光/机械扫描",
+            range_min=0.1,
+            range_max=25.0,
+            az_fov=360.0,
+            delimiter=",",
+            prefix="$SCAN",
+            col_a=1,
+            col_b=2,
+            col_vx=-1,
+            col_vy=-1,
+            col_snr=3,
+            scale=1.0,
+            notes="文本行格式：$SCAN,距离(m),方位角(deg),强度(0~1)",
+        ),
+        CustomProtocolSpec(
             id="uart_bin_cm",
             label="嵌入式串口 · 通用二进制帧 (AA55 · cm)",
             mode="binary_fixed",
@@ -115,6 +139,61 @@ def builtin_presets() -> list[CustomProtocolSpec]:
             struct_fmt="hhh",
             scale=0.01,
             notes="10字节定长帧：AA 55 + int16(x_cm) + int16(y_cm) + int16(snr*100) + 0D 0A",
+        ),
+        CustomProtocolSpec(
+            id="tf_point_bin",
+            label="北醒 TF 系列 / 激光单点 · 9B 串口帧 (59 59)",
+            mode="binary_point",
+            form="point",
+            vendor="Benewake / 单点测距",
+            range_min=0.1,
+            range_max=20.0,
+            az_fov=15.0,
+            header_hex="59 59",
+            tail_hex="",
+            frame_len=9,
+            endian="<",
+            payload_offset=2,
+            struct_fmt="HH",
+            scale=0.01,
+            notes="9字节定长帧：59 59 + uint16(dist_cm) + uint16(strength) + 温度/校验",
+        ),
+        CustomProtocolSpec(
+            id="can_udp_77g",
+            label="77G 毫米波网口 · 浮点四元组 UDP 帧 (AB CD)",
+            mode="binary_fixed",
+            form="sector",
+            vendor="77G 车载/安防",
+            range_min=0.5,
+            range_max=120.0,
+            az_fov=120.0,
+            header_hex="AB CD",
+            tail_hex="0D 0A",
+            frame_len=20,
+            endian="<",
+            payload_offset=2,
+            struct_fmt="ffff",
+            scale=1.0,
+            transports=("udp", "tcp", "file"),
+            notes="20字节定长帧：AB CD + float32(x, y, vx, vy) + 0D 0A",
+        ),
+        CustomProtocolSpec(
+            id="modbus_u16_dist",
+            label="工业 Modbus-RTU 测距读数帧 (01 03 · mm)",
+            mode="binary_point",
+            form="point",
+            vendor="工业测距传感器",
+            range_min=0.05,
+            range_max=50.0,
+            az_fov=15.0,
+            header_hex="01 03",
+            tail_hex="",
+            frame_len=7,
+            endian=">",
+            payload_offset=3,
+            struct_fmt="H",
+            scale=0.001,
+            notes="7字节大端帧：01 03 byte_cnt + uint16(dist_mm) + CRC16",
         ),
     ]
 
@@ -229,6 +308,17 @@ def parse_custom_binary(spec: CustomProtocolSpec, pkt: bytes) -> list[Target]:
     if len(pkt) < spec.payload_offset + sz:
         return []
     vals = struct.unpack_from(fmt, pkt, spec.payload_offset)
+    if not vals:
+        return []
+    if spec.mode == "binary_point":
+        dist = float(vals[0]) * spec.scale
+        if dist <= 0.0:
+            return []
+        snr = 0.85
+        if len(vals) >= 2:
+            raw_s = float(vals[1])
+            snr = min(1.0, raw_s / 1000.0) if raw_s > 100.0 else (raw_s / 100.0 if raw_s > 1.5 else raw_s)
+        return [Target(x=0.0, y=dist, snr=max(0.1, min(1.0, snr)))]
     if len(vals) < 2:
         return []
     x = float(vals[0]) * spec.scale
@@ -260,7 +350,7 @@ def _make_decoder(spec: CustomProtocolSpec) -> StreamDecoder:
 
 def preview_sample(spec: CustomProtocolSpec, sample_text: str) -> list[Target]:
     """UI 向导调测用：把一段文本行或十六进制字节样本送入规则解析。"""
-    if spec.mode == "binary_fixed":
+    if spec.mode in ("binary_fixed", "binary_point"):
         raw = parse_hex_bytes(sample_text)
         dec = _make_decoder(spec)
         out: list[Target] = []
@@ -342,7 +432,7 @@ def build_driver_class(spec: CustomProtocolSpec) -> type[RadarDriver]:
             self._tr = open_transport(self._endpoint, default_baud=115200)
             self._good = 0
             self._bad = 0
-            if self._spec.mode == "binary_fixed":
+            if self._spec.mode in ("binary_fixed", "binary_point"):
                 self._dec = _make_decoder(self._spec)
             else:
                 self._dec = None
@@ -351,7 +441,7 @@ def build_driver_class(spec: CustomProtocolSpec) -> type[RadarDriver]:
             if self._tr is None:
                 return None
             tgts: list[Target] = []
-            if self._spec.mode == "binary_fixed" and self._dec is not None:
+            if self._spec.mode in ("binary_fixed", "binary_point") and self._dec is not None:
                 chunk = self._tr.read(4096)
                 if not chunk:
                     time.sleep(0.01)

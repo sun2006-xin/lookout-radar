@@ -108,6 +108,9 @@ class PPIWidget(QWidget):
         self._sweep_az: float | None = None
         self._coverage: list[dict] | None = None
         self._gaps: list[tuple[float, float]] | None = None
+        self._ew_meta: dict | None = None
+        self._fc_sol: dict | None = None
+        self._deception_pts: list[tuple[float, float]] = []
         #: 点击测距的读数：(屏幕x, 屏幕y, 距离m, 方位度)
         self._probe: tuple[float, float, float, float] | None = None
         self._rot = 0.0             # 朝向旋转（弧度），北向朝上时 = 航向
@@ -155,6 +158,9 @@ class PPIWidget(QWidget):
         self._tracks = []
         self._sweep_az = None
         self._t_prev = 0.0
+        self._ew_meta = None
+        self._fc_sol = None
+        self._deception_pts = []
         self.update()
 
     # ------------------------------------------------------------------ #
@@ -190,6 +196,9 @@ class PPIWidget(QWidget):
 
         self._coverage = frame.meta.get("coverage")
         self._gaps = frame.meta.get("gaps")
+        self._ew_meta = frame.meta.get("ew")
+        self._fc_sol = frame.meta.get("fc_solution")
+        self._deception_pts = list(frame.meta.get("deception_points") or [])
 
         self._tracks = tracks
         self._update_trails(tracks)
@@ -307,6 +316,7 @@ class PPIWidget(QWidget):
         if offpx or offpy:
             p.translate(-offpx, -offpy)
         self._draw_zones(p, cx, cy, R, pal)
+        self._draw_ew_overlays(p, cx, cy, R, pal)
         self._draw_sweep(p, cx, cy, R, pal)
         self._draw_trails(p, cx, cy, R, pal)
         self._draw_targets(p, cx, cy, R, pal)
@@ -551,6 +561,72 @@ class PPIWidget(QWidget):
                 tw = p.fontMetrics().horizontalAdvance(lab)
                 lp = self._pt(cx, cy, R * 0.845, a)
                 p.drawText(QPointF(lp.x() - tw / 2, lp.y() + 4), lab)
+
+    def _draw_ew_overlays(self, p: QPainter, cx: float, cy: float, R: float, pal: dict) -> None:
+        """F2/F3：烧穿距离圈、ESM 干扰方位截获弧段、模拟火控前置角引导与多站疑似欺骗警示。"""
+        rmax = max(1e-6, self._caps.range_max)
+        rmin = self._caps.range_min
+        span = max(1e-6, rmax - rmin)
+        p.setFont(QFont("Consolas", 8))
+
+        ew = self._ew_meta
+        if isinstance(ew, dict) and ew.get("jam_mode") not in (None, "none"):
+            bt = float(ew.get("burn_through_m", 0.0) or 0.0)
+            jsr_db = float(ew.get("jsr_db", 0.0) or 0.0)
+            if rmin <= bt <= rmax:
+                rad = max(8.0, (bt - rmin) / span * R)
+                p.setBrush(Qt.NoBrush)
+                p.setPen(QPen(QColor(245, 158, 11, 195), 1.3, Qt.DashDotLine))
+                p.drawEllipse(QPointF(cx, cy), rad, rad)
+                ag = " [捷变ECCM]" if ew.get("eccm_agility") else ""
+                p.setPen(QPen(QColor(245, 158, 11, 230)))
+                p.drawText(QPointF(cx + rad * 0.70, cy + rad * 0.70),
+                           f"烧穿 {bt:.1f}m · JSR {jsr_db:+.1f}dB{ag}")
+
+            # F3 ESM / RWR 外环干扰源方位截获扇区
+            az_c = float(ew.get("jam_az_deg", 0.0) or 0.0)
+            bw = max(8.0, float(ew.get("jam_bw_deg", 30.0) or 30.0))
+            if ew.get("jam_mode") in ("spot", "chaff", "drfm", "rgpo", "isrj"):
+                a_hi = az_c + bw * 0.5
+                rect = QRectF(cx - R * 0.985, cy - R * 0.985, R * 1.97, R * 1.97)
+                p.setBrush(Qt.NoBrush)
+                p.setPen(QPen(QColor(244, 63, 94, 210), 3.5))
+                p.drawArc(rect, int((90.0 - a_hi - self._rot_deg) * 16), int(bw * 16))
+                lp = self._pt(cx, cy, R * 0.90, radians(az_c))
+                p.setPen(QPen(QColor(244, 63, 94, 235)))
+                p.drawText(QPointF(lp.x() - 26, lp.y() - 4), f"ESM {az_c:.0f}°")
+
+        fc = self._fc_sol
+        if isinstance(fc, dict) and fc.get("simulated_only"):
+            tx, ty = float(fc.get("tx", 0.0)), float(fc.get("ty", 0.0))
+            ix, iy = float(fc.get("ix", 0.0)), float(fc.get("iy", 0.0))
+            pr_t = hypot(tx, ty)
+            pr_i = hypot(ix, iy)
+            if pr_t > 1e-3 and pr_i <= rmax * 1.15:
+                pt_t = self._pt(cx, cy, max(0.0, (pr_t - rmin) / span) * R, atan2(tx, ty))
+                pt_i = self._pt(cx, cy, min(R, max(0.0, (pr_i - rmin) / span) * R), atan2(ix, iy))
+                lead_col = QColor(6, 182, 212, 220)
+                p.setPen(QPen(lead_col, 1.3, Qt.DashLine))
+                p.drawLine(QPointF(cx, cy), pt_i)
+                p.setPen(QPen(QColor(6, 182, 212, 150), 1.0, Qt.DotLine))
+                p.drawLine(pt_t, pt_i)
+                p.setBrush(Qt.NoBrush)
+                p.setPen(QPen(lead_col, 1.5))
+                p.drawPolygon(QPolygonF([
+                    QPointF(pt_i.x(), pt_i.y() - 5), QPointF(pt_i.x() + 5, pt_i.y()),
+                    QPointF(pt_i.x(), pt_i.y() + 5), QPointF(pt_i.x() - 5, pt_i.y()),
+                ]))
+                p.drawText(QPointF(pt_i.x() + 7, pt_i.y() + 4),
+                           f"模拟前置 {fc.get('lead_deg', 0.0):+.1f}° ({fc.get('tti_s', 0.0):.1f}s)")
+
+        for dx, dy in self._deception_pts:
+            rr = hypot(dx, dy)
+            if rmin <= rr <= rmax:
+                pt = self._pt(cx, cy, (rr - rmin) / span * R, atan2(dx, dy))
+                p.setBrush(Qt.NoBrush)
+                p.setPen(QPen(QColor(245, 158, 11, 225), 1.6, Qt.DashLine))
+                p.drawEllipse(pt, 10.0, 10.0)
+                p.drawText(QPointF(pt.x() + 12, pt.y() - 6), "疑似欺骗")
 
     def _draw_sweep(self, p: QPainter, cx, cy, R, pal) -> None:
         if self._sweep_az is None or self._caps.scan_mode != "rotating":

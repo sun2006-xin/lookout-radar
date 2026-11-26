@@ -149,7 +149,7 @@
 
 | 文件 | 具体职责 |
 |---|---|
-| `check.py` | **提交前必跑**：编译 + 40 组测试 + 链路自检 + 录制夹具回归，判据与 CI 一致 |
+| `check.py` | **提交前必跑**：编译 + 42 组测试 + 链路自检 + 录制夹具回归，判据与 CI 一致 |
 | `selftest.py` | 独立的无界面链路自检（含 `validate_frame_meta` 校验） |
 | `capture_check.py` | 离线校验 `.bin`/`.rad` 录制夹具（帧数/峰值/目标数/CRC 拒绝数），默认批量跑 `tests/fixtures/manifest.json` |
 | `ws_bridge.py` | 零依赖 UDP→WebSocket 桥接与静态页服务器（配合 `web_viewer.html` 做 Web 订阅端） |
@@ -167,7 +167,7 @@
 
 ## `tests/` —— 测试即规格
 
-`tests/test_core.py` 共 **40 组**，不依赖 pytest，直接 `python tests/test_core.py`。
+`tests/test_core.py` 共 **42 组**，不依赖 pytest，直接 `python tests/test_core.py`。
 **不打桩、不 mock**：直接跑真实算法与真实 SQLite。
 
 | 组 | 盯的是什么 |

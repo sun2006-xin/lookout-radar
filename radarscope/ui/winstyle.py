@@ -114,3 +114,63 @@ def install_dialog_titlebar(theme_getter):
     f = _Filter()
     app.installEventFilter(f)
     return f
+
+
+def apply_modern_style(app) -> None:
+    """安装现代控件矢量代理样式，替代 Windows 经典 3D 凸起微调按钮与粗糙三角箭头。"""
+    if app is None or getattr(app, "_lookout_modern_style", False):
+        return
+    from PyQt5.QtWidgets import QProxyStyle, QStyle, QStyleFactory
+
+    base = QStyleFactory.create("Fusion")
+
+    class _ModernControlStyle(QProxyStyle):
+        def drawPrimitive(self, element, option, painter, widget=None):
+            if element in (
+                QStyle.PE_IndicatorSpinUp,
+                QStyle.PE_IndicatorSpinDown,
+                QStyle.PE_IndicatorArrowDown,
+                QStyle.PE_IndicatorArrowUp,
+            ):
+                rc = option.rect
+                if rc.width() >= 4 and rc.height() >= 4:
+                    painter.save()
+                    painter.setRenderHint(QPainter.Antialiasing, True)
+                    enabled = bool(option.state & QStyle.State_Enabled)
+                    col = option.palette.text().color() if enabled else option.palette.mid().color()
+                    if not (option.state & QStyle.State_MouseOver):
+                        col.setAlpha(185 if enabled else 110)
+                    pen = QPen(col, 1.55, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+                    painter.setPen(pen)
+                    painter.setBrush(Qt.NoBrush)
+                    cx = rc.center().x() + 0.5
+                    cy = rc.center().y() + 0.5
+                    dx = min(3.4, rc.width() * 0.28)
+                    dy = min(2.2, rc.height() * 0.24)
+                    up = element in (QStyle.PE_IndicatorSpinUp, QStyle.PE_IndicatorArrowUp)
+                    if up:
+                        painter.drawLine(QPointF(cx - dx, cy + dy), QPointF(cx, cy - dy))
+                        painter.drawLine(QPointF(cx, cy - dy), QPointF(cx + dx, cy + dy))
+                    else:
+                        painter.drawLine(QPointF(cx - dx, cy - dy), QPointF(cx, cy + dy))
+                        painter.drawLine(QPointF(cx, cy + dy), QPointF(cx + dx, cy - dy))
+                    painter.restore()
+                    return
+            if element == QStyle.PE_IndicatorCheckBox and (option.state & QStyle.State_On):
+                super().drawPrimitive(element, option, painter, widget)
+                rc = option.rect
+                painter.save()
+                painter.setRenderHint(QPainter.Antialiasing, True)
+                painter.setPen(QPen(QColor(255, 255, 255), 1.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                x0, y0 = rc.left(), rc.top()
+                w, h = rc.width(), rc.height()
+                painter.drawLine(QPointF(x0 + w * 0.24, y0 + h * 0.52),
+                                 QPointF(x0 + w * 0.44, y0 + h * 0.72))
+                painter.drawLine(QPointF(x0 + w * 0.44, y0 + h * 0.72),
+                                 QPointF(x0 + w * 0.78, y0 + h * 0.30))
+                painter.restore()
+                return
+            super().drawPrimitive(element, option, painter, widget)
+
+    app.setStyle(_ModernControlStyle(base))
+    setattr(app, "_lookout_modern_style", True)
