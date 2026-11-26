@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import urllib.request
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 REPO = "sun2006-xin/lookout-radar"
 
 

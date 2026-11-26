@@ -11,21 +11,20 @@ from pathlib import Path
 
 import numpy as np
 
-from PyQt5.QtCore import QSettings, Qt, QThread, QTimer, pyqtSignal
+from PyQt5.QtCore import QSettings, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QGuiApplication, QIcon, QKeySequence, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QAction, QActionGroup, QApplication, QComboBox, QDialog, QDockWidget,
-    QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QInputDialog,
+    QDoubleSpinBox, QFormLayout, QFrame, QHBoxLayout,
     QLabel, QDialogButtonBox, QMainWindow, QMenu, QMessageBox, QPushButton,
     QShortcut, QSizePolicy, QTabWidget,
-    QToolBar, QToolButton, QVBoxLayout, QWidget, QWidgetAction,
+    QToolBar, QVBoxLayout, QWidget,
 )
 
 from ..core import cpa, pipeline
 from ..core.aisfeed import AisFeed
 from ..core.forwarder import Forwarder
 from ..core.nmea_nav import NmeaOwnShip
-from ..core.ros_export import to_ros_laserscan, to_ros_pointcloud2, write_mcap_json_log
 from ..core.alarm import DEFAULT_RULES, AlarmEngine, merge_rules, rules_from_json
 from ..core.maptiles import resolve_provider
 from .. import drivers as _builtin_drivers  # noqa: F401  保证单独实例化 MainWindow 也能注册内置驱动
@@ -51,11 +50,12 @@ from .sensorsdialog import SensorsDialog
 from .controllers import (PRESET_ENDPOINTS, ALARM_STYLE, ALARM_STYLE_LIGHT, LIGHT_PALETTES,
                           ConnectionController, ExportController,
                           AlarmBarController, ReaderThread)
+from .scene_controller import SceneAndMapController
 from .statsdialog import StatsDialog
 from .theme import (DEFAULT_PALETTE, DEFAULT_THEME, LIGHT_PALETTE_KEYS, PALETTES,
                     THEMES, build_stylesheet, is_dark_theme, theme_palette)
 from .tracktable import TrackTable
-from .extra import AisDialog, ControlDialog, MapLocationDialog
+from .extra import ControlDialog
 from .waterfall import WaterfallWidget
 from .winstyle import apply_modern_style, enable_dark_titlebar, install_dialog_titlebar, make_app_icon
 
@@ -79,7 +79,7 @@ def _swatch_icon(bg: QColor, accent: QColor) -> QIcon:
 
 
 class MainWindow(ConnectionController, ExportController,
-                 AlarmBarController, QMainWindow):
+                 AlarmBarController, SceneAndMapController, QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("瞭望 Lookout · 通用雷达显控台")
@@ -135,6 +135,7 @@ class MainWindow(ConnectionController, ExportController,
         self._nmea_enabled = False
         self._nmea_port = 10111
         self._last_frame_ref = None
+        self._sim_dlg = None
         # 模拟电子站（动态虚拟目标与电子对抗教学叠加）
         from ..core.sim_targets import ElectronicStation
         self.sim_station = ElectronicStation()
@@ -165,6 +166,7 @@ class MainWindow(ConnectionController, ExportController,
         self.rhiscope.setVisible(False)
         self.waterfall = WaterfallWidget()
         self.table = TrackTable()
+        self.table.targetClicked.connect(self._on_table_target_clicked)
         self.log = EventLog()
         self.history = HistoryPanel(self.store)
         self.history.replayRequested.connect(self._start_replay)
@@ -255,6 +257,7 @@ class MainWindow(ConnectionController, ExportController,
         self.mode_combo.addItem("旋转扫描", "rotating")
         self.mode_combo.addItem("凝视扇区", "staring")
         self.mode_combo.addItem("3D 俯仰扫掠 (RHI)", "rhi_3d")
+        self.mode_combo.currentIndexChanged.connect(lambda _i: self._on_mode_changed())
 
         tb.addWidget(QLabel("  端点 "))
         self.endpoint_combo = QComboBox()
@@ -537,6 +540,23 @@ class MainWindow(ConnectionController, ExportController,
             m_ew.addAction(act)
             self._ew_actions[key] = act
         m_scene.addAction("场景与电子战配置控制台…", self._open_sim_station)
+        m_scene.addSeparator()
+        m_mode = m_scene.addMenu("模拟雷达扫描模式")
+        mode_grp = QActionGroup(self)
+        mode_grp.setExclusive(True)
+        self._mode_actions: dict[str, QAction] = {}
+        for mkey, mtitle in (
+            ("rotating", "360° 旋转扫描"),
+            ("staring", "±60° 凝视扇区"),
+            ("rhi_3d", "3D 俯仰扫掠 (RHI 剖面)"),
+        ):
+            mact = QAction(mtitle, self)
+            mact.setCheckable(True)
+            mact.setChecked(mkey == str(self.mode_combo.currentData() or "rotating"))
+            mact.triggered.connect(lambda _c=False, k=mkey: self._set_sim_mode(k))
+            mode_grp.addAction(mact)
+            m_mode.addAction(mact)
+            self._mode_actions[mkey] = mact
 
         m_tool = self.menuBar().addMenu("工具(&T)")
         self._m_tool = m_tool
@@ -589,6 +609,12 @@ class MainWindow(ConnectionController, ExportController,
         act_map.toggled.connect(self._toggle_map)
         m_view.addAction(act_map)
         self.act_map = act_map
+        act_land = QAction("陆地静止杂波掩膜", self)
+        act_land.setCheckable(True)
+        act_land.setChecked(self.land_mask.enabled)
+        act_land.toggled.connect(self._toggle_land_mask)
+        m_view.addAction(act_land)
+        self.act_land_mask = act_land
         ais_on = self.settings.value("show_ais", True, type=bool)
         act_ais = QAction("显示 AIS 目标", self)
         act_ais.setCheckable(True)
@@ -719,6 +745,14 @@ class MainWindow(ConnectionController, ExportController,
                 self.src_combo.setCurrentIndex(si)
                 self.src_combo.blockSignals(False)
         self._rebuild_driver_combo(keep=did or None)
+        sim_mode = str(self.settings.value("sim_mode", "rotating") or "rotating")
+        mi = self.mode_combo.findData(sim_mode)
+        if mi >= 0:
+            self.mode_combo.blockSignals(True)
+            self.mode_combo.setCurrentIndex(mi)
+            self.mode_combo.blockSignals(False)
+            if hasattr(self, "_mode_actions") and sim_mode in self._mode_actions:
+                self._mode_actions[sim_mode].setChecked(True)
         self._refresh_endpoints()
         fs = float(self.settings.value("font_scale", 1.0) or 1.0)
         if 0.8 <= fs <= 1.8 and abs(fs - 1.0) > 1e-3:
@@ -776,6 +810,7 @@ class MainWindow(ConnectionController, ExportController,
     def _on_cfar_changed(self) -> None:
         self._cfar_mode = str(self.cfar_combo.currentData() or "auto")
         self.settings.setValue("cfar_mode", self._cfar_mode)
+        self._update_status_telemetry()
         self.log.push("info", f"检测算法：{self.cfar_combo.currentText()}")
 
     def _on_lang_changed(self) -> None:
@@ -834,16 +869,31 @@ class MainWindow(ConnectionController, ExportController,
             self._locked_id = -1
             self.table.set_locked(-1)
 
-    def _on_target_picked(self, tid: int) -> None:
-        if not self.btn_lock.isChecked():
-            return
+    def _apply_target_lock(self, tid: int) -> None:
         self._locked_id = tid
         self.table.set_locked(tid)
+        for trk in self.tracker.tracks:
+            trk.locked = (tid >= 0 and trk.tid == tid)
+        self.ppi.update()
+        self.table.refresh(self.tracker.tracks)
         if tid < 0:
             self.log.push("info", "解除目标锁定")
         else:
             self.log.push("ok", f"锁定 T{tid}")
             self.store.record_event("info", "lock", f"锁定 T{tid}", tid=tid)
+
+    def _on_target_picked(self, tid: int) -> None:
+        if not self.btn_lock.isChecked():
+            return
+        self._apply_target_lock(tid)
+
+    def _on_table_target_clicked(self, tid: int) -> None:
+        """航迹表点击即反向锁定 PPI 上对应目标，实现表 ↔ 图双向联动。"""
+        if not self.btn_lock.isChecked():
+            self.btn_lock.blockSignals(True)
+            self.btn_lock.setChecked(True)
+            self.btn_lock.blockSignals(False)
+        self._apply_target_lock(tid)
 
     # ================================================================== #
     # 能力应用
@@ -1030,17 +1080,7 @@ class MainWindow(ConnectionController, ExportController,
                 if bad > good:
                     txt += "  ⚠ 坏帧偏多，检查波特率/接线"
             self.status_right.setText(txt)
-            # R1：写库失败必须让用户看见，不能只躺在日志里
-            bits = []
-            if getattr(self.store, "write_errors", 0):
-                bits.append(f"⚠ 存储异常 {self.store.write_errors}")
-            if self.forwarder.enabled:
-                bits.append(f"转发 {self.forwarder.sent}")
-            self.status_link.setText("  ｜  ".join(bits))
-            self.status_link.setStyleSheet(
-                "color:#B42318;font-weight:bold;padding-right:12px;"
-                if getattr(self.store, "write_errors", 0)
-                else "color:#6B7280;padding-right:12px;")
+            self._update_status_telemetry()
 
         if now - self._table_t > 0.15:
             self._table_t = now
@@ -1193,166 +1233,39 @@ class MainWindow(ConnectionController, ExportController,
         self._refresh_alarm_bar()
         self.log.push("info", f"主题：{THEMES[self._theme]['name']}")
 
-    def _toggle_map(self, on: bool) -> None:
-        """联网地图：按当前量程自动选瓦片级别，拿中心坐标（手动/IP/AIS）当原点。"""
-        act = getattr(self, "act_map", None)
-        if act is not None and act.isChecked() != bool(on):
-            act.blockSignals(True)
-            act.setChecked(bool(on))
-            act.blockSignals(False)
-        if on:
-            if self.map_layer is None:
-                self.map_layer = MapLayer(paths.data_dir() / "tiles", self)
-                self.map_layer.ready.connect(self.ppi.update)
-            prov = resolve_provider(self._map_provider, self._theme)
-            self.map_layer.set_provider(prov)
-            if self._mbtiles_path:
-                self.map_layer.set_mbtiles(self._mbtiles_path)
-            self.map_layer.enabled = True
-            self.ppi.map_layer = self.map_layer
-            lat, lon = self._ais_ref
-            self.map_layer.request(lat, lon, float(self.range_spin.value()),
-                                   max(200, self.ppi.width()))
-            hint = f"联网地图已开启（中心 {lat:.5f}, {lon:.5f} · 图源 {prov}）"
-            if float(self.range_spin.value()) < 30.0:
-                hint += "；提示：街道地图仅在 30m 以上室外/海图量程有细节，离线时自动保持透明"
-            self.log.push("ok", hint)
-        else:
-            if self.map_layer is not None:
-                self.map_layer.enabled = False
-                self.map_layer.stop()
-            self.ppi.map_layer = None
-            self.ppi2.map_layer = None
-            self.log.push("info", "联网地图底图已关闭")
-        self.ppi.update()
-        self.ppi2.update()
-
-    def _open_map_settings(self) -> None:
-        cur_on = bool(self.map_layer is not None and self.map_layer.enabled)
-        dlg = MapLocationDialog(
-            self._ais_ref[0], self._ais_ref[1], self._map_provider, cur_on,
-            mbtiles_path=self._mbtiles_path,
-            nmea_port=self._nmea_port,
-            nmea_enabled=self._nmea_enabled,
-            land_mask=self.land_mask.enabled,
-            parent=self,
-        )
-        if dlg.exec_() != QDialog.Accepted:
-            return
-        lat, lon, prov, want_on = dlg.values()
-        opts = dlg.e6_options()
-        self._ais_ref = (lat, lon)
-        self._map_provider = prov
-        self._mbtiles_path = opts["mbtiles_path"]
-        self._nmea_port = int(opts["nmea_port"])
-        self._nmea_enabled = bool(opts["nmea_enabled"])
-        self.land_mask.enabled = bool(opts["land_mask"])
-        self.settings.setValue("ais_lat", lat)
-        self.settings.setValue("ais_lon", lon)
-        self.settings.setValue("map_provider", prov)
-        self.settings.setValue("mbtiles_path", self._mbtiles_path)
-        self.settings.setValue("nmea_port", self._nmea_port)
-        self.settings.setValue("nmea_enabled", self._nmea_enabled)
-        self.settings.setValue("land_mask", self.land_mask.enabled)
-
-        self.nmea_nav.stop()
+    def _update_status_telemetry(self) -> None:
+        """在底栏集中汇总当前检测算法、杂波/陆地掩膜、地图/AIS/NMEA 与电子战状态。"""
+        bits = []
+        if getattr(self.store, "write_errors", 0):
+            bits.append(f"⚠ 存储异常 {self.store.write_errors}")
+        cfar_names = {"auto": "GO-CFAR", "os": "OS-CFAR", "go": "GO-CFAR", "ca": "CA-CFAR"}
+        bits.append(cfar_names.get(self._cfar_mode, self._cfar_mode.upper()))
+        if self.clutter_map.enabled:
+            bits.append("杂波抑制")
+        if self.land_mask.enabled:
+            bits.append("陆地掩膜")
+        if self.sim_station.jam_mode != "none":
+            bits.append(f"干扰:{self.sim_station.jam_mode.upper()}")
+        if self.map_layer is not None and self.map_layer.enabled:
+            bits.append(f"底图 z{self.map_layer.zoom}")
         if self._nmea_enabled:
-            err = self.nmea_nav.start(self._nmea_port)
-            if err:
-                self._log_level("warn", err)
-            else:
-                self.log.push("ok", f"已开启 NMEA 本船定位监听（UDP :{self._nmea_port}）")
-
-        if want_on and dlg.auto_fit_range() and float(self.range_spin.value()) < 100.0:
-            self.range_spin.setValue(500.0)
-        if self.map_layer is not None:
-            self.map_layer.set_mbtiles(self._mbtiles_path or None)
-            self.map_layer._key = None
-        self._toggle_map(want_on)
-        if not want_on:
-            self.log.push("ok", f"已保存海图与定位设置：{lat:.5f}, {lon:.5f}")
-
-    def _export_ros_log(self) -> None:
-        """E8：将当前帧或航迹快照导出为标准 Foxglove .mcap 或 ROS LaserScan/PointCloud2 JSON。"""
-        import json as _json
-        frame = self._last_frame_ref
-        if frame is None:
-            QMessageBox.information(self, "导出 ROS / Foxglove", "请先连接雷达或模拟器采集至少一帧数据后再导出。")
-            return
-        path, sel = QFileDialog.getSaveFileName(
-            self, "导出 ROS / Foxglove 日志",
-            str(self.data_dir / "radar_telemetry.mcap"),
-            "Foxglove MCAP 日志 (*.mcap);;ROS LaserScan/PointCloud JSON (*.json)",
+            bits.append("NMEA本船")
+        if self.ais.running:
+            bits.append(f"AIS:{self.ais.count()}")
+        if self.forwarder.enabled:
+            bits.append(f"转发:{self.forwarder.sent}")
+        self.status_link.setText("  ·  ".join(bits))
+        self.status_link.setStyleSheet(
+            "color:#DC2626;font-weight:bold;padding-right:12px;"
+            if getattr(self.store, "write_errors", 0)
+            else "padding-right:12px;"
         )
-        if not path:
-            return
-        p = Path(path)
-        tracks = self.tracker.tracks
-        if p.suffix.lower() == ".json" or "JSON" in sel:
-            payload = {
-                "laserscan": to_ros_laserscan(frame, threshold=self._thresh),
-                "pointcloud2": to_ros_pointcloud2(frame, tracks=tracks),
-            }
-            p.write_text(_json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            self.log.push("ok", f"已导出 ROS JSON：{p.name}")
-        else:
-            msg = to_ros_laserscan(frame, threshold=self._thresh)
-            n = write_mcap_json_log(p, [msg])
-            self.log.push("ok", f"已导出 Foxglove MCAP 日志：{p.name}（{n} 帧）")
-
-    def _sync_scene_ui(self) -> None:
-        sc = self.sim_station.scenario
-        jm = self.sim_station.jam_mode
-        act_s = getattr(self, "_scene_actions", {}).get(sc)
-        if act_s is not None:
-            act_s.setChecked(True)
-        act_j = getattr(self, "_ew_actions", {}).get(jm)
-        if act_j is not None:
-            act_j.setChecked(True)
-        if hasattr(self, "btn_scene"):
-            on = self.sim_station.active()
-            self.btn_scene.blockSignals(True)
-            self.btn_scene.setChecked(on)
-            self.btn_scene.blockSignals(False)
-            if jm != "none":
-                self.btn_scene.setText(f"干扰:{jm.upper()}")
-            elif sc != "none":
-                self.btn_scene.setText(f"场景:{sc}")
-            elif self.sim_station.objects:
-                self.btn_scene.setText(f"目标:{len(self.sim_station.objects)}")
-            else:
-                self.btn_scene.setText("场景/电子战")
-
-    def _apply_scenario(self, key: str, suggested_range: float = 0.0) -> None:
-        if suggested_range > 0.0 and abs(float(self.range_spin.value()) - suggested_range) > 1.0:
-            self.range_spin.setValue(suggested_range)
-        self.sim_station.set_scenario(key, float(self.range_spin.value()))
-        self._sync_scene_ui()
-        if key == "none":
-            self.log.push("info", "已关闭预设演练场景")
-        else:
-            self.log.push("ok", f"已开启场景「{key}」，当前目标 {len(self.sim_station.objects)} 个（若未连接请先点「连接」）")
-
-    def _set_jam_mode(self, mode: str) -> None:
-        self.sim_station.jam_mode = mode
-        self.sim_station._jam_t = 0.0
-        self._sync_scene_ui()
-        self.log.push("info" if mode == "none" else "warn",
-                      f"电子战干扰样式已切换：{mode}")
-
-    def _open_sim_station(self) -> None:
-        from .simdialog import SimStationDialog
-
-        dlg = SimStationDialog(self.sim_station, float(self.range_spin.value()), self)
-        dlg.exec_()
-        self._sync_scene_ui()
-        if self.sim_station.active():
-            self.log.push("ok", f"模拟电子站：活跃目标 {len(self.sim_station.objects)} 个 · 干扰 {self.sim_station.jam_mode}")
 
     def _toggle_clutter(self, on: bool) -> None:
         self.clutter_map.enabled = bool(on)
         self.clutter_map.reset()
         self.settings.setValue("clutter_suppress", bool(on))
+        self._update_status_telemetry()
         self.log.push("info", "静态杂波背景抑制已开启（前 5 帧自动学习环境底噪）" if on else "静态杂波背景抑制已关闭")
 
     def _open_proto_wizard(self) -> None:
@@ -1395,27 +1308,6 @@ class MainWindow(ConnectionController, ExportController,
             self.log.push("ok", f"设备参数已下发：{dlg.values()}")
         else:
             self.log.push("warn", "设备拒绝了下发（驱动未实现 set_control）")
-
-    def _open_ais(self) -> None:
-        dlg = AisDialog(self.ais.port, self._ais_ref[0], self._ais_ref[1],
-                        self.ais.running, self)
-        if dlg.exec_() != QDialog.Accepted:
-            return
-        port, lat, lon, on = dlg.values()
-        self._ais_ref = (lat, lon)
-        self.settings.setValue("ais_port", port)
-        self.settings.setValue("ais_lat", lat)
-        self.settings.setValue("ais_lon", lon)
-        if on:
-            err = self.ais.start(port)
-            if err:
-                QMessageBox.warning(self, "AIS", err)
-                return
-            self.log.push("ok", f"AIS 已接入，监听 UDP {port}")
-        else:
-            self.ais.stop()
-            self.ppi.set_ais([])
-            self.log.push("info", "AIS 已停止")
 
     def _apply_native_style(self) -> None:
         if enable_dark_titlebar(int(self.winId()), is_dark_theme(self._theme)):
@@ -1487,6 +1379,8 @@ class MainWindow(ConnectionController, ExportController,
 
     def closeEvent(self, ev) -> None:
         self._save()
+        if getattr(self, "_sim_dlg", None) is not None:
+            self._sim_dlg.close()
         self._want_connect = False
         self._teardown_reader()
         self.nmea_nav.stop()

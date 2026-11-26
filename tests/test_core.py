@@ -1522,6 +1522,59 @@ def test_e7_3d_rhi_scope() -> None:
     ok("E7 3D 俯仰 RHI 距离-高度剖面驱动与视图渲染")
 
 
+def test_ux_cohesion_and_controller_links() -> None:
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt5.QtCore import QSettings
+    from PyQt5.QtWidgets import QApplication
+    from radarscope.core.model import Target
+    from radarscope.ui.mainwindow import MainWindow
+
+    settings = QSettings("RadarScope", "Lookout")
+    prev_mode = settings.value("sim_mode", "rotating", type=str)
+    _app = QApplication.instance() or QApplication([])
+    w = MainWindow()
+    w.show()
+    try:
+        # 1. 航迹表 ↔ PPI 双向锁定，且 3D 模式下展现“高度”列
+        w._set_sim_mode("rhi_3d")
+        _app.processEvents()
+        assert w.caps.has_elevation and not w.rhiscope.isHidden()
+        assert any(
+            w.table.horizontalHeaderItem(c) and w.table.horizontalHeaderItem(c).text() == "高度"
+            for c in range(w.table.columnCount())
+        ), "3D 模式下航迹表应展现高度列"
+        trk = Target(tid=7, x=1.5, y=3.0, z=1.2, vx=0.1, vy=0.1, age=3)
+        w.tracker.tracks.append(trk)
+        w.table.refresh(w.tracker.tracks)
+        w.table.targetClicked.emit(7)
+        _app.processEvents()
+        assert w.btn_lock.isChecked() and w._locked_id == 7 and trk.locked and w.table._locked == 7
+
+        # 2. 场景 / 电子战动作自动拉起模拟器并刷新中心状态摘要
+        w._disconnect("")
+        _app.processEvents()
+        w._apply_scenario("patrol")
+        _app.processEvents()
+        assert w.reader is not None and w.btn_scene.isChecked(), "切换预设场景应自动连接模拟器"
+        w._set_jam_mode("isrj")
+        _app.processEvents()
+        assert "干扰:ISRJ" in w.status_link.text() and "CFAR" in w.status_link.text()
+
+        # 3. 非模态模拟电子站与实时联动信号
+        w._open_sim_station()
+        _app.processEvents()
+        assert w._sim_dlg is not None and not w._sim_dlg.isModal() and w._sim_dlg.isVisible()
+        w._set_jam_mode("none")
+        w._apply_scenario("none")
+        w._disconnect("")
+        _app.processEvents()
+    finally:
+        w.close()
+        settings.setValue("sim_mode", prev_mode)
+    ok("跨模块 UX 联动、航迹双向锁定、非模态电子站与控制器拆解")
+
+
 def main() -> int:
     print("RadarScope 核心测试")
     for fn in (test_codec, test_ld2450_sign, test_pipeline, test_alarm,
@@ -1540,7 +1593,7 @@ def main() -> int:
                test_protowizard_and_sim_ew_ui, test_multi_themes_and_palettes,
                test_raw_stream_inspector_and_presets, test_ew_f1_f2_f3_and_deception,
                test_e6_mbtiles_nmea_and_land_mask, test_e8_ros_and_mcap_export,
-               test_e7_3d_rhi_scope):
+               test_e7_3d_rhi_scope, test_ux_cohesion_and_controller_links):
         fn()
     print(f"\n全部通过：{PASS} 组")
     return 0

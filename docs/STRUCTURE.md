@@ -111,8 +111,9 @@
 
 | 文件 | 具体职责 | 关键入口 / 改动注意 |
 |---|---|---|
-| `mainwindow.py` | 编排：工具栏、菜单、页签、帧分发、主题应用、连接生命周期 | 1021 行；继承三个控制器 mixin。**新功能优先放进 `controllers.py` 对应类**，别让这里再膨胀 |
-| `controllers.py` | 三个 mixin + `ReaderThread` + `PRESET_ENDPOINTS` + `ALARM_STYLE*` 常量 | `ConnectionController`（连接/重连/回放）、`ExportController`（转发/录像/静音/导出）、`AlarmBarController`（告警条/规则/警戒区）。mixin 依赖 `self` 是 MainWindow，**搬方法时模块级常量要一起搬** |
+| `mainwindow.py` | 编排：工具栏、菜单、页签、帧分发、主题应用、双向锁定与状态遥测 | 继承四个控制器 mixin。**新功能优先放进 `controllers.py` 或 `scene_controller.py`**，别让这里再膨胀 |
+| `controllers.py` | 三个 mixin + `ReaderThread` + `PRESET_ENDPOINTS` + `ALARM_STYLE*` 常量 | `ConnectionController`（连接/重连/回放）、`ExportController`（转发/录像/静音/HTML·ROS·MCAP导出）、`AlarmBarController`（告警条/规则/警戒区） |
+| `scene_controller.py` | `SceneAndMapController` mixin | 管理场景预设/模拟器热切换（`rotating`/`staring`/`rhi_3d`）、电子战模式直连自启、非模态模拟电子站联动、GIS 底图、陆地掩膜与 AIS 对话框 |
 | `theme.py` | 8 套雷达色板 + 7 套现代 UI 主题 + QSS 卡片/按钮样式 | `PALETTES`（daylight/ocean_teal/ice/aurora/mono/green/amber/cyan）、`THEMES`（light/nordic/dark/graphite/marine_night/tactical/amber_ops）、`is_dark_theme(mode)`、`theme_palette(mode)`、`build_stylesheet(mode, scale)` 用 `@bg@` 占位符替换（**不要用 f-string，QSS 全是花括号**）；`LIGHT_PALETTE_KEYS` 用于浅色/深色主题配对 |
 | `ppi.py` | 环视显示器：LUT 光栅、余晖、尾迹、警戒区、AIS、地图、EBL/VRM、真运动、点击锁定 | 最复杂的控件。`_ctable_for()` 把低电平(<26)设**透明**（否则地图被盖住）；真运动裁剪 = 屏幕圆 ∩ 天线圆；`zoneDeleteRequested(rule_id)` 删点中的圈 |
 | `ascope.py` | A 显（距离剖面） | `set_capabilities()` / `set_threshold()` |
@@ -152,7 +153,7 @@
 
 | 文件 | 具体职责 |
 |---|---|
-| `check.py` | **提交前必跑**：编译 + 45 组测试 + 链路自检 + 录制夹具回归，判据与 CI 一致 |
+| `check.py` | **提交前必跑**：编译 + 46 组测试 + 链路自检 + 录制夹具回归，判据与 CI 一致 |
 | `selftest.py` | 独立的无界面链路自检（含 `validate_frame_meta` 校验） |
 | `capture_check.py` | 离线校验 `.bin`/`.rad` 录制夹具（帧数/峰值/目标数/CRC 拒绝数），默认批量跑 `tests/fixtures/manifest.json` |
 | `ws_bridge.py` | 零依赖 UDP→WebSocket 桥接与静态页服务器（配合 `web_viewer.html` 做 Web 订阅端） |
@@ -170,7 +171,7 @@
 
 ## `tests/` —— 测试即规格
 
-`tests/test_core.py` 共 **45 组**，不依赖 pytest，直接 `python tests/test_core.py`。
+`tests/test_core.py` 共 **46 组**，不依赖 pytest，直接 `python tests/test_core.py`。
 **不打桩、不 mock**：直接跑真实算法与真实 SQLite。
 
 | 组 | 盯的是什么 |

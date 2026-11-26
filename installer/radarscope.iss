@@ -12,7 +12,7 @@
 ; 升级覆盖、中文界面，这些自己写一遍只会有 bug。
 
 #define AppName "Lookout"
-#define AppVer "1.2.0"
+#define AppVer "1.2.1"
 #define AppExe "Lookout.exe"
 #define SrcDir "..\dist\Lookout"
 

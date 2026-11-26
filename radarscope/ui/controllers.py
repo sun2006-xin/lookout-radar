@@ -513,6 +513,36 @@ class ExportController:
         from PyQt5.QtCore import QUrl
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.data_dir)))
 
+    def _export_ros_log(self) -> None:
+        """E8：将当前帧与航迹快照导出为标准 Foxglove .mcap 或 ROS LaserScan/PointCloud2 JSON。"""
+        import json as _json
+        from ..core.ros_export import to_ros_laserscan, to_ros_pointcloud2, write_mcap_json_log
+
+        frame = getattr(self, "_last_frame_ref", None)
+        if frame is None:
+            QMessageBox.information(self, "导出 ROS / Foxglove", "请先连接雷达或模拟器采集至少一帧数据后再导出。")
+            return
+        path, sel = QFileDialog.getSaveFileName(
+            self, "导出 ROS / Foxglove 日志",
+            str(self.data_dir / "radar_telemetry.mcap"),
+            "Foxglove MCAP 日志 (*.mcap);;ROS LaserScan/PointCloud JSON (*.json)",
+        )
+        if not path:
+            return
+        p = Path(path)
+        tracks = self.tracker.tracks
+        if p.suffix.lower() == ".json" or "JSON" in sel:
+            payload = {
+                "laserscan": to_ros_laserscan(frame, threshold=self._thresh),
+                "pointcloud2": to_ros_pointcloud2(frame, tracks=tracks),
+            }
+            p.write_text(_json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            self.log.push("ok", f"已导出 ROS JSON：{p.name}")
+        else:
+            msg = to_ros_laserscan(frame, threshold=self._thresh)
+            n = write_mcap_json_log(p, [msg])
+            self.log.push("ok", f"已导出 Foxglove MCAP 日志：{p.name}（{n} 帧）")
+
 
 
 class AlarmBarController:

@@ -1,7 +1,7 @@
 """模拟电子站控制台：管理动态虚拟目标场景与教学级电子对抗仿真。"""
 from __future__ import annotations
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFormLayout,
     QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPushButton,
@@ -15,6 +15,7 @@ class SimStationDialog(QDialog):
     """管理动态仿真场景、虚拟目标注入与电子对抗教学仿真。"""
 
     COLS = ["名称", "X (m)", "Y (m)", "Vx (m/s)", "Vy (m/s)", "强度"]
+    changed = pyqtSignal()
 
     def __init__(self, station: ElectronicStation, range_max: float = 8.0, parent=None):
         super().__init__(parent)
@@ -50,7 +51,7 @@ class SimStationDialog(QDialog):
         self.sp_speed.setRange(0.2, 5.0)
         self.sp_speed.setSingleStep(0.2)
         self.sp_speed.setValue(self.station.speed_scale)
-        self.sp_speed.valueChanged.connect(lambda v: setattr(self.station, "speed_scale", float(v)))
+        self.sp_speed.valueChanged.connect(self._on_speed)
         top.addWidget(self.sp_speed)
 
         btn_rand = QPushButton("随机出现")
@@ -68,8 +69,8 @@ class SimStationDialog(QDialog):
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.table.setMinimumHeight(135)
-        self.table.setMaximumHeight(190)
+        self.table.setMinimumHeight(148)
+        self.table.setMaximumHeight(200)
         sv.addWidget(self.table)
 
         # 自定义注入：分两行排布，保证名称输入框与坐标框互不挤压
@@ -130,14 +131,14 @@ class SimStationDialog(QDialog):
         self.sp_jaz.setSingleStep(10.0)
         self.sp_jaz.setSuffix("°")
         self.sp_jaz.setValue(self.station.jam_az_deg)
-        self.sp_jaz.valueChanged.connect(lambda v: setattr(self.station, "jam_az_deg", float(v)))
+        self.sp_jaz.valueChanged.connect(self._on_jaz)
 
         self.sp_jbw = QDoubleSpinBox()
         self.sp_jbw.setRange(10.0, 120.0)
         self.sp_jbw.setSingleStep(5.0)
         self.sp_jbw.setSuffix("°")
         self.sp_jbw.setValue(self.station.jam_bw_deg)
-        self.sp_jbw.valueChanged.connect(lambda v: setattr(self.station, "jam_bw_deg", float(v)))
+        self.sp_jbw.valueChanged.connect(self._on_jbw)
 
         ew_row.addWidget(QLabel("强度"))
         ew_row.addWidget(self.sp_jsr, 1)
@@ -153,7 +154,7 @@ class SimStationDialog(QDialog):
         self.chk_eccm.toggled.connect(self._on_eccm)
         self.chk_fc = QCheckBox("模拟火控拦截前置角引导推演 [教学]")
         self.chk_fc.setChecked(self.station.fc_sim)
-        self.chk_fc.toggled.connect(lambda on: setattr(self.station, "fc_sim", bool(on)))
+        self.chk_fc.toggled.connect(self._on_fc)
         eccm_row.addWidget(self.chk_eccm)
         eccm_row.addWidget(self.chk_fc)
         eccm_row.addStretch(1)
@@ -191,13 +192,31 @@ class SimStationDialog(QDialog):
         self._refresh()
         self._update_ew_label()
 
+    def _on_speed(self, v: float) -> None:
+        self.station.speed_scale = float(v)
+        self.changed.emit()
+
+    def _on_jaz(self, v: float) -> None:
+        self.station.jam_az_deg = float(v)
+        self.changed.emit()
+
+    def _on_jbw(self, v: float) -> None:
+        self.station.jam_bw_deg = float(v)
+        self.changed.emit()
+
+    def _on_fc(self, on: bool) -> None:
+        self.station.fc_sim = bool(on)
+        self.changed.emit()
+
     def _on_jsr(self, v: float) -> None:
         self.station.jam_jsr = float(v)
         self._update_ew_label()
+        self.changed.emit()
 
     def _on_eccm(self, on: bool) -> None:
         self.station.eccm_agility = bool(on)
         self._update_ew_label()
+        self.changed.emit()
 
     def _update_ew_label(self) -> None:
         if self.station.jam_mode == "none":
@@ -216,11 +235,13 @@ class SimStationDialog(QDialog):
         self.station.jam_mode = str(self.cb_jam.currentData() or "none")
         self.station._jam_t = 0.0
         self._update_ew_label()
+        self.changed.emit()
 
     def _on_scene(self) -> None:
         sc = str(self.cb_scene.currentData() or "none")
         self.station.set_scenario(sc, self.range_max)
         self._refresh()
+        self.changed.emit()
 
     def _inject_custom(self) -> None:
         self.station.inject(
@@ -230,10 +251,12 @@ class SimStationDialog(QDialog):
         )
         self.ed_name.clear()
         self._refresh()
+        self.changed.emit()
 
     def _spawn_random(self) -> None:
         self.station.spawn_random(self.range_max, respawn=True)
         self._refresh()
+        self.changed.emit()
 
     def _remove_selected(self) -> None:
         rows = sorted({idx.row() for idx in self.table.selectedIndexes()}, reverse=True)
@@ -241,6 +264,7 @@ class SimStationDialog(QDialog):
             if 0 <= r < len(self.station.objects):
                 self.station.objects.pop(r)
         self._refresh()
+        self.changed.emit()
 
     def _clear(self) -> None:
         self.station.clear()
@@ -252,6 +276,7 @@ class SimStationDialog(QDialog):
         self.cb_jam.blockSignals(False)
         self._update_ew_label()
         self._refresh()
+        self.changed.emit()
 
     def _refresh(self) -> None:
         objs = self.station.objects

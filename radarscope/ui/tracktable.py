@@ -1,7 +1,7 @@
 """航迹列表。"""
 from __future__ import annotations
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import QAbstractItemView, QHeaderView, QTableWidget, QTableWidgetItem
 
@@ -17,6 +17,7 @@ class TrackTable(QTableWidget):
     """
 
     BASE_COLS = ["航迹", "距离", "方位"]
+    targetClicked = pyqtSignal(int)
 
     def __init__(self, parent=None):
         super().__init__(0, 4, parent)
@@ -28,12 +29,21 @@ class TrackTable(QTableWidget):
         self.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.setShowGrid(False)
-        self.setAlternatingRowColors(False)
+        self.setAlternatingRowColors(True)
+        self.cellClicked.connect(self._on_cell_clicked)
         hh = self.horizontalHeader()
         hh.setSectionResizeMode(QHeaderView.Stretch)
         hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self._locked = -1
         self._period = 1.0
+
+    def _on_cell_clicked(self, row: int, _col: int) -> None:
+        it = self.item(row, 0)
+        if it is None:
+            return
+        tid = it.data(Qt.UserRole)
+        if isinstance(tid, int) and tid >= 0:
+            self.targetClicked.emit(tid)
 
     def set_locked(self, tid: int) -> None:
         self._locked = tid
@@ -59,6 +69,8 @@ class TrackTable(QTableWidget):
         cols = list(self.BASE_COLS)
         if caps.has_velocity:
             cols.append("速度")
+        if caps.has_elevation:
+            cols.append("高度")
         if caps.has_iff:
             cols.append("分类")
         if caps.has_threat:
@@ -82,6 +94,8 @@ class TrackTable(QTableWidget):
             cells = [f"T{t.tid}", self._rng_text(t.rng), f"{t.az_deg:+.1f}°"]
             if caps is None or caps.has_velocity:
                 cells.append(f"{t.speed:.2f} m/s" if t.speed >= 0.02 else "--")
+            if caps is not None and caps.has_elevation:
+                cells.append(f"{getattr(t, 'z', 0.0):.1f} m")
             if caps is not None and caps.has_iff:
                 cells.append(t.cls or "未知")
             if caps is not None and caps.has_threat:
@@ -92,6 +106,8 @@ class TrackTable(QTableWidget):
 
             for col, text in enumerate(cells):
                 item = QTableWidgetItem(text)
+                if col == 0:
+                    item.setData(Qt.UserRole, int(t.tid))
                 item.setTextAlignment(Qt.AlignCenter)
                 if locked:
                     item.setForeground(QColor(255, 214, 74))

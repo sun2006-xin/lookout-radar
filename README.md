@@ -53,7 +53,7 @@
 ### 直接用（推荐，无需安装 Python）
 
 - **方式一（克隆 / 下载仓库 ZIP 即用）**：克隆本仓库或点击 GitHub 页面右上角 `Code → Download ZIP` 解压后，直接双击运行仓库内的 **`dist/Lookout/Lookout.exe`**。
-- **方式二（Release 独立压缩包）**：前往 [GitHub Releases](https://github.com/sun2006-xin/lookout-radar/releases/latest) 下载 `Lookout-v1.2.0-win64.zip`，解压后双击 `Lookout.exe` 即可运行。
+- **方式二（Release 独立压缩包）**：前往 [GitHub Releases](https://github.com/sun2006-xin/lookout-radar/releases/latest) 下载 `Lookout-v1.2.1-win64.zip`，解压后双击 `Lookout.exe` 即可运行。
 
 首次打开默认进入 **数据源 → 模拟与演示 → 模拟器 · 合成雷达**，点击「连接」即可看到动态扫描与航迹；可在顶栏 **`场景`** 一键切换航海轮船避碰、车载 77G、低空无人机或教学电子战干扰模式。
 
@@ -165,7 +165,7 @@ def setup(api):
 ## 测试
 
 ```bat
-.venv\Scripts\python.exe tests\test_core.py   :: 45 组
+.venv\Scripts\python.exe tests\test_core.py   :: 46 组
 .venv\Scripts\python.exe tools\check.py       :: 编译 + 测试 + 链路自检 + 夹具回归
 ```
 
