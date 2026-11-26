@@ -14,7 +14,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 TARGET = ROOT / "dist" / "Lookout" / "Lookout.exe"
 WORKDIR = ROOT / "dist" / "Lookout"
-ICON = ROOT / "assets" / "app.ico"
+#: 直接复用已内嵌新图标的 Lookout.exe，既自包含又能绕过资源管理器对独立 .ico 路径的陈旧缓存
+ICON = TARGET
 DESKTOP = Path.home() / "Desktop"
 
 
@@ -102,6 +103,23 @@ def create_via_com(out: Path, target: Path, workdir: Path, icon: Path) -> bool:
     return r.returncode == 0 and out.exists()
 
 
+def _refresh_shell_icons(lnk: Path) -> None:
+    """通知 Windows Shell 刷新图标缓存，确保桌面快捷方式立即换新图标。"""
+    import ctypes
+    import subprocess
+
+    try:
+        shell32 = ctypes.windll.shell32
+        shell32.SHChangeNotify(0x00002000, 0x0005, str(lnk), None)   # SHCNE_UPDATEITEM
+        shell32.SHChangeNotify(0x08000000, 0x0000, None, None)       # SHCNE_ASSOCCHANGED
+    except Exception:
+        pass
+    try:
+        subprocess.run(["ie4uinit.exe", "-show"], capture_output=True, timeout=5)
+    except Exception:
+        pass
+
+
 def main() -> int:
     for p in (TARGET, ICON):
         if not p.exists():
@@ -109,8 +127,11 @@ def main() -> int:
             return 1
     DESKTOP.mkdir(parents=True, exist_ok=True)
     out = DESKTOP / "瞭望 Lookout.lnk"
+    if out.exists():
+        out.unlink()
     if not create_via_com(out, TARGET, WORKDIR, ICON):
         out.write_bytes(build(TARGET, WORKDIR, ICON))
+    _refresh_shell_icons(out)
     print(f"已写入 {out} ({out.stat().st_size} bytes)")
     return 0
 
