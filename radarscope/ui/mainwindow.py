@@ -254,6 +254,7 @@ class MainWindow(ConnectionController, ExportController,
         self.ew_widget = SimStationWidget(self.sim_station, 6.0, show_done=False, parent=self)
         self.ew_widget.changed.connect(self._on_sim_station_changed)
         self.ew_widget.scenarioSelected.connect(lambda sc: self._apply_scenario(sc))
+        self.ew_widget.exitToNormalRequested.connect(self._exit_scenario_to_classic)
         self.dock_ew = QDockWidget("电子战与场景控制台", self)
         self.dock_ew.setObjectName("dock_ew")
         self.dock_ew.setWidget(self.ew_widget)
@@ -409,8 +410,33 @@ class MainWindow(ConnectionController, ExportController,
         # 所有操作按钮紧随「量程」靠左紧凑排列，避免中间留白导致视线跨度过大
         self.btn_scene = QPushButton("场景")
         self.btn_scene.setCheckable(True)
-        self.btn_scene.setToolTip("默认是日常纯净雷达显控；点击可选择预设场景（电子战/航海/车载/低空无人机）并展开对应专用界面")
-        self.btn_scene.clicked.connect(self._open_sim_station)
+        self.btn_scene.setToolTip("默认是日常纯净雷达显控；点击可直接切换场景（含返回日常监控）或展开电子战台")
+        scene_btn_menu = QMenu(self)
+        scene_btn_menu.addAction("日常雷达监控（关闭全部场景与干扰）", self._exit_scenario_to_classic)
+        scene_btn_menu.addSeparator()
+        for sc_k, sc_t, sc_r in (
+            ("marine", "航海轮船避碰（2 km 海图 + AIS + GO-CFAR）", 2000.0),
+            ("automotive", "车载 77G 前向交通（80 m 凝视 + OS-CFAR）", 80.0),
+            ("drone", "低空无人机 3D 防护（150 m RHI + IMM3D + 防区）", 150.0),
+            ("crossing", "多目标交叉关联（GNN 匹配 + 2σ 椭圆）", 0.0),
+            ("approach", "高速逼近 / 防撞告警演练", 0.0),
+            ("patrol", "动态巡逻仿真（随机生成目标）", 0.0),
+        ):
+            scene_btn_menu.addAction(sc_t, lambda _c=False, k=sc_k, r=sc_r: self._apply_scenario(k, r))
+        scene_btn_menu.addSeparator()
+        m_btn_ew = scene_btn_menu.addMenu("电子战干扰对比（展开 EW 控制台）")
+        for jk, jt in (
+            ("barrage", "宽带噪声压制"),
+            ("spot", "瞄准扇区压制"),
+            ("drfm", "DRFM 多假目标"),
+            ("rgpo", "RGPO 距离波门拖引"),
+            ("vgpo", "VGPO 速度波门拖引"),
+            ("chaff", "箔条云 (Chaff) 面散射"),
+            ("isrj", "ISRJ 间歇采样转发"),
+        ):
+            m_btn_ew.addAction(jt, lambda _c=False, k=jk: self._set_jam_mode(k))
+        scene_btn_menu.addAction("打开电子战详细参数弹窗…", self._open_sim_station)
+        self.btn_scene.setMenu(scene_btn_menu)
         tb.addWidget(self.btn_scene)
 
         self.btn_lock = QPushButton("点目标锁定")
@@ -578,7 +604,7 @@ class MainWindow(ConnectionController, ExportController,
         sc_grp.setExclusive(True)
         self._scene_actions: dict[str, QAction] = {}
         for key, title, rng_hint in (
-            ("none", "关闭预设场景（正常雷达显示）", 0.0),
+            ("none", "关闭预设场景（返回日常雷达显示）", 0.0),
             ("marine", "航海轮船避碰场景（2 km · 商船/货轮会遇）", 2000.0),
             ("automotive", "车载 77G 多车道交通流场景（80 m）", 80.0),
             ("drone", "低空无人机 / 安防突防场景（150 m）", 150.0),
@@ -589,7 +615,10 @@ class MainWindow(ConnectionController, ExportController,
             act = QAction(title, self)
             act.setCheckable(True)
             act.setChecked(key == "none")
-            act.triggered.connect(lambda _c=False, k=key, r=rng_hint: self._apply_scenario(k, r))
+            if key == "none":
+                act.triggered.connect(lambda _c=False: self._exit_scenario_to_classic())
+            else:
+                act.triggered.connect(lambda _c=False, k=key, r=rng_hint: self._apply_scenario(k, r))
             sc_grp.addAction(act)
             m_scene.addAction(act)
             self._scene_actions[key] = act
@@ -973,10 +1002,17 @@ class MainWindow(ConnectionController, ExportController,
 
     def _on_range_changed(self, v: float) -> None:
         self.caps.range_max = float(v)
+        self._sync_tracker_scale(self.caps.range_max)
         self.ppi.set_capabilities(self.caps)
         self.waterfall.set_range(self.caps.range_max)
         if self.dock_near.isVisible():
             self._toggle_near(True)
+
+    def _sync_tracker_scale(self, range_max: float) -> None:
+        """按雷达量程比例缩放关联门限与合并阈值，避免远距(如20km相控阵/2km航海)航迹碎裂爆表。"""
+        rm = max(2.0, float(range_max))
+        self.tracker.gate_m = max(1.5, min(2500.0, rm * 0.10))
+        self.tracker.merge_m = max(0.6, min(600.0, rm * 0.025))
 
     def _on_threshold_changed(self, v: float) -> None:
         self._thresh = float(v)
@@ -1107,6 +1143,7 @@ class MainWindow(ConnectionController, ExportController,
         self.rhiscope.setVisible(caps.has_elevation)
         self.table.configure(self.caps)
         self.tracker.reset()
+        self._sync_tracker_scale(self.caps.range_max)
         self.alarm.reset()
         self.clutter_map.reset()
         self.land_mask.reset()

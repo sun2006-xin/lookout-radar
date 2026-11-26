@@ -194,7 +194,7 @@ def compute_fire_control_solution(
 
 @dataclass(slots=True)
 class SimObject:
-    """一个在平面上运动的虚拟电子目标。"""
+    """一个在空间中运动的虚拟电子目标（含可选 3D 高度与垂直速度）。"""
 
     id: int
     name: str
@@ -204,6 +204,10 @@ class SimObject:
     vy: float
     amp: float = 0.88
     respawn: bool = True
+    z: float = 0.0
+    vz: float = 0.0
+    cls: str = ""
+    threat: int = 0
 
 
 class ElectronicStation:
@@ -236,26 +240,30 @@ class ElectronicStation:
             for _ in range(3):
                 self.spawn_random(rmax, respawn=True)
         elif self.scenario == "approach":
-            self.inject(-0.4, rmax * 0.85, 0.05, -0.55, amp=0.92, name="逼近目标-1", respawn=True)
-            self.inject(rmax * 0.45, rmax * 0.72, -0.30, -0.40, amp=0.82, name="逼近目标-2", respawn=True)
+            v = max(0.55, rmax * 0.08)
+            self.inject(-0.05 * rmax, rmax * 0.84, 0.05 * v, -v, amp=0.92, name="逼近目标-1", respawn=True, threat=2)
+            self.inject(rmax * 0.42, rmax * 0.72, -0.55 * v, -0.70 * v, amp=0.84, name="逼近目标-2", respawn=True, threat=1)
         elif self.scenario == "crossing":
-            self.inject(-rmax * 0.55, rmax * 0.45, 0.45, 0.05, amp=0.88, name="横穿-A", respawn=True)
-            self.inject(rmax * 0.55, rmax * 0.48, -0.45, -0.04, amp=0.86, name="横穿-B", respawn=True)
-            self.inject(0.1, rmax * 0.30, 0.10, 0.25, amp=0.78, name="纵向-C", respawn=True)
+            v = max(0.45, rmax * 0.07)
+            self.inject(-rmax * 0.55, rmax * 0.48, v, 0.05 * v, amp=0.88, name="横穿-A", respawn=True)
+            self.inject(rmax * 0.55, rmax * 0.50, -v, -0.04 * v, amp=0.86, name="横穿-B", respawn=True)
+            self.inject(0.08 * rmax, rmax * 0.28, 0.15 * v, 0.55 * v, amp=0.80, name="纵向-C", respawn=True)
         elif self.scenario == "marine":
-            spd = max(0.35, rmax * 0.03)
-            self.inject(-rmax * 0.45, rmax * 0.68, spd * 1.1, -spd * 0.45, amp=0.90, name="商船-右舷避让", respawn=True)
-            self.inject(0.25 * rmax, rmax * 0.82, -spd * 0.15, -spd * 1.25, amp=0.88, name="货轮-对遇", respawn=True)
-            self.inject(-0.18 * rmax, rmax * 0.32, 0.05 * spd, spd * 0.65, amp=0.76, name="渔船-慢速前航", respawn=True)
+            # 真实近海避碰速度 3~8 m/s (约 6~15 节)
+            self.inject(-rmax * 0.42, rmax * 0.65, 5.2, -2.1, amp=0.90, name="商船-右舷避让", respawn=True, cls="友")
+            self.inject(0.22 * rmax, rmax * 0.78, -1.2, -6.8, amp=0.88, name="货轮-对遇", respawn=True, cls="未知", threat=1)
+            self.inject(-0.16 * rmax, rmax * 0.34, 0.6, 2.8, amp=0.78, name="渔船-慢速前航", respawn=True, cls="友")
         elif self.scenario == "automotive":
-            v = max(0.45, rmax * 0.05)
-            self.inject(0.0, rmax * 0.62, 0.0, -v * 0.45, amp=0.92, name="前车-减速", respawn=True)
-            self.inject(-rmax * 0.22, rmax * 0.78, v * 0.25, -v * 0.85, amp=0.84, name="左道切入", respawn=True)
-            self.inject(rmax * 0.26, rmax * 0.35, -v * 0.05, v * 0.55, amp=0.80, name="右道超车", respawn=True)
+            # 真实城市/快速路 77G 前向车流 (y = 20~65m, 速度 5~14 m/s)
+            self.inject(0.0, rmax * 0.58, 0.0, -4.5, amp=0.92, name="本道前车", respawn=True, threat=2)
+            self.inject(-3.6, rmax * 0.76, 1.4, -9.5, amp=0.85, name="左道切入", respawn=True, threat=1)
+            self.inject(3.7, rmax * 0.36, -0.3, 6.2, amp=0.82, name="右道超车", respawn=True)
         elif self.scenario == "drone":
-            v = max(0.30, rmax * 0.06)
-            self.inject(rmax * 0.48, rmax * 0.76, -v * 0.85, -v * 0.90, amp=0.82, name="突防机-1", respawn=True)
-            self.inject(-rmax * 0.32, rmax * 0.52, v * 0.20, v * 0.08, amp=0.74, name="悬停巡检-2", respawn=True)
+            # 真实低空 3D 无人机（仅 2 批高价值目标，含真实高度 z 与爬升/俯冲 vz）
+            self.inject(rmax * 0.44, rmax * 0.74, -5.8, -6.2, amp=0.84, name="突防低飞-1", respawn=True,
+                        z=18.0, vz=-0.65, cls="敌", threat=3)
+            self.inject(-rmax * 0.28, rmax * 0.50, 1.8, 1.2, amp=0.76, name="巡检悬停-2", respawn=True,
+                        z=32.0, vz=0.35, cls="未知", threat=1)
 
     def inject(
         self,
@@ -266,6 +274,10 @@ class ElectronicStation:
         amp: float = 0.88,
         name: str = "",
         respawn: bool = False,
+        z: float = 0.0,
+        vz: float = 0.0,
+        cls: str = "",
+        threat: int = 0,
     ) -> SimObject:
         self._seq += 1
         obj = SimObject(
@@ -277,6 +289,10 @@ class ElectronicStation:
             vy=float(vy),
             amp=max(0.2, min(1.0, float(amp))),
             respawn=respawn,
+            z=float(z),
+            vz=float(vz),
+            cls=str(cls),
+            threat=int(threat),
         )
         self.objects.append(obj)
         return obj
@@ -311,10 +327,21 @@ class ElectronicStation:
         for o in self.objects:
             o.x += o.vx * dt
             o.y += o.vy * dt
+            if o.vz:
+                o.z += o.vz * dt
+                if o.z < 4.0 or o.z > 65.0:
+                    o.vz = -o.vz
+                    o.z = max(4.0, min(65.0, o.z))
             r = math.hypot(o.x, o.y)
-            if r > rmax * 0.96 or r < 0.25:
-                if o.respawn:
-                    # 离开视野后从边缘重新进入，模拟连续来往目标
+            max_r = rmax * 0.96
+            out_of_fov = (self.scenario == "automotive" and (o.y < 3.0 or abs(o.x) > rmax * 0.55))
+            if r > max_r or r < 0.25 or out_of_fov:
+                if self.scenario == "automotive" and o.respawn:
+                    # 车载场景：车辆保持在前方 ±8m 车道内有序循环出现，不跑到船用 360° 后方
+                    o.x = float(self._rng.choice((-3.6, 0.0, 3.6)))
+                    o.y = rmax * self._rng.uniform(0.75, 0.92) if o.vy <= 0 else rmax * 0.15
+                    kept.append(o)
+                elif o.respawn:
                     ang = self._rng.uniform(-math.pi * 0.75, math.pi * 0.75)
                     r_new = rmax * self._rng.uniform(0.65, 0.88)
                     o.x = r_new * math.sin(ang)
@@ -325,7 +352,6 @@ class ElectronicStation:
                     o.vy = spd * math.cos(in_ang)
                     kept.append(o)
                 else:
-                    # 手动注入的目标碰到边界时折返，方便反复观察
                     o.vx = -o.vx
                     o.vy = -o.vy
                     o.x = max(-rmax * 0.9, min(rmax * 0.9, o.x))
@@ -334,10 +360,15 @@ class ElectronicStation:
             else:
                 kept.append(o)
         self.objects = kept
-        return [
-            Target(x=o.x, y=o.y, vx=o.vx, vy=o.vy, snr=o.amp)
-            for o in self.objects
-        ]
+        out_t: list[Target] = []
+        for o in self.objects:
+            rr = math.hypot(o.x, o.y)
+            el = math.degrees(math.atan2(o.z, max(1e-3, rr))) if o.z else 0.0
+            out_t.append(Target(
+                x=o.x, y=o.y, vx=o.vx, vy=o.vy, snr=o.amp,
+                z=o.z, el_deg=el, cls=o.cls, threat=o.threat,
+            ))
+        return out_t
 
     def ew_metrics(self, range_max: float) -> dict:
         return compute_ew_metrics(
@@ -379,8 +410,11 @@ class ElectronicStation:
             r_center = caps.range_min + (caps.range_max - caps.range_min) * 0.48
             r_sigma = max(0.35, (caps.range_max - caps.range_min) * 0.11 * spread)
             prof_r = np.exp(-0.5 * ((frame.r_axis - r_center) / r_sigma) ** 2).astype(np.float32)
-            speckle = self._np_rng.uniform(0.45, 1.0, size=scan.shape).astype(np.float32)
-            scan = np.maximum(scan, (0.45 + 0.50 * jsr) * np.outer(prof_a, prof_r) * speckle)
+            # 平滑漫散箔条云而非高频逐像素尖刺，避免爆出数十个碎裂假目标
+            raw_sp = self._np_rng.uniform(0.76, 1.0, size=scan.shape).astype(np.float32)
+            cloud = (0.45 + 0.50 * jsr) * np.outer(prof_a, prof_r) * raw_sp
+            cloud = 0.5 * cloud + 0.25 * np.roll(cloud, 1, axis=0) + 0.25 * np.roll(cloud, 1, axis=1)
+            scan = np.maximum(scan, cloud)
         elif self.jam_mode in ("drfm", "rgpo", "isrj") and frame.az_axis is not None and frame.r_axis is not None:
             anchors = frame.targets[:2] if frame.targets else [
                 Target(x=0.0, y=max(caps.range_min + 0.5, caps.range_max * 0.35), snr=0.85)
@@ -442,7 +476,35 @@ class ElectronicStation:
     ) -> RadarFrame:
         """将活跃虚拟目标与电子对抗波形叠加到 RadarFrame，并在干扰开启时重跑 CFAR 检出。"""
         v_targets = self.step(dt, caps.range_max)
-        if v_targets:
+        # 专有仿真场景下替代模拟器泛用室内杂点，还原贴合实战的目标数量与空间杂波特征
+        exclusive_sim = (
+            caps.source == "sim"
+            and self.scenario in ("marine", "automotive", "drone", "crossing", "approach")
+            and bool(v_targets)
+        )
+        if exclusive_sim and frame.az_axis is not None and frame.r_axis is not None:
+            frame.targets = list(v_targets)
+            syn = pipeline.synthesize_scan(caps, v_targets, az_axis=frame.az_axis, r_axis=frame.r_axis)
+            scan = syn.scan.astype(np.float32, copy=True) if syn.scan is not None else np.zeros_like(frame.scan)
+            # 按场景叠加真实背景先验特征：航海近距海浪、低空地形地物回波、车载静噪
+            if self.scenario == "marine":
+                sea = np.exp(-((frame.r_axis - caps.range_min) / max(1.0, caps.range_max * 0.11)) ** 2).astype(np.float32)
+                wave = self._np_rng.uniform(0.18, 0.34, size=scan.shape).astype(np.float32)
+                scan = np.maximum(scan, sea[None, :] * wave)
+            elif self.scenario == "drone":
+                gnd = np.exp(-((frame.r_axis - caps.range_max * 0.30) / max(1.0, caps.range_max * 0.08)) ** 2).astype(np.float32)
+                ridge = self._np_rng.uniform(0.15, 0.28, size=scan.shape).astype(np.float32)
+                scan = np.maximum(scan, gnd[None, :] * ridge)
+            frame.scan = np.clip(scan, 0.0, 1.0)
+            if frame.rhi is not None and frame.el_axis is not None:
+                rhi = np.zeros_like(frame.rhi, dtype=np.float32)
+                for vt in v_targets:
+                    el_r = math.radians(vt.el_deg)
+                    pe = np.exp(-0.5 * ((frame.el_axis - el_r) / math.radians(3.5)) ** 2).astype(np.float32)
+                    pr = np.exp(-0.5 * ((frame.r_axis - vt.rng) / max(0.5, caps.range_max * 0.02)) ** 2).astype(np.float32)
+                    rhi = np.maximum(rhi, vt.snr * np.outer(pe, pr))
+                frame.rhi = np.clip(rhi, 0.0, 1.0)
+        elif v_targets:
             frame.targets = list(frame.targets) + v_targets
             if frame.has_scan and frame.az_axis is not None and frame.r_axis is not None:
                 scan = frame.scan.astype(np.float32, copy=True)
@@ -464,11 +526,12 @@ class ElectronicStation:
         if self.jam_mode != "none":
             if frame.has_scan:
                 self._apply_jamming(frame, caps, dt)
-                # 干扰开启时按当前 CFAR 算法重跑检测，以直观对比 CA / OS / GO 抗干扰能力
+                # 干扰开启时按当前 CFAR 算法重跑检测（限制峰值数量防止单云碎裂爆量）
+                det_cap = max(4, min(10, (caps.max_targets or 6)))
                 frame.targets = pipeline.detect_targets(
                     frame,
                     threshold=threshold,
-                    max_targets=max(8, caps.max_targets or 8),
+                    max_targets=det_cap,
                     cfar_mode=cfar_mode,
                 )
             frame.meta["ew"] = self.ew_metrics(caps.range_max)

@@ -1533,13 +1533,17 @@ def test_ux_cohesion_and_controller_links() -> None:
     from radarscope.core.model import Target
     from radarscope.ui.mainwindow import MainWindow
 
-    settings = QSettings("RadarScope", "Lookout")
+    settings = QSettings("RadarScope", "Console")
     prev_mode = settings.value("sim_mode", "rotating", type=str)
+    prev_drv = settings.value("driver", "sim", type=str)
     _app = QApplication.instance() or QApplication([])
     w = MainWindow()
     w.show()
     try:
         # 1. 航迹表 ↔ PPI 双向锁定，且 3D 模式下展现“高度”列
+        si = w.src_combo.findData("sim")
+        if si >= 0:
+            w.src_combo.setCurrentIndex(si)
         w._set_sim_mode("rhi_3d")
         _app.processEvents()
         assert w.caps.has_elevation and not w.rhiscope.isHidden()
@@ -1575,6 +1579,7 @@ def test_ux_cohesion_and_controller_links() -> None:
     finally:
         w.close()
         settings.setValue("sim_mode", prev_mode)
+        settings.setValue("driver", prev_drv)
     ok("跨模块 UX 联动、航迹双向锁定、非模态电子站与控制器拆解")
 
 
@@ -1632,7 +1637,7 @@ def test_workspace_docks_canvas_edit_and_i18n() -> None:
 
     settings = QSettings("RadarScope", "Console")
     saved_keys = ("cfar_mode", "clutter_suppress", "filter_mode", "assoc_mode",
-                  "confirm_hits", "confirm_window", "sim_mode", "lang")
+                  "confirm_hits", "confirm_window", "sim_mode", "driver", "lang")
     prev = {k: settings.value(k) for k in saved_keys}
     _app = QApplication.instance() or QApplication([])
     w = MainWindow()
@@ -1666,6 +1671,27 @@ def test_workspace_docks_canvas_edit_and_i18n() -> None:
         w._set_jam_mode("isrj")
         _app.processEvents()
         assert not w.dock_ew.isHidden()
+        assert w.ew_widget.minimumSizeHint().width() <= 450, (
+            f"电子战控制台最小宽度过大导致右侧裁切: {w.ew_widget.minimumSizeHint().width()}"
+        )
+
+        # 验证 20km 相控阵 + 箔条云干扰不再发生门限过小导致的 54 目标碎裂爆表
+        from radarscope.drivers.sim_aesa import AesaSimDriver
+        aesa = AesaSimDriver()
+        aesa.open()
+        w._apply_caps(aesa.capabilities())
+        w._set_jam_mode("chaff")
+        for _ in range(10):
+            fr_a = None
+            dl = time.monotonic() + 0.5
+            while fr_a is None and time.monotonic() < dl:
+                time.sleep(0.02)
+                fr_a = aesa.read()
+            if fr_a is not None:
+                fr_m = w.sim_station.merge_into_frame(fr_a, w.caps, 0.05, cfar_mode="go")
+                w.tracker.update(fr_m.targets, 0.05)
+        aesa.close()
+        assert len(w.tracker.tracks) <= 14, f"20km 相控阵箔条干扰下航迹爆表: {len(w.tracker.tracks)}"
 
         w._exit_scenario_to_classic()
         _app.processEvents()

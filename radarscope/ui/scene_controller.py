@@ -123,6 +123,10 @@ class SceneAndMapController:
 
     def _set_sim_mode(self, mode: str) -> None:
         """菜单/设置切换模拟器扫描形态（rotating / staring / rhi_3d），运行中实时热重载。"""
+        if self.src_combo.currentData() == "sim" and self.drv_combo.currentData() != "sim":
+            di = self.drv_combo.findData("sim")
+            if di >= 0:
+                self.drv_combo.setCurrentIndex(di)
         mi = self.mode_combo.findData(mode)
         if mi >= 0 and self.mode_combo.currentIndex() != mi:
             self.mode_combo.setCurrentIndex(mi)
@@ -156,14 +160,15 @@ class SceneAndMapController:
 
     def _apply_scenario(self, key: str, suggested_range: float = 0.0) -> None:
         prof = recommended_profile(key)
-        started = self._ensure_sim_running(key) if key != "none" else False
-
-        # 若该场景指定了雷达工作形态（如无人机→3D俯仰、车载→前向凝视、航海→旋转扫描），先联动切换
         want_mode = prof.get("sim_mode") if prof else None
-        if want_mode and str(self.mode_combo.currentData()) != want_mode:
+        if want_mode and self.src_combo.currentData() == "sim" and (
+            self.drv_combo.currentData() != "sim" or str(self.mode_combo.currentData()) != want_mode
+        ):
             self._set_sim_mode(str(want_mode))
         elif key == "none" and self.sim_station.jam_mode == "none" and str(self.mode_combo.currentData()) == "rhi_3d":
             self._set_sim_mode("rotating")
+
+        started = self._ensure_sim_running(key) if key != "none" else False
 
         rng_hint = float(suggested_range or (prof["range_m"] if prof else 0.0))
         if rng_hint > 0.0 and abs(float(self.range_spin.value()) - rng_hint) > 1.0:
@@ -299,6 +304,21 @@ class SceneAndMapController:
             self.log.push("info", "已关闭电子战干扰样式")
 
     def _on_sim_station_changed(self) -> None:
+        if (self.sim_station.scenario == "none"
+                and self.sim_station.jam_mode == "none"
+                and not self.sim_station.objects
+                and not self.sim_station.fc_sim):
+            if hasattr(self, "dock_ew"):
+                self.dock_ew.hide()
+            if hasattr(self, "dock_zones"):
+                self.dock_zones.hide()
+            if hasattr(self, "dock_scope"):
+                self.dock_scope.show()
+                self.dock_scope.raise_()
+            self._sync_dock_chrome()
+        elif self.sim_station.jam_mode != "none" and hasattr(self, "dock_ew"):
+            self.dock_ew.show()
+            self._sync_dock_chrome()
         self._sync_scene_ui()
         if self.sim_station.active():
             self._ensure_sim_running("模拟电子站")
@@ -310,6 +330,8 @@ class SceneAndMapController:
         if dlg is None:
             dlg = SimStationDialog(self.sim_station, float(self.range_spin.value()), self)
             dlg.changed.connect(self._on_sim_station_changed)
+            dlg.scenarioSelected.connect(lambda sc: self._apply_scenario(sc))
+            dlg.exitToNormalRequested.connect(self._exit_scenario_to_classic)
             dlg.finished.connect(lambda _r=0: self._sync_scene_ui())
             self._sim_dlg = dlg
         else:

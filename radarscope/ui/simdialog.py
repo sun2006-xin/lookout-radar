@@ -1,10 +1,10 @@
-"""模拟电子站控制台组件与对话框：既可独立悬浮，也可停靠在右侧工作区。"""
+"""模拟电子站控制台组件与对话框：采用紧凑网格排版以完美适配右侧窄停靠栏，无横向截断。"""
 from __future__ import annotations
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFormLayout,
-    QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPushButton,
+    QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPushButton,
     QScrollArea, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -13,11 +13,12 @@ from ..core.sim_targets import JAMMING_MODES, SCENARIOS, ElectronicStation, comp
 
 
 class SimStationWidget(QWidget):
-    """可嵌入 Dock 或对话框的动态目标 / 电子对抗实时控制面板。"""
+    """可嵌入 Dock 或对话框的动态目标 / 电子对抗实时控制面板（紧凑防截断设计）。"""
 
-    COLS = ["名称", "X (m)", "Y (m)", "Vx (m/s)", "Vy (m/s)", "强度"]
+    COLS = ["名称", "X (m)", "Y (m)", "Vx", "Vy", "强度"]
     changed = pyqtSignal()
     scenarioSelected = pyqtSignal(str)
+    exitToNormalRequested = pyqtSignal()
     doneRequested = pyqtSignal()
 
     def __init__(self, station: ElectronicStation, range_max: float = 8.0,
@@ -26,45 +27,46 @@ class SimStationWidget(QWidget):
         self.station = station
         self.range_max = max(2.0, float(range_max))
 
-        tip = QLabel("支持在 PPI 上按住 Shift + 左键直接点放目标；调整下方场景或电子战参数实时生效。")
+        tip = QLabel("提示：在 PPI 上按住 Shift + 左键可直接点放目标；下方参数均实时生效。")
         tip.setObjectName("hintLabel")
         tip.setWordWrap(True)
 
         # ---- 区块 1：动态场景与虚拟目标管理 ----
         scene_box = QGroupBox("动态场景与虚拟目标管理")
         sv = QVBoxLayout(scene_box)
-        sv.setContentsMargins(10, 14, 10, 8)
-        sv.setSpacing(7)
+        sv.setContentsMargins(8, 12, 8, 8)
+        sv.setSpacing(6)
 
-        top = QHBoxLayout()
-        top.setSpacing(6)
+        sg = QGridLayout()
+        sg.setSpacing(6)
         self.lbl_scene = QLabel(tr("自动场景"))
-        top.addWidget(self.lbl_scene)
         self.cb_scene = QComboBox()
+        self.cb_scene.setMinimumWidth(0)
         for k, label in SCENARIOS.items():
             self.cb_scene.addItem(label, k)
         si = self.cb_scene.findData(self.station.scenario)
         if si >= 0:
             self.cb_scene.setCurrentIndex(si)
         self.cb_scene.currentIndexChanged.connect(self._on_scene)
-        top.addWidget(self.cb_scene, 1)
+        sg.addWidget(self.lbl_scene, 0, 0)
+        sg.addWidget(self.cb_scene, 0, 1, 1, 3)
 
         self.lbl_speed = QLabel(tr("速度倍率"))
-        top.addWidget(self.lbl_speed)
         self.sp_speed = QDoubleSpinBox()
         self.sp_speed.setRange(0.2, 5.0)
         self.sp_speed.setSingleStep(0.2)
         self.sp_speed.setValue(self.station.speed_scale)
         self.sp_speed.valueChanged.connect(self._on_speed)
-        top.addWidget(self.sp_speed)
-
         self.btn_rand = QPushButton(tr("随机出现"))
         self.btn_rand.clicked.connect(self._spawn_random)
         self.btn_del = QPushButton(tr("删除选中"))
         self.btn_del.clicked.connect(self._remove_selected)
-        top.addWidget(self.btn_rand)
-        top.addWidget(self.btn_del)
-        sv.addLayout(top)
+        sg.addWidget(self.lbl_speed, 1, 0)
+        sg.addWidget(self.sp_speed, 1, 1)
+        sg.addWidget(self.btn_rand, 1, 2)
+        sg.addWidget(self.btn_del, 1, 3)
+        sg.setColumnStretch(1, 1)
+        sv.addLayout(sg)
 
         self.table = QTableWidget(0, len(self.COLS))
         self.table.setHorizontalHeaderLabels(self.COLS)
@@ -73,22 +75,20 @@ class SimStationWidget(QWidget):
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.table.setMinimumHeight(130)
-        self.table.setMaximumHeight(190)
+        self.table.setMinimumHeight(80)
+        self.table.setMaximumHeight(106)
         sv.addWidget(self.table)
 
-        row_inj_a = QHBoxLayout()
-        row_inj_a.setSpacing(6)
+        inj_grid = QGridLayout()
+        inj_grid.setSpacing(6)
         self.ed_name = QLineEdit()
-        self.ed_name.setPlaceholderText("自定义目标名称（留空自动编号）")
+        self.ed_name.setPlaceholderText("目标名（留空自动编号）")
         self.btn_add = QPushButton(tr("注入自定义目标"))
         self.btn_add.clicked.connect(self._inject_custom)
-        row_inj_a.addWidget(QLabel("名称"))
-        row_inj_a.addWidget(self.ed_name, 1)
-        row_inj_a.addWidget(self.btn_add)
+        inj_grid.addWidget(QLabel("名称"), 0, 0)
+        inj_grid.addWidget(self.ed_name, 0, 1, 1, 2)
+        inj_grid.addWidget(self.btn_add, 0, 3)
 
-        row_inj_b = QHBoxLayout()
-        row_inj_b.setSpacing(6)
         self.sp_x = QDoubleSpinBox()
         self.sp_x.setRange(-5000.0, 5000.0)
         self.sp_x.setValue(0.8)
@@ -101,28 +101,42 @@ class SimStationWidget(QWidget):
         self.sp_vy = QDoubleSpinBox()
         self.sp_vy.setRange(-100.0, 100.0)
         self.sp_vy.setValue(-0.20)
-        for lbl, sp in (("X", self.sp_x), ("Y", self.sp_y), ("Vx", self.sp_vx), ("Vy", self.sp_vy)):
-            row_inj_b.addWidget(QLabel(lbl))
-            row_inj_b.addWidget(sp, 1)
-        sv.addLayout(row_inj_a)
-        sv.addLayout(row_inj_b)
+        for sp in (self.sp_x, self.sp_y, self.sp_vx, self.sp_vy):
+            sp.setMinimumWidth(68)
+        inj_grid.addWidget(QLabel("X (m)"), 1, 0)
+        inj_grid.addWidget(self.sp_x, 1, 1)
+        inj_grid.addWidget(QLabel("Y (m)"), 1, 2)
+        inj_grid.addWidget(self.sp_y, 1, 3)
+        inj_grid.addWidget(QLabel("Vx"), 2, 0)
+        inj_grid.addWidget(self.sp_vx, 2, 1)
+        inj_grid.addWidget(QLabel("Vy"), 2, 2)
+        inj_grid.addWidget(self.sp_vy, 2, 3)
+        inj_grid.setColumnStretch(1, 1)
+        inj_grid.setColumnStretch(3, 1)
+        sv.addLayout(inj_grid)
 
-        # ---- 区块 2：电子对抗 / 无线电干扰教学仿真 ----
-        ew_box = QGroupBox("电子对抗 / 无线电干扰教学仿真（纯数学建模，无射频发射）")
-        ew_form = QFormLayout(ew_box)
-        ew_form.setContentsMargins(10, 14, 10, 8)
-        ew_form.setSpacing(8)
+        # ---- 区块 2：电子对抗 / 无线电干扰教学仿真（全 2 列适配） ----
+        ew_box = QGroupBox("电子对抗 / 干扰仿真（纯数学建模，无射频发射）")
+        ew_lay = QVBoxLayout(ew_box)
+        ew_lay.setContentsMargins(8, 12, 8, 8)
+        ew_lay.setSpacing(6)
 
+        ew_form = QFormLayout()
+        ew_form.setContentsMargins(0, 0, 0, 0)
+        ew_form.setSpacing(6)
         self.cb_jam = QComboBox()
+        self.cb_jam.setMinimumWidth(0)
         for k, label in JAMMING_MODES.items():
             self.cb_jam.addItem(label, k)
         ji = self.cb_jam.findData(self.station.jam_mode)
         if ji >= 0:
             self.cb_jam.setCurrentIndex(ji)
         self.cb_jam.currentIndexChanged.connect(self._on_ew)
+        ew_form.addRow(tr("干扰样式"), self.cb_jam)
+        ew_lay.addLayout(ew_form)
 
-        ew_row = QHBoxLayout()
-        ew_row.setSpacing(6)
+        ew_grid = QGridLayout()
+        ew_grid.setSpacing(6)
         self.sp_jsr = QDoubleSpinBox()
         self.sp_jsr.setRange(0.1, 1.0)
         self.sp_jsr.setSingleStep(0.1)
@@ -143,41 +157,49 @@ class SimStationWidget(QWidget):
         self.sp_jbw.setValue(self.station.jam_bw_deg)
         self.sp_jbw.valueChanged.connect(self._on_jbw)
 
-        ew_row.addWidget(QLabel("强度"))
-        ew_row.addWidget(self.sp_jsr, 1)
-        ew_row.addWidget(QLabel("方位"))
-        ew_row.addWidget(self.sp_jaz, 1)
-        ew_row.addWidget(QLabel("波宽"))
-        ew_row.addWidget(self.sp_jbw, 1)
+        for sp in (self.sp_jsr, self.sp_jaz, self.sp_jbw):
+            sp.setMinimumWidth(68)
+        ew_grid.addWidget(QLabel("干扰强度"), 0, 0)
+        ew_grid.addWidget(self.sp_jsr, 0, 1)
+        ew_grid.addWidget(QLabel("扇区方位"), 0, 2)
+        ew_grid.addWidget(self.sp_jaz, 0, 3)
+        ew_grid.addWidget(QLabel("波束宽"), 1, 0)
+        ew_grid.addWidget(self.sp_jbw, 1, 1)
+        ew_grid.setColumnStretch(1, 1)
+        ew_grid.setColumnStretch(3, 1)
+        ew_lay.addLayout(ew_grid)
 
-        eccm_row = QHBoxLayout()
-        eccm_row.setSpacing(10)
-        self.chk_eccm = QCheckBox("ECCM 频率捷变抗干扰")
+        self.chk_eccm = QCheckBox("ECCM 模拟频率捷变")
         self.chk_eccm.setChecked(self.station.eccm_agility)
         self.chk_eccm.toggled.connect(self._on_eccm)
-        self.chk_fc = QCheckBox("模拟火控前置引导 [教学]")
+        self.chk_fc = QCheckBox("火控前置推演[教学]")
         self.chk_fc.setChecked(self.station.fc_sim)
         self.chk_fc.toggled.connect(self._on_fc)
-        eccm_row.addWidget(self.chk_eccm)
-        eccm_row.addWidget(self.chk_fc)
-        eccm_row.addStretch(1)
+        chk_row = QHBoxLayout()
+        chk_row.setSpacing(8)
+        chk_row.addWidget(self.chk_eccm)
+        chk_row.addWidget(self.chk_fc)
+        ew_lay.addLayout(chk_row)
 
         self.lbl_ew_info = QLabel("")
         self.lbl_ew_info.setObjectName("ewMetricBadge")
-        ew_tip = QLabel("切换检测算法 (CA/OS/GO-CFAR) 与 ECCM 捷变即可在 PPI/RD 上实时对比烧穿曲线与抗干扰效果。")
+        self.lbl_ew_info.setWordWrap(True)
+        ew_lay.addWidget(self.lbl_ew_info)
+
+        ew_tip = QLabel("在设置里切换 CA/OS/GO-CFAR 与上方 ECCM 捷变，即可实时对比抗干扰与烧穿效果。")
         ew_tip.setObjectName("hintLabel")
         ew_tip.setWordWrap(True)
-
-        ew_form.addRow(tr("干扰样式"), self.cb_jam)
-        ew_form.addRow("干扰参数", ew_row)
-        ew_form.addRow("抗干扰", eccm_row)
-        ew_form.addRow("烧穿评估", self.lbl_ew_info)
-        ew_form.addRow("", ew_tip)
+        ew_lay.addWidget(ew_tip)
 
         btns = QHBoxLayout()
+        btns.setSpacing(6)
         self.btn_clear = QPushButton(tr("清空全部仿真"))
         self.btn_clear.clicked.connect(self._clear)
+        self.btn_exit = QPushButton(tr("返回日常雷达"))
+        self.btn_exit.setToolTip("关闭全部预设场景与干扰波形，并收起电子战控制台")
+        self.btn_exit.clicked.connect(self.exitToNormalRequested.emit)
         btns.addWidget(self.btn_clear)
+        btns.addWidget(self.btn_exit)
         btns.addStretch(1)
         self.btn_done = None
         if show_done:
@@ -199,6 +221,7 @@ class SimStationWidget(QWidget):
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setWidget(inner)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -239,6 +262,7 @@ class SimStationWidget(QWidget):
         self.btn_del.setText(tr("删除选中"))
         self.btn_add.setText(tr("注入自定义目标"))
         self.btn_clear.setText(tr("清空全部仿真"))
+        self.btn_exit.setText(tr("返回日常雷达"))
         if self.btn_done is not None:
             self.btn_done.setText(tr("完成"))
 
@@ -278,7 +302,7 @@ class SimStationWidget(QWidget):
         )
         tag = "（ECCM 捷变已抑制干扰）" if m["eccm_agility"] else "（未开 ECCM）"
         self.lbl_ew_info.setText(
-            f"JSR = {m['jsr_db']:+.1f} dB ｜ 理论烧穿距离 = {m['burn_through_m']:.2f} m {tag}"
+            f"JSR = {m['jsr_db']:+.1f} dB ｜ 烧穿距离 = {m['burn_through_m']:.1f} m {tag}"
         )
 
     def _on_ew(self) -> None:
@@ -340,14 +364,16 @@ class SimStationDialog(QDialog):
     COLS = SimStationWidget.COLS
     changed = pyqtSignal()
     scenarioSelected = pyqtSignal(str)
+    exitToNormalRequested = pyqtSignal()
 
     def __init__(self, station: ElectronicStation, range_max: float = 8.0, parent=None):
         super().__init__(parent)
         self.setWindowTitle("模拟电子站 · 动态目标与电子对抗教学仿真")
-        self.resize(760, 650)
+        self.resize(620, 660)
         self.panel = SimStationWidget(station, range_max, show_done=True, parent=self)
         self.panel.changed.connect(self.changed)
         self.panel.scenarioSelected.connect(self.scenarioSelected)
+        self.panel.exitToNormalRequested.connect(self.exitToNormalRequested)
         self.panel.doneRequested.connect(self.accept)
 
         lay = QVBoxLayout(self)
