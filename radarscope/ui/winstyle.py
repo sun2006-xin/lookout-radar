@@ -97,12 +97,13 @@ def install_dialog_titlebar(theme_getter):
     """
     from PyQt5.QtCore import QEvent, QObject
     from PyQt5.QtWidgets import QApplication, QDialog
+    from .theme import is_dark_theme
 
     class _Filter(QObject):
         def eventFilter(self, obj, ev):
             if ev.type() == QEvent.Show and isinstance(obj, QDialog):
                 try:
-                    enable_dark_titlebar(int(obj.winId()), theme_getter() == "dark")
+                    enable_dark_titlebar(int(obj.winId()), is_dark_theme(theme_getter()))
                 except Exception:
                     pass
             return False

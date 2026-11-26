@@ -15,8 +15,8 @@ from PyQt5.QtCore import QSettings, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QGuiApplication, QKeySequence
 from PyQt5.QtWidgets import (
     QAction, QActionGroup, QApplication, QComboBox, QDialog, QDockWidget,
-    QDoubleSpinBox, QFileDialog, QFormLayout, QHBoxLayout, QInputDialog, QLabel,
-    QDialogButtonBox, QMainWindow, QMenu, QMessageBox, QPushButton,
+    QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QInputDialog,
+    QLabel, QDialogButtonBox, QMainWindow, QMenu, QMessageBox, QPushButton,
     QShortcut, QSizePolicy, QTabWidget,
     QToolBar, QToolButton, QVBoxLayout, QWidget, QWidgetAction,
 )
@@ -49,8 +49,8 @@ from .controllers import (PRESET_ENDPOINTS, ALARM_STYLE, ALARM_STYLE_LIGHT, LIGH
                           ConnectionController, ExportController,
                           AlarmBarController, ReaderThread)
 from .statsdialog import StatsDialog
-from .theme import (DEFAULT_PALETTE, DEFAULT_THEME, PALETTES, THEMES,
-                    build_stylesheet)
+from .theme import (DEFAULT_PALETTE, DEFAULT_THEME, LIGHT_PALETTE_KEYS, PALETTES,
+                    THEMES, build_stylesheet, is_dark_theme, theme_palette)
 from .tracktable import TrackTable
 from .extra import AisDialog, ControlDialog, MapLocationDialog
 from .waterfall import WaterfallWidget
@@ -172,14 +172,20 @@ class MainWindow(ConnectionController, ExportController,
         self.tabs.addTab(self.history, "历史")
         rv.addWidget(self.tabs, 1)
 
+        ppi_card = QFrame()
+        ppi_card.setObjectName("panelCard")
+        pl = QVBoxLayout(ppi_card)
+        pl.setContentsMargins(6, 6, 6, 6)
+        pl.addWidget(self.ppi)
+
         central = QWidget()
         cv = QVBoxLayout(central)
         cv.setContentsMargins(8, 8, 8, 8)
-        cv.setSpacing(6)
+        cv.setSpacing(8)
         cv.addWidget(self.alarm_bar)
         h = QHBoxLayout()
         h.setSpacing(8)
-        h.addWidget(self.ppi, 1)
+        h.addWidget(ppi_card, 1)
         h.addWidget(right, 0)
         cv.addLayout(h, 1)
         self.setCentralWidget(central)
@@ -241,6 +247,7 @@ class MainWindow(ConnectionController, ExportController,
         tb.addWidget(btn_scan)
 
         self.btn_conn = QPushButton("连接")
+        self.btn_conn.setObjectName("primaryBtn")
         self.btn_conn.setCheckable(True)
         self.btn_conn.clicked.connect(self._toggle_connect)
         tb.addWidget(self.btn_conn)
@@ -380,7 +387,7 @@ class MainWindow(ConnectionController, ExportController,
         if ti >= 0:
             self.theme_combo.setCurrentIndex(ti)
         self.theme_combo.currentIndexChanged.connect(
-            lambda _i: self._apply_theme(self.theme_combo.currentData())
+            lambda _i: self._apply_theme(self.theme_combo.currentData(), sync_palette=True)
         )
 
         self.cfar_combo = QComboBox()
@@ -554,6 +561,19 @@ class MainWindow(ConnectionController, ExportController,
         act_ais.toggled.connect(lambda on: self._set_ppi_flag("show_ais", on))
         m_view.addAction(act_ais)
         self._view_actions["show_ais"] = act_ais
+        m_view.addSeparator()
+        m_theme = m_view.addMenu("界面主题（7 套风格）")
+        th_grp = QActionGroup(self)
+        th_grp.setExclusive(True)
+        self._theme_actions: dict[str, QAction] = {}
+        for key, th in THEMES.items():
+            act = QAction(th["name"], self)
+            act.setCheckable(True)
+            act.setChecked(key == self._theme)
+            act.triggered.connect(lambda _c=False, k=key: self._apply_theme(k, sync_palette=True))
+            th_grp.addAction(act)
+            m_theme.addAction(act)
+            self._theme_actions[key] = act
 
         m_set = self.menuBar().addMenu("设置(&S)")
         self._m_set = m_set
@@ -599,11 +619,14 @@ class MainWindow(ConnectionController, ExportController,
 
         self.log.push("info", "RadarScope 启动")
         self._rebuild_driver_combo()
-        # 启动时就让色板与主题配对：白底挂深色色板会糊成一片
+        # 启动时就让色板与主题配对：浅主题配浅色板，深主题配深色板
         cur = self.pal_combo.currentData()
-        want = "daylight" if self._theme == "light" else None
-        if want and cur not in LIGHT_PALETTES:
-            i = self.pal_combo.findData(want)
+        if not is_dark_theme(self._theme) and cur not in LIGHT_PALETTE_KEYS:
+            i = self.pal_combo.findData(theme_palette(self._theme))
+            if i >= 0:
+                self.pal_combo.setCurrentIndex(i)
+        elif is_dark_theme(self._theme) and cur in LIGHT_PALETTE_KEYS:
+            i = self.pal_combo.findData(theme_palette(self._theme))
             if i >= 0:
                 self.pal_combo.setCurrentIndex(i)
         self._on_palette_changed()          # 让所有面板启动时配色一致
@@ -1046,8 +1069,8 @@ class MainWindow(ConnectionController, ExportController,
         self._settings_dlg.raise_()
         self._settings_dlg.activateWindow()
 
-    def _apply_theme(self, mode: str) -> None:
-        """切换浅色/深色。样式表、标题栏、雷达色板一起换。"""
+    def _apply_theme(self, mode: str, sync_palette: bool = False) -> None:
+        """切换界面主题。样式表、Windows 标题栏与雷达色板自动协调切换。"""
         self._theme = mode if mode in THEMES else DEFAULT_THEME
         if hasattr(self, "theme_combo"):
             self.theme_combo.blockSignals(True)
@@ -1062,20 +1085,18 @@ class MainWindow(ConnectionController, ExportController,
             app.setStyleSheet(build_stylesheet(self._theme, self._font_scale))
         self.settings.setValue("theme", self._theme)
 
-        # 白底上挂深色色板会糊成一片，反之亦然 —— 主题切换时顺手配对色板
+        # 用户切换主题时联动该主题的专属雷达配色；启动恢复仅兜底修正浅深冲突
         cur = self.pal_combo.currentData()
-        if self._theme == "light" and cur not in LIGHT_PALETTES:
-            i = self.pal_combo.findData("daylight")
-            if i >= 0:
-                self.pal_combo.setCurrentIndex(i)
-        elif self._theme == "dark" and cur in LIGHT_PALETTES:
-            i = self.pal_combo.findData("ice")
+        dark = is_dark_theme(self._theme)
+        want = theme_palette(self._theme)
+        if sync_palette or (not dark and cur not in LIGHT_PALETTE_KEYS) or (dark and cur in LIGHT_PALETTE_KEYS):
+            i = self.pal_combo.findData(want)
             if i >= 0:
                 self.pal_combo.setCurrentIndex(i)
 
-        enable_dark_titlebar(int(self.winId()), self._theme == "dark")
+        enable_dark_titlebar(int(self.winId()), dark)
         if self.map_layer is not None:
-            self.map_layer.set_provider(resolve_provider(self._map_provider, self._theme))
+            self.map_layer.set_provider(resolve_provider(self._map_provider, "dark" if dark else "light"))
         self._refresh_alarm_bar()
         self.log.push("info", f"主题：{THEMES[self._theme]['name']}")
 
@@ -1250,7 +1271,7 @@ class MainWindow(ConnectionController, ExportController,
             self.log.push("info", "AIS 已停止")
 
     def _apply_native_style(self) -> None:
-        if enable_dark_titlebar(int(self.winId()), self._theme == "dark"):
+        if enable_dark_titlebar(int(self.winId()), is_dark_theme(self._theme)):
             LOG.debug("深色标题栏已启用")
 
     def showEvent(self, ev) -> None:

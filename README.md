@@ -9,7 +9,9 @@
 支持毫米波 / 激光雷达 / 超声波 / 多站融合 / AIS / 联网地图，
 一个界面覆盖从"刚焊好板子想看看有没有回波"到"多传感器组网监控"的全过程。
 
-![界面](docs/screenshot-v1.1.png)
+![界面](docs/screenshot-v1.2.png)
+
+![深色专业主题](docs/screenshot-v1.2-dark.png)
 
 ![扫描演示](assets/demo-v1.1.gif)
 
@@ -36,7 +38,7 @@
 
 | 分类 | 能力 |
 |---|---|
-| **显示** | PPI 环视、A 显距离剖面、航迹距离-时间瀑布图、距离-多普勒图、余晖拖尾、尾迹、多普勒趋近着色、双量程近距窗 |
+| **显示** | PPI 环视、A 显距离剖面、航迹距离-时间瀑布图、距离-多普勒图、余晖拖尾、尾迹、多普勒趋近着色、双量程近距窗、**7 套现代 UI 主题 × 8 套雷达色板** |
 | **测量** | 点击测距、EBL 电子方位线 + VRM 距离圈、北向/艏向切换、真运动/相对运动 |
 | **告警** | 距离/速度/圆形与多边形防区/目标数/接近率规则、画布绘制与右键编辑移动、分级提示、静音、CPA 最近会遇 |
 | **检测** | 自适应 GO-CFAR、抗干扰 OS-CFAR、CA-CFAR、静态杂波背景图学习抑制（Clutter Map） |
@@ -51,7 +53,7 @@
 ### 直接用（推荐，无需安装 Python）
 
 - **方式一（克隆 / 下载仓库 ZIP 即用）**：克隆本仓库或点击 GitHub 页面右上角 `Code → Download ZIP` 解压后，直接双击运行仓库内的 **`dist/Lookout/Lookout.exe`**。
-- **方式二（Release 独立压缩包）**：前往 [GitHub Releases](https://github.com/sun2006-xin/lookout-radar/releases/latest) 下载 `Lookout-v1.1.1-win64.zip`，解压后双击 `Lookout.exe` 即可运行。
+- **方式二（Release 独立压缩包）**：前往 [GitHub Releases](https://github.com/sun2006-xin/lookout-radar/releases/latest) 下载 `Lookout-v1.1.2-win64.zip`，解压后双击 `Lookout.exe` 即可运行。
 
 首次打开默认进入 **数据源 → 模拟与演示 → 模拟器 · 合成雷达**，点击「连接」即可看到动态扫描与航迹；可在顶栏 **`场景`** 一键切换航海轮船避碰、车载 77G、低空无人机或教学电子战干扰模式。
 
@@ -163,7 +165,7 @@ def setup(api):
 ## 测试
 
 ```bat
-.venv\Scripts\python.exe tests\test_core.py   :: 39 组
+.venv\Scripts\python.exe tests\test_core.py   :: 40 组
 .venv\Scripts\python.exe tools\check.py       :: 编译 + 测试 + 链路自检 + 夹具回归
 ```
 

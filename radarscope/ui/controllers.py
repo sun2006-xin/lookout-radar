@@ -53,8 +53,8 @@ from .rulesdialog import RulesDialog
 from .sensorpanel import SensorPanel
 from .sensorsdialog import SensorsDialog
 from .statsdialog import StatsDialog
-from .theme import (DEFAULT_PALETTE, DEFAULT_THEME, PALETTES, THEMES,
-                    build_stylesheet)
+from .theme import (DEFAULT_PALETTE, DEFAULT_THEME, LIGHT_PALETTE_KEYS,
+                    PALETTES, THEMES, build_stylesheet, is_dark_theme)
 from .tracktable import TrackTable
 from .extra import AisDialog, ControlDialog
 from .waterfall import WaterfallWidget
@@ -79,8 +79,8 @@ ALARM_STYLE = {
           "border-radius:4px;padding:4px 10px;font-size:12px;",
 }
 
-#: 只有这一个色板是"白底深回波"，专供浅色主题
-LIGHT_PALETTES = {"daylight"}
+#: 浅色主题配对色板集合（白底深回波）
+LIGHT_PALETTES = LIGHT_PALETTE_KEYS
 
 
 #: 浅色主题下换成"淡底深字"。一条深棕横幅挂在白界面上太突兀了。
@@ -537,7 +537,7 @@ class AlarmBarController:
         self._refresh_alarm_bar()
 
     def _alarm_style(self, level: str) -> str:
-        table = ALARM_STYLE_LIGHT if self._theme == "light" else ALARM_STYLE
+        table = ALARM_STYLE if is_dark_theme(self._theme) else ALARM_STYLE_LIGHT
         return table.get(level, table["warn"])
 
     def _refresh_alarm_bar(self) -> None:

@@ -1229,6 +1229,48 @@ def test_protowizard_and_sim_ew_ui() -> None:
     ok("通用协议适配向导与模拟电子战界面集成")
 
 
+def test_multi_themes_and_palettes() -> None:
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt5.QtWidgets import QApplication
+    from radarscope.ui.mainwindow import MainWindow
+    from radarscope.ui.theme import (
+        PALETTES,
+        THEMES,
+        build_stylesheet,
+        color_table,
+        is_dark_theme,
+        theme_palette,
+    )
+
+    assert len(THEMES) == 7, f"预期 7 套主题，实际 {len(THEMES)}"
+    assert len(PALETTES) == 8, f"预期 8 套色板，实际 {len(PALETTES)}"
+    assert not is_dark_theme("light") and not is_dark_theme("nordic")
+    for dk in ("dark", "graphite", "marine_night", "tactical", "amber_ops"):
+        assert is_dark_theme(dk), f"{dk} 应判定为深色主题"
+        assert build_stylesheet(dk, 1.0)
+
+    scaled = build_stylesheet("graphite", 1.25)
+    assert "font-size: 15px" in scaled, "字号缩放正则应把 12px 正确放大为 15px"
+
+    for pkey in PALETTES:
+        ct = color_table(pkey)
+        assert len(ct) == 256, f"色板 {pkey} LUT 长度应为 256"
+    for tkey in THEMES:
+        assert theme_palette(tkey) in PALETTES
+
+    _app = QApplication.instance() or QApplication([])
+    w = MainWindow()
+    w._apply_theme("marine_night", sync_palette=True)
+    assert w.pal_combo.currentData() == "cyan"
+    assert w._theme_actions["marine_night"].isChecked()
+    w._apply_theme("nordic", sync_palette=True)
+    assert w.pal_combo.currentData() == "ocean_teal"
+    assert w._theme_actions["nordic"].isChecked()
+    w.close()
+    ok("多套现代 UI 主题与雷达色板切换")
+
+
 def main() -> int:
     print("RadarScope 核心测试")
     for fn in (test_codec, test_ld2450_sign, test_pipeline, test_alarm,
@@ -1244,7 +1286,7 @@ def main() -> int:
                test_ws_bridge, test_electronic_station, test_zone_hit_and_map_toggle,
                test_map_geolocate_and_provider, test_statusbar_and_map_dialog,
                test_ew_jamming_and_clutter_map, test_custom_proto_and_nmea_ttm,
-               test_protowizard_and_sim_ew_ui):
+               test_protowizard_and_sim_ew_ui, test_multi_themes_and_palettes):
         fn()
     print(f"\n全部通过：{PASS} 组")
     return 0

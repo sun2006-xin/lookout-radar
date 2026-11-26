@@ -1,6 +1,6 @@
 # 开发路线图与未来计划
 
-> 版本：v1.1.1（2026-11-26）· 状态：**软件核心、工程化与通用适配主线（B1~B3、C1~C4、D1~D6、E1~E4、A5）已落地；下一阶段聚焦纯软件生态/电子战拓展及实机硬件联调**。
+> 版本：v1.1.2（2026-11-26）· 状态：**软件核心、工程化、多主题现代化界面与通用适配主线（B1~B3、C1~C4、D1~D6、E1~E4、A5）已落地；下一阶段聚焦纯软件生态/电子战拓展及实机硬件联调**。
 >
 > 配套文档：[ARCHITECTURE.md](ARCHITECTURE.md)（系统分层与数据契约）· [STRUCTURE.md](STRUCTURE.md)（代码文件索引）。
 
@@ -11,17 +11,17 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | 瞭望 Lookout（Python 包名 `radarscope`） |
-| 源码规模 | 约 13 500 行 / 73 个 Python 文件 / 39 组单元测试 |
+| 源码规模 | 约 13 700 行 / 73 个 Python 文件 / 40 组单元测试 |
 | 主窗口结构 | `ui/mainwindow.py` + `ui/controllers.py`（三控制器 mixin） |
 | 打包方式 | `pyinstaller --noconfirm --clean installer/Lookout.spec`（生成 `dist/Lookout/Lookout.exe`） |
 | 开源仓库 | https://github.com/sun2006-xin/lookout-radar （MIT） |
-| 默认视觉 | 现代白（色板 daylight） / 深色（色板 ice） |
+| 默认视觉 | 7 套现代 UI 主题（晨曦白/北欧海雾/深空夜蓝/石墨工业/航海夜视/战术夜绿/琥珀指挥）× 8 套雷达色板 |
 | 已完成阶段 | A5 录制夹具回归、B1~B3 核心算法、C1~C4 架构增强、D1~D6 工程化、E1~E4 通用适配与电子战教学初版 |
 
 **本地开发检查命令**（提交或发版前确保全部通过）：
 
 ```bat
-.venv\Scripts\python.exe tests\test_core.py     :: 39 组单元测试
+.venv\Scripts\python.exe tests\test_core.py     :: 40 组单元测试
 .venv\Scripts\python.exe tools\check.py         :: 字节码编译 + 单元测试 + 无窗口链路自检 + 夹具回归
 .venv\Scripts\python.exe main.py --selftest     :: 打包前/后无界面自检（退出码 0）
 ```
@@ -202,7 +202,7 @@
 
 ## 6. 建议的演进顺序
 
-> **当前进度（2026-11-26）**：`A5`、`B1~B3`、`C1~C4`、`D1~D6`、`E1~E4` 已全部完成并有 39 组测试兜底；以下按纯软件主线与硬件主线分层推进：
+> **当前进度（2026-11-26）**：`A5`、`B1~B3`、`C1~C4`、`D1~D6`、`E1~E4` 已全部完成并有 40 组测试兜底；以下按纯软件主线与硬件主线分层推进：
 
 ```
 软件主线 1（航海/通用零代码生态）：E5（原始流窥视排障）→ E9（扩充零代码驱动模板库）→ E6（离线 MBTiles + NMEA 本船定位 + 陆地掩膜）
