@@ -136,6 +136,8 @@ class MainWindow(ConnectionController, ExportController,
         self.sensors_panel = SensorPanel()
         self.sensors_panel.btn_cfg.clicked.connect(self._open_sensor_config)
         self.ppi.zoneDrawn.connect(self._save_zone_rule)
+        self.ppi.zoneMoved.connect(self._update_zone_geometry)
+        self.ppi.zoneEditRequested.connect(self._edit_zone)
         self.ppi.zoneDeleteRequested.connect(self._delete_zone)
 
         # 报警条常驻、固定高度。
@@ -174,13 +176,13 @@ class MainWindow(ConnectionController, ExportController,
         cv.addLayout(h, 1)
         self.setCentralWidget(central)
 
-        # 近距小量程窗：大范围看态势，小窗看细节，可以关掉
+        # 近距小量程窗：大范围看态势，小窗看细节，放在右侧避免垂直挤压主图
         self.ppi2 = PPIWidget()
-        self.ppi2.setMinimumSize(260, 260)
+        self.ppi2.setMinimumSize(220, 220)
         self.dock_near = QDockWidget("近距监视（2 m 量程）", self)
         self.dock_near.setWidget(self.ppi2)
-        self.dock_near.setAllowedAreas(Qt.AllDockWidgetAreas)
-        self.addDockWidget(Qt.BottomDockWidgetArea, self.dock_near)
+        self.dock_near.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.dock_near)
         self.dock_near.hide()
 
         tb = QToolBar()
@@ -334,6 +336,7 @@ class MainWindow(ConnectionController, ExportController,
         self.btn_zone.setToolTip("开启后在雷达图上按住左键拖出一个圆，松手即生成警戒区；"
                                  "右键点圆可删除")
         self.btn_zone.toggled.connect(self._on_zone_mode_toggled)
+        self.ppi.zoneModeRequested.connect(self.btn_zone.setChecked)
         tb.addWidget(self.btn_zone)
 
         self.btn_true = QPushButton("真运动")
@@ -436,8 +439,6 @@ class MainWindow(ConnectionController, ExportController,
         m_file.addAction("退出", self.close)
         m_tool = self.menuBar().addMenu("工具(&T)")
         self._m_tool = m_tool
-        m_tool.addAction("告警规则…", self._open_rules)
-        m_tool.addAction("传感器配置…", self._open_sensor_config)
         m_tool.addAction("朝向标定…", self._open_calibration)
         m_tool.addAction("统计分析…", self._open_stats)
         m_tool.addAction("设备控制…", self._open_control)
@@ -586,14 +587,15 @@ class MainWindow(ConnectionController, ExportController,
     # 端点
     # ================================================================== #
     def _set_ppi_flag(self, attr: str, on: bool) -> None:
-        setattr(self.ppi, attr, bool(on))
+        for w in (self.ppi, self.ppi2):
+            setattr(w, attr, bool(on))
+            w.update()
         self.settings.setValue(attr, bool(on))
         act = getattr(self, "_view_actions", {}).get(attr)
         if act is not None and act.isChecked() != bool(on):
             act.blockSignals(True)
             act.setChecked(bool(on))
             act.blockSignals(False)
-        self.ppi.update()
 
     def _on_zone_mode_toggled(self, on: bool) -> None:
         self.ppi.set_zone_mode(on)
@@ -604,6 +606,8 @@ class MainWindow(ConnectionController, ExportController,
         self.caps.range_max = float(v)
         self.ppi.set_capabilities(self.caps)
         self.waterfall.set_range(self.caps.range_max)
+        if self.dock_near.isVisible():
+            self._toggle_near(True)
 
     def _on_threshold_changed(self, v: float) -> None:
         self._thresh = float(v)
@@ -645,12 +649,14 @@ class MainWindow(ConnectionController, ExportController,
     def _on_palette_changed(self) -> None:
         key = self.pal_combo.currentData()
         self.ppi.set_palette(key)
+        self.ppi2.set_palette(key)
         self.ascope.set_palette(key)
         self.waterfall.set_palette(key)
         self.rdscope.set_palette(key)
 
     def _on_orientation_changed(self, *_args) -> None:
         self.ppi.set_orientation(self.btn_north.isChecked(), self.heading_spin.value())
+        self.ppi2.set_orientation(self.btn_north.isChecked(), self.heading_spin.value())
 
     def _on_lock_toggled(self, on: bool) -> None:
         if not on:
@@ -834,11 +840,11 @@ class MainWindow(ConnectionController, ExportController,
                 sensors = [{
                     "name": self.caps.name,
                     "bearing": 0.0,
-                    "fov": float(self.caps.fov_deg or 360.0),
+                    "fov": float(getattr(self.caps, "az_fov", 360.0) or 360.0),
                     "endpoint": self.endpoint_combo.currentText(),
                     "online": True,
                     "fps": self._fps,
-                    "frames": self.caps.__dict__.get("frames", 0),
+                    "frames": self._frames,
                     "errors": 0,
                 }]
             if sensors:
@@ -1007,7 +1013,10 @@ class MainWindow(ConnectionController, ExportController,
             caps = copy.copy(self.caps)
             caps.range_max = max(0.5, min(2.0, self.caps.range_max))
             caps.name = f"近距 {caps.range_max:.1f} m"
+            self.ppi2.set_palette(self.pal_combo.currentData())
+            self.ppi2.set_orientation(self.btn_north.isChecked(), self.heading_spin.value())
             self.ppi2.set_capabilities(caps)
+            self._sync_zones()
 
     def _open_control(self) -> None:
         drv = self.driver

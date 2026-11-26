@@ -628,33 +628,103 @@ class AlarmBarController:
         self._load_rules()
         self.log.push("ok", f"已清除 {len(rules) - len(kept)} 个自绘警戒区")
 
-    def _delete_zone(self, rule_id: str) -> None:
-        """删除用户点中的那个警戒区。"""
+    def _read_user_rules_doc(self) -> dict:
         import json
 
         p = self._user_rules_path()
         if not p.exists():
-            self.log.push("info", "没有自绘的警戒区可删")
-            return
+            return {"rules": []}
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and isinstance(data.get("rules"), list):
+                return data
         except Exception:
-            return
-        rules = data.get("rules", [])
-        name = next((r.get("name", rule_id) for r in rules
-                     if str(r.get("id")) == rule_id), rule_id)
+            pass
+        return {"rules": []}
+
+    def _write_user_rules_doc(self, data: dict) -> None:
+        import json
+
+        p = self._user_rules_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _delete_zone(self, rule_id: str) -> None:
+        """删除或停用用户点中的那个警戒区（内置与自绘均可单个删除）。"""
+        cur_rule = next((r for r in getattr(self.alarm, "rules", [])
+                         if str(r.id) == rule_id), None)
+        name = cur_rule.name if cur_rule else rule_id
         if QMessageBox.question(
-                self, "删除警戒区", f"确定删除「{name}」？\n（内置规则不受影响）",
+                self, "删除警戒区", f"确定删除「{name}」？",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
             return
-        kept = [r for r in rules if str(r.get("id")) != rule_id]
-        if len(kept) == len(rules):
-            self.log.push("info", "内置警戒区请在「告警规则」里调整")
-            return
-        data["rules"] = kept
-        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        data = self._read_user_rules_doc()
+        rules = data["rules"]
+        builtin_ids = {r.id for r in DEFAULT_RULES} | {r.id for r in self.plugins.plugin_rules()}
+
+        if rule_id in builtin_ids:
+            # 内置/插件规则用 enabled=False 覆盖写入 rules.json，避免 merge_rules 重建复活
+            kept = [r for r in rules if str(r.get("id")) != rule_id]
+            entry = cur_rule.to_dict() if cur_rule else {
+                "id": rule_id, "name": name, "kind": "zone", "params": {"cx": 0, "cy": 3, "r": 1.5}
+            }
+            entry["enabled"] = False
+            kept.append(entry)
+            data["rules"] = kept
+        else:
+            data["rules"] = [r for r in rules if str(r.get("id")) != rule_id]
+
+        self._write_user_rules_doc(data)
         self._load_rules()
         self.log.push("info", f"已删除警戒区「{name}」")
+
+    def _update_zone_geometry(self, rule_id: str, cx: float, cy: float, r: float) -> None:
+        """在 PPI 上拖拽移动或调整半径后，将新位置/半径写回 rules.json。"""
+        cur_rule = next((x for x in getattr(self.alarm, "rules", []) if str(x.id) == rule_id), None)
+        if cur_rule is None:
+            return
+        data = self._read_user_rules_doc()
+        rules = data["rules"]
+        updated = False
+        new_params = {"cx": round(cx, 3), "cy": round(cy, 3), "r": round(max(0.2, r), 3)}
+        for item in rules:
+            if str(item.get("id")) == rule_id:
+                item["params"] = new_params
+                item["enabled"] = True
+                updated = True
+                break
+        if not updated:
+            entry = cur_rule.to_dict()
+            entry["params"] = new_params
+            entry["enabled"] = True
+            rules.append(entry)
+        self._write_user_rules_doc(data)
+        self._load_rules()
+        self.log.push("info", f"已更新「{cur_rule.name}」({cx:.1f}, {cy:.1f}) r={r:.1f}m")
+
+    def _edit_zone(self, rule_id: str) -> None:
+        """打开单个警戒区的友好参数编辑弹窗（名称 / 级别 / 坐标 / 半径）。"""
+        from .rulesdialog import ZoneEditDialog
+
+        cur_rule = next((x for x in getattr(self.alarm, "rules", []) if str(x.id) == rule_id), None)
+        if cur_rule is None:
+            return
+        dlg = ZoneEditDialog(cur_rule, self)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        vals = dlg.values()
+        data = self._read_user_rules_doc()
+        rules = data["rules"]
+        entry = cur_rule.to_dict()
+        entry["name"] = vals["name"]
+        entry["level"] = vals["level"]
+        entry["params"] = {"cx": vals["cx"], "cy": vals["cy"], "r": vals["r"]}
+        entry["enabled"] = True
+        data["rules"] = [r for r in rules if str(r.get("id")) != rule_id] + [entry]
+        self._write_user_rules_doc(data)
+        self._load_rules()
+        self.log.push("ok", f"已保存警戒区「{vals['name']}」")
 
     def _delete_last_zone(self) -> None:
         """删掉最后一个自绘的警戒区（id 以 zone_user_ 开头）。
@@ -710,9 +780,10 @@ class AlarmBarController:
                 if len(pts) >= 3:
                     polys.append((pts, str(r.level), str(r.id)))
         # _load_rules() 在界面构造之前就会跑一次，那时还没有 ppi
-        ppi = getattr(self, "ppi", None)
-        if ppi is not None:
-            ppi.set_alarm_zones(zs, polys)
+        for name in ("ppi", "ppi2"):
+            w = getattr(self, name, None)
+            if w is not None:
+                w.set_alarm_zones(zs, polys)
 
     def _open_rules(self) -> None:
         dlg = RulesDialog(self.alarm, self)

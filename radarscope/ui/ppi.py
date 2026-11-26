@@ -17,7 +17,7 @@ from math import atan2, cos, degrees, exp, hypot, radians, sin
 import numpy as np
 from PyQt5.QtCore import QPointF, QRectF, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPolygonF
-from PyQt5.QtWidgets import QSizePolicy, QWidget
+from PyQt5.QtWidgets import QMenu, QSizePolicy, QWidget
 
 from ..core.model import Capabilities, RadarFrame, Target
 from ..core.viewmath import fmt_bearing, fmt_distance, point_to_polar
@@ -53,14 +53,18 @@ class PPIWidget(QWidget):
     #: 点中某个目标时抛出航迹号；点在空白处抛 -1（表示解除锁定）
     targetPicked = pyqtSignal(int)
     zoneDrawn = pyqtSignal(float, float, float)   # 圆心 x, y, 半径（米）
+    zoneMoved = pyqtSignal(str, float, float, float)  # rule_id, cx, cy, r（米）
+    zoneEditRequested = pyqtSignal(str)
     zoneDeleted = pyqtSignal()
     zoneDeleteRequested = pyqtSignal(str)   # 指定 rule_id，删"我点的那个"
+    zoneModeRequested = pyqtSignal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumSize(380, 380)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setAutoFillBackground(False)
+        self.setMouseTracking(True)
 
         self._caps = Capabilities()
         self._palette_name = DEFAULT_PALETTE
@@ -89,9 +93,10 @@ class PPIWidget(QWidget):
         #: 电子方位线 (方位°, 距离m)：经典雷达的 EBL/VRM
         self._ebl: tuple[float, float] | None = None
         self.show_ebl = True
-        #: 画禁入区模式：按下拖拽出一个圆
+        #: 画禁入区模式：按下拖拽出一个圆，或拖拽已有警戒区移动/改半径
         self.zone_mode = False
         self._zone_drag: tuple[float, float, float, float] | None = None
+        self._zone_op: list | None = None
         #: 真运动显示时本舰已行驶的距离（米），画面按它整体平移
         self.origin = (0.0, 0.0)
         self.true_motion = False
@@ -115,6 +120,10 @@ class PPIWidget(QWidget):
     def set_capabilities(self, caps: Capabilities) -> None:
         self._caps = caps
         self._r_axis = None         # 强制重建 LUT
+        if self._ebl is not None and self._ebl[1] > caps.range_max * 1.05:
+            self._ebl = None
+        if self._probe is not None and self._probe[2] > caps.range_max * 1.05:
+            self._probe = None
         self.reset()
 
     def set_palette(self, name: str) -> None:
@@ -280,7 +289,10 @@ class PPIWidget(QWidget):
             p.setPen(QPen(QColor(*pal["grid"]), 1, Qt.DotLine))
             p.drawEllipse(QPointF(cx - offpx, cy - offpy), R, R)
 
+        p.save()
+        p.setClipPath(screen_clip)
         self._draw_fov(p, cx, cy, R, pal)
+        p.restore()
         self._draw_grid(p, cx, cy, R, pal)
         if self._north_up:
             p.setFont(QFont("Consolas", 10, QFont.Bold))
@@ -288,8 +300,9 @@ class PPIWidget(QWidget):
             p.drawText(QPointF(cx - 4, cy - R * 1.02), "N")
         self._draw_coverage(p, cx, cy, R, pal)
 
-        # 这些是"挂在雷达上的东西"，真运动时要跟着平移
+        # 这些是"挂在雷达上的东西"，真运动时要跟着平移，且严格裁剪在显示圆内（切换 2m 小量程不溢出）
         p.save()
+        p.setClipPath(screen_clip)
         if offpx or offpy:
             p.translate(-offpx, -offpy)
         self._draw_zones(p, cx, cy, R, pal)
@@ -377,9 +390,9 @@ class PPIWidget(QWidget):
         for z in self._zones:
             x, y, r, level = z[0], z[1], z[2], z[3]
             rid = z[4] if len(z) > 4 else ""
+            if self._zone_op and self._zone_op[1] == rid:
+                x, y, r = self._zone_op[2], self._zone_op[3], self._zone_op[4]
             rr = hypot(x, y)
-            if rr > rmax:
-                continue
             ctr = self._pt(cx, cy, rr / rmax * R, atan2(x, y))
             rad = max(3.0, r / rmax * R)
             col = colors.get(level, colors["warn"])
@@ -388,10 +401,14 @@ class PPIWidget(QWidget):
                           2.4 if selected else 1.2,
                           Qt.SolidLine if selected else Qt.DashLine))
             p.drawEllipse(ctr, rad, rad)
-            # 圆心画个小十字，让人看清"区"是被圈在哪
+            # 圆心画个小十字；编辑模式下在边缘画拖拽手柄
             p.setPen(QPen(col, 1))
             p.drawLine(QPointF(ctr.x() - 3, ctr.y()), QPointF(ctr.x() + 3, ctr.y()))
             p.drawLine(QPointF(ctr.x(), ctr.y() - 3), QPointF(ctr.x(), ctr.y() + 3))
+            if self.zone_mode or selected:
+                p.setBrush(QColor(255, 190, 80))
+                p.drawEllipse(QPointF(ctr.x() + rad, ctr.y()), 4.0, 4.0)
+                p.setBrush(Qt.NoBrush)
         for pts, level, _rid in self._poly_zones:
             if len(pts) < 3:
                 continue
@@ -554,7 +571,7 @@ class PPIWidget(QWidget):
 
         for t in self._tracks:
             r = (t.rng - caps.range_min) / span * R
-            if r < 0 or r > R * 1.04:
+            if r < 0 or r > R:
                 continue
             a = t.az
             pt = self._pt(cx, cy, r, a)
@@ -674,24 +691,71 @@ class PPIWidget(QWidget):
                 best = (d, t.tid)
         return best[1] if best else -1
 
+    def _hit_zone_handle(self, pos) -> tuple[str, tuple] | None:
+        """命中检测：优先边缘调半径（resize），其次圆内移动（move）。"""
+        if not self.show_zones or not self._zones:
+            return None
+        cx, cy, R = self._geometry()
+        rmax = max(1e-6, self._caps.range_max)
+        for z in reversed(self._zones):
+            if len(z) < 5:
+                continue
+            x, y, r = float(z[0]), float(z[1]), float(z[2])
+            ctr = self._pt(cx, cy, hypot(x, y) / rmax * R, atan2(x, y))
+            rad_px = max(3.0, r / rmax * R)
+            dist_px = hypot(pos.x() - ctr.x(), pos.y() - ctr.y())
+            if abs(dist_px - rad_px) <= 10.0:
+                return "resize", z
+            if dist_px < rad_px:
+                return "move", z
+        return None
+
+    def _show_zone_menu(self, global_pos, rid: str) -> None:
+        menu = QMenu(self)
+        act_move = menu.addAction("移动 / 调整大小")
+        act_edit = menu.addAction("编辑参数（名称 / 位置 / 半径）…")
+        menu.addSeparator()
+        act_del = menu.addAction("删除此警戒区")
+        chosen = menu.exec_(global_pos)
+        if chosen == act_move:
+            self._zone_selected = rid
+            self.zoneModeRequested.emit(True)
+            self.update()
+        elif chosen == act_edit:
+            self._zone_selected = rid
+            self.zoneEditRequested.emit(rid)
+        elif chosen == act_del:
+            self._zone_selected = rid
+            self.zoneDeleteRequested.emit(rid)
+
     def mousePressEvent(self, ev) -> None:
+        if ev.button() == Qt.RightButton and self.show_zones:
+            hit = self._zone_at(ev.pos())
+            if hit:
+                self._zone_selected = hit
+                self.update()
+                self._show_zone_menu(ev.globalPos(), hit)
+                return
         if self.zone_mode:
-            # 画区模式：左键起拖、右键删
+            # 画区/调整模式：点中已有警戒区可移动或调半径，点空白则新拖一个圆
             if ev.button() == Qt.LeftButton:
+                hit = self._hit_zone_handle(ev.pos())
+                if hit is not None:
+                    op, z = hit
+                    rid = str(z[4])
+                    cx0, cy0, r0 = float(z[0]), float(z[1]), float(z[2])
+                    self._zone_selected = rid
+                    body = self._screen_to_body(QPointF(ev.pos())) or (cx0, cy0)
+                    self._zone_op = [op, rid, cx0, cy0, r0, body[0] - cx0, body[1] - cy0]
+                    self.update()
+                    return
                 pos = ev.pos()
                 self._zone_drag = (pos.x(), pos.y(), pos.x(), pos.y())
                 self.update()
                 return
             if ev.button() == Qt.RightButton:
-                # U1：删"我右键点中的那个圈"，而不是"最近加的那个"。
-                # 区一多，"最近一个"根本不可预测。
-                hit = self._zone_at(ev.pos())
-                if hit:
-                    self._zone_selected = hit
-                    self.zoneDeleteRequested.emit(hit)
-                else:
-                    self._zone_selected = ""
-                    self.update()
+                self._zone_selected = ""
+                self.update()
                 return
         if ev.button() == Qt.LeftButton:
             tid = self.pick_target(ev.pos())
@@ -715,13 +779,37 @@ class PPIWidget(QWidget):
         super().mousePressEvent(ev)
 
     def mouseMoveEvent(self, ev) -> None:
+        if self.zone_mode and self._zone_op is not None:
+            op, _rid, cx0, cy0, r0, ox, oy = self._zone_op
+            body = self._screen_to_body(QPointF(ev.pos()))
+            if body is not None:
+                if op == "move":
+                    self._zone_op[2] = body[0] - ox
+                    self._zone_op[3] = body[1] - oy
+                else:
+                    self._zone_op[4] = max(0.2, hypot(body[0] - cx0, body[1] - cy0))
+                self.update()
+            return
         if self.zone_mode and self._zone_drag is not None:
             sx, sy = self._zone_drag[0], self._zone_drag[1]
             self._zone_drag = (sx, sy, ev.pos().x(), ev.pos().y())
             self.update()
+            return
+        if self.zone_mode:
+            hit = self._hit_zone_handle(ev.pos())
+            if hit is not None:
+                self.setCursor(Qt.SizeFDiagCursor if hit[0] == "resize" else Qt.OpenHandCursor)
+            else:
+                self.setCursor(Qt.CrossCursor)
         super().mouseMoveEvent(ev)
 
     def mouseReleaseEvent(self, ev) -> None:
+        if self.zone_mode and self._zone_op is not None and ev.button() == Qt.LeftButton:
+            _op, rid, cx1, cy1, r1, _ox, _oy = self._zone_op
+            self._zone_op = None
+            self.update()
+            self.zoneMoved.emit(rid, cx1, cy1, r1)
+            return
         if (self.zone_mode and self._zone_drag is not None
                 and ev.button() == Qt.LeftButton):
             sx, sy, ex, ey = self._zone_drag

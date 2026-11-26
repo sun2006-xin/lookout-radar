@@ -42,10 +42,12 @@ class ActivityChart(QWidget):
 
     def paintEvent(self, _ev) -> None:
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor(10, 13, 11))
+        bg = self.palette().window().color()
+        dark = bg.lightness() < 128
+        p.fillRect(self.rect(), QColor(10, 13, 11) if dark else QColor("#F8FAFC"))
         rc = self.rect().adjusted(36, 12, -12, -20)
         p.setFont(QFont("Consolas", 8))
-        p.setPen(QPen(QColor(90, 108, 98)))
+        p.setPen(QPen(QColor(90, 108, 98) if dark else QColor("#64748B")))
         p.drawText(rc.left() - 30, rc.top() + 8, "点数")
         if not self._data:
             p.setPen(QPen(QColor(120, 130, 124)))

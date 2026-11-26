@@ -114,6 +114,13 @@ def test_alarm() -> None:
                                   hold=0.0, hysteresis=0.2)])
     edge = [Target(x=0.0, y=4.1)]
     assert eng2.evaluate(edge, caps, now=0.0) == []
+
+    # 内置规则默认不强制画警戒区，且用户写入 enabled=False 可持久停用内置规则
+    from radarscope.core.alarm import DEFAULT_RULES, merge_rules
+    intr = next(r for r in DEFAULT_RULES if r.id == "intrusion")
+    assert not intr.enabled, "默认内置防区入侵不应在首次启动时强制启用"
+    merged = merge_rules(DEFAULT_RULES, [AlarmRule("intrusion", "防区入侵", "zone", {"cx": 0, "cy": 3, "r": 1.5}, enabled=False)])
+    assert not next(r for r in merged if r.id == "intrusion").enabled
     ok("告警：去抖 / 不刷屏 / 恢复 / 滞回")
 
 

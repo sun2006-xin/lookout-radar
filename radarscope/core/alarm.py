@@ -62,7 +62,7 @@ class AlarmEvent:
 
 DEFAULT_RULES = [
     AlarmRule("intrusion", "防区入侵", "zone", {"cx": 0.0, "cy": 3.0, "r": 1.5},
-              level="crit", hold=0.5, cooldown=10.0),
+              level="crit", hold=0.5, cooldown=10.0, enabled=False),
     AlarmRule("too_close", "目标过近", "range_lt", {"m": 0.8},
               level="crit", hold=0.3, cooldown=6.0),
     AlarmRule("many", "目标数超限", "count_ge", {"n": 4},

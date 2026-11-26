@@ -20,8 +20,73 @@ from PyQt5.QtWidgets import (
 
 from ..core.alarm import PARAM_HINTS, AlarmEngine, AlarmRule
 
-KINDS = ["zone", "range_lt", "range_gt", "speed_ge", "count_ge", "lost", "offline"]
+KINDS = ["zone", "poly_zone", "range_lt", "range_gt", "speed_ge", "count_ge", "lost", "offline"]
 LEVELS = [("crit", "紧急"), ("warn", "警告"), ("info", "提示")]
+
+
+class ZoneEditDialog(QDialog):
+    """单个圆形警戒区的友好编辑弹窗（名称 / 级别 / 坐标 / 半径 / 启用）。"""
+
+    def __init__(self, rule: AlarmRule, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"编辑警戒区 · {rule.name}")
+        self.resize(360, 290)
+        p = rule.params or {}
+
+        self.ed_name = QLineEdit(rule.name)
+        self.cb_level = QComboBox()
+        for key, label in LEVELS:
+            self.cb_level.addItem(label, key)
+        li = self.cb_level.findData(rule.level)
+        if li >= 0:
+            self.cb_level.setCurrentIndex(li)
+
+        self.sp_cx = QDoubleSpinBox()
+        self.sp_cx.setRange(-50000.0, 50000.0)
+        self.sp_cx.setDecimals(2)
+        self.sp_cx.setSingleStep(0.5)
+        self.sp_cx.setSuffix(" m")
+        self.sp_cx.setValue(float(p.get("cx", 0.0)))
+
+        self.sp_cy = QDoubleSpinBox()
+        self.sp_cy.setRange(-50000.0, 50000.0)
+        self.sp_cy.setDecimals(2)
+        self.sp_cy.setSingleStep(0.5)
+        self.sp_cy.setSuffix(" m")
+        self.sp_cy.setValue(float(p.get("cy", 0.0)))
+
+        self.sp_r = QDoubleSpinBox()
+        self.sp_r.setRange(0.2, 50000.0)
+        self.sp_r.setDecimals(2)
+        self.sp_r.setSingleStep(0.5)
+        self.sp_r.setSuffix(" m")
+        self.sp_r.setValue(max(0.2, float(p.get("r", 1.5))))
+
+        form = QFormLayout()
+        form.addRow("名称", self.ed_name)
+        form.addRow("告警级别", self.cb_level)
+        form.addRow("中心 X", self.sp_cx)
+        form.addRow("中心 Y", self.sp_cy)
+        form.addRow("半径 R", self.sp_r)
+
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("保存")
+        bb.button(QDialogButtonBox.Cancel).setText("取消")
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+
+        lay = QVBoxLayout(self)
+        lay.addLayout(form)
+        lay.addWidget(bb)
+
+    def values(self) -> dict:
+        return {
+            "name": self.ed_name.text().strip() or "警戒区",
+            "level": str(self.cb_level.currentData() or "warn"),
+            "cx": round(float(self.sp_cx.value()), 3),
+            "cy": round(float(self.sp_cy.value()), 3),
+            "r": round(float(self.sp_r.value()), 3),
+        }
 
 
 class RuleEditDialog(QDialog):
@@ -209,12 +274,21 @@ class RulesDialog(QDialog):
             self._fill()
 
     def _del(self) -> None:
+        from ..core.alarm import DEFAULT_RULES
+
         i = self._current()
         if i < 0 or i >= len(self.rules):
             return
-        r = self.rules.pop(i)
-        self._fill()
-        self.statusBar_msg = f"已删除 {r.name}（点保存后生效）"
+        r = self.rules[i]
+        builtin_ids = {x.id for x in DEFAULT_RULES}
+        if r.id in builtin_ids:
+            # 内置规则若直接从列表 pop，merge_rules 会重新补回；改为置 enabled=False 持久停用
+            r.enabled = False
+            self._fill()
+            QMessageBox.information(self, "已停用", f"内置规则「{r.name}」已设为停用，点「保存并应用」后生效")
+        else:
+            self.rules.pop(i)
+            self._fill()
 
     def _restore(self) -> None:
         from ..core.alarm import DEFAULT_RULES
