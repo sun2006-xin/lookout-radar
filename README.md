@@ -48,9 +48,9 @@
 
 ### 直接用（推荐）
 
-解压后双击 `Lookout.exe`，整个文件夹拷给别人就能跑，不需要装 Python。
+前往 [GitHub Releases](https://github.com/sun2006-xin/lookout-radar/releases/latest) 下载 `Lookout-v1.1.0-win64.zip`，解压后直接双击 `Lookout.exe` 即可运行，不需要装 Python。
 
-首次打开选 **数据源 → 模拟与演示 → 多站融合**，点「连接」，立刻能看到效果。
+首次打开选 **数据源 → 模拟与演示 → 模拟器 · 合成雷达**，点「连接」，立刻能看到效果。
 
 ### 从源码跑
 
