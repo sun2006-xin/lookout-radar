@@ -91,6 +91,7 @@ class LDLidarDriver(RadarDriver):
     source = "device"
     form = "omni"
     vendor = "LDROBOT"
+    default_baud = 230400
 
     N_AZ = 360
     N_RNG = 240

@@ -170,9 +170,19 @@ class SceneAndMapController:
 
         started = self._ensure_sim_running(key) if key != "none" else False
 
+        is_real_dev = (
+            self.src_combo.currentData() == "device"
+            and self.driver is not None
+            and not getattr(self.driver, "simulated", False)
+        )
         rng_hint = float(suggested_range or (prof["range_m"] if prof else 0.0))
-        if rng_hint > 0.0 and abs(float(self.range_spin.value()) - rng_hint) > 1.0:
+        if rng_hint > 0.0 and not is_real_dev and abs(float(self.range_spin.value()) - rng_hint) > 1.0:
             self.range_spin.setValue(rng_hint)
+        elif rng_hint > 0.0 and is_real_dev and key != "none":
+            self.log.push(
+                "info",
+                f"当前连接真实硬件（量程 {self.range_spin.value():.1f}m），保持硬件物理尺度并在视场内叠加仿真",
+            )
         self.sim_station.set_scenario(key, float(self.range_spin.value()))
 
         # 场景预设 <-> 检测算法 / 杂波抑制 / 跟踪滤波 / 专用面板 自动协同切换

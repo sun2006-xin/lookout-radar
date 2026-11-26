@@ -29,6 +29,8 @@ class RadarDriver(ABC):
     #: 是否支持下行控制（增益 / STC / FTC / 量程下发）。
     #: 只有真雷达才可能支持；界面据此决定控件可用性，不靠型号判断。
     supports_control: bool = False
+    #: 串口默认波特率（界面扫描串口时自动按当前驱动匹配，避免 230400/256000 错配）
+    default_baud: int = 256000
 
     @abstractmethod
     def capabilities(self) -> Capabilities:

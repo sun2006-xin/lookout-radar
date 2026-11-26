@@ -1,6 +1,6 @@
 # 开发路线图与未来计划
 
-> 版本：v1.3.0（2026-11-26）· 状态：**全部纯软件主线（A5、B1~B3、C1~C4、D1~D6、E1~E9、F1~F3 及 v1.3 工作区停靠重构 / 3D Kalman+IMM / 任务闭环）已 100% 落地并通过 49 组真实单元测试；后续仅余实机硬件到达后的阶段 A 联调与 B4 原始 ADC→FFT**。
+> 版本：v1.3.1（2026-11-26）· 状态：**全部纯软件主线（A5、B1~B3、C1~C4、D1~D6、E1~E9、F1~F3 及 v1.3 工作区停靠重构 / 3D Kalman+IMM / 任务闭环 / 真机防坑加固）已 100% 落地并通过 50 组真实单元测试；后续仅余实机硬件到达后的阶段 A 联调与 B4 原始 ADC→FFT**。
 >
 > 配套文档：[ARCHITECTURE.md](ARCHITECTURE.md)（系统分层与数据契约）· [STRUCTURE.md](STRUCTURE.md)（代码文件索引）。
 
@@ -11,7 +11,7 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | 瞭望 Lookout（Python 包名 `radarscope`） |
-| 源码规模 | 约 16 100 行 / 80 个 Python 文件 / 49 组单元测试 |
+| 源码规模 | 约 16 200 行 / 80 个 Python 文件 / 50 组单元测试 |
 | 主窗口结构 | `ui/mainwindow.py` + `ui/controllers.py` + `ui/scene_controller.py`（四控制器 + Dock 工作区预设） |
 | 打包方式 | `pyinstaller --noconfirm --clean installer/Lookout.spec`（生成 `dist/Lookout/Lookout.exe`） |
 | 开源仓库 | https://github.com/sun2006-xin/lookout-radar （MIT） |
@@ -21,7 +21,7 @@
 **本地开发检查命令**（提交或发版前确保全部通过）：
 
 ```bat
-.venv\Scripts\python.exe tests\test_core.py     :: 49 组单元测试
+.venv\Scripts\python.exe tests\test_core.py     :: 50 组单元测试
 .venv\Scripts\python.exe tools\check.py         :: 字节码编译 + 单元测试 + 无窗口链路自检 + 夹具回归
 .venv\Scripts\python.exe main.py --selftest     :: 打包前/后无界面自检（退出码 0）
 ```
@@ -202,7 +202,7 @@
 
 ## 6. 建议的演进顺序
 
-> **当前进度（2026-11-26）**：`A5`、`B1~B3`、`C1~C4`、`D1~D6`、`E1~E9`、`F1~F3` 全部纯软件研发任务（含停靠工作区、GNN+M/N+3D Kalman/IMM、一体化任务录制对比）已收官并通过 **49 组**真实回归测试；以下仅待实机硬件到位后开展联调：
+> **当前进度（2026-11-26）**：`A5`、`B1~B3`、`C1~C4`、`D1~D6`、`E1~E9`、`F1~F3` 全部纯软件研发任务（含停靠工作区、GNN+M/N+3D Kalman/IMM、一体化任务录制对比与真机连接加固）已收官并通过 **50 组**真实回归测试；以下仅待实机硬件到位后开展联调：
 
 ```
 硬件主线（实体硬件到位后再开）：A1 → A2 → A3 → A4（真机联调与样本录制）→ B4（IWR6843+DCA1000 原始 ADC→FFT）

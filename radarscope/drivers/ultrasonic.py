@@ -29,6 +29,7 @@ class UltrasonicDriver(RadarDriver):
     source = "device"
     form = "sector"
     vendor = "通用"
+    default_baud = 115200
 
     N_AZ = 181
     N_RNG = 80

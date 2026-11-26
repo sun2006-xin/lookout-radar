@@ -38,6 +38,8 @@ class Transport(ABC):
 
     def __init__(self, record: str | None = None) -> None:
         self._rec = open(record, "wb") if record else None
+        self._rec_buf_n = 0
+        self._rec_last_flush = time.monotonic()
 
     # ---- 子类实现 ----
     @abstractmethod
@@ -83,6 +85,12 @@ class Transport(ABC):
     def _record(self, data: bytes) -> None:
         if self._rec is not None and data:
             self._rec.write(data)
+            self._rec_buf_n += len(data)
+            now = time.monotonic()
+            if self._rec_buf_n >= 4096 or (now - self._rec_last_flush) >= 1.0:
+                self._rec.flush()
+                self._rec_buf_n = 0
+                self._rec_last_flush = now
 
     def __enter__(self):
         self.open()
@@ -350,19 +358,37 @@ class BleTransport(Transport):
         self._ready = False
         self._err: str | None = None
         self._char: str | None = None
+        self._loop = None
+        self._client = None
 
     # ---- 后台线程 ----
     def _run(self) -> None:
         import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self._loop = loop
         try:
-            asyncio.run(self._main())
+            loop.run_until_complete(self._main())
         except Exception as exc:                       # pragma: no cover
             self._err = f"BLE 线程异常：{exc}"
+        finally:
+            self._client = None
+            self._loop = None
+            try:
+                loop.close()
+            except Exception:
+                pass
 
     async def _main(self) -> None:
+        import asyncio
         from bleak import BleakClient
         try:
-            async with BleakClient(self.address) as client:
+            def _on_disc(_cli) -> None:
+                if not self._stop.is_set() and self._err is None:
+                    self._err = "BLE 设备已断开连接"
+
+            async with BleakClient(self.address, disconnected_callback=_on_disc) as client:
+                self._client = client
                 uuid = self.char_uuid
                 if uuid is None:
                     for svc in client.services:
@@ -386,8 +412,10 @@ class BleTransport(Transport):
 
                 await client.start_notify(uuid, _cb)
                 self._ready = True
-                while not self._stop.is_set():
+                while not self._stop.is_set() and getattr(client, "is_connected", True):
                     await asyncio.sleep(0.05)
+                if not self._stop.is_set() and self._err is None:
+                    self._err = "BLE 连接已中断"
         except Exception as exc:
             self._err = f"BLE 连接失败：{exc}"
 
@@ -420,22 +448,26 @@ class BleTransport(Transport):
         raise TransportError("BLE 连接超时（10 秒）")
 
     def read(self, n: int = 4096) -> bytes:
+        if self._err:
+            raise TransportError(self._err)
         try:
             return self._q.get(timeout=self.timeout)
         except queue.Empty:
+            if self._err:
+                raise TransportError(self._err)
             return b""
 
     def write(self, data: bytes) -> None:
-        if not self._ready or self._char is None:
+        if not self._ready or self._char is None or self._client is None or self._loop is None:
             raise TransportError("BLE 未连接")
         import asyncio
-        from bleak import BleakClient
-
-        async def _w():
-            async with BleakClient(self.address) as client:
-                await client.write_gatt_char(self._char, data)
-
-        asyncio.run(_w())
+        try:
+            fut = asyncio.run_coroutine_threadsafe(
+                self._client.write_gatt_char(self._char, data), self._loop
+            )
+            fut.result(timeout=2.0)
+        except Exception as exc:
+            raise TransportError(f"BLE 写失败：{exc}") from exc
 
     def close(self) -> None:
         self._stop.set()

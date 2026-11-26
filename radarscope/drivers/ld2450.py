@@ -9,6 +9,8 @@
 """
 from __future__ import annotations
 
+from collections import deque
+from math import hypot
 import time
 
 from ..core.codec import FrameSpec, StreamDecoder
@@ -31,10 +33,12 @@ class LD2450Driver(RadarDriver):
     source = "device"
     form = "sector"
     vendor = "海凌科"
+    default_baud = 256000
 
     def __init__(self) -> None:
         self._tr = None
         self._dec: StreamDecoder | None = None
+        self._pending: deque[RadarFrame] = deque(maxlen=32)
         self._endpoint = ""
 
     def capabilities(self) -> Capabilities:
@@ -59,8 +63,10 @@ class LD2450Driver(RadarDriver):
         self._dec = StreamDecoder(
             FrameSpec(header=b"\xaa\xff\x03\x00", tail=b"\x55\xcc", fixed_total=30)
         )
+        self._pending.clear()
 
     def close(self) -> None:
+        self._pending.clear()
         if self._tr is not None:
             try:
                 self._tr.close()
@@ -69,15 +75,18 @@ class LD2450Driver(RadarDriver):
         self._tr = None
 
     def read(self) -> RadarFrame | None:
+        if self._pending:
+            return self._pending.popleft()
         if self._tr is None or self._dec is None:
             return None
         raw = self._tr.read(64)
         if not raw:
             return None
-        frame = None
         for fr in self._dec.feed(raw):
-            frame = self._parse(fr) or frame
-        return frame
+            parsed = self._parse(fr)
+            if parsed is not None:
+                self._pending.append(parsed)
+        return self._pending.popleft() if self._pending else None
 
     def _parse(self, fr: bytes) -> RadarFrame | None:
         if len(fr) < 30:
@@ -90,16 +99,21 @@ class LD2450Driver(RadarDriver):
             sr = int.from_bytes(fr[off + 4:off + 6], "little")
             if xr == 0 and yr == 0:
                 continue                      # 该槽位无目标
-            x_mm = _decode_sign_magnitude(xr)
-            y_mm = _decode_sign_magnitude(yr)
-            v_cms = _decode_sign_magnitude(sr)
-            # 速度只给"接近/远离"的径向分量，正值为接近 -> 折算到 -y 方向
+            x_m = _decode_sign_magnitude(xr) / 1000.0
+            y_m = _decode_sign_magnitude(yr) / 1000.0
+            vr_ms = _decode_sign_magnitude(sr) / 100.0
+            r_m = hypot(x_m, y_m)
+            # 速度为径向接近速率（正值表示靠近雷达），沿视线单位矢量投影为 (vx, vy)
+            if r_m > 1e-4:
+                vx, vy = -vr_ms * (x_m / r_m), -vr_ms * (y_m / r_m)
+            else:
+                vx, vy = 0.0, -vr_ms
             targets.append(
                 Target(
-                    x=x_mm / 1000.0,
-                    y=y_mm / 1000.0,
-                    vx=0.0,
-                    vy=-v_cms / 100.0,
+                    x=x_m,
+                    y=y_m,
+                    vx=vx,
+                    vy=vy,
                     snr=1.0,
                 )
             )

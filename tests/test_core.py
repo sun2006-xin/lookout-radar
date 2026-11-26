@@ -1789,6 +1789,93 @@ def test_mission_recorder_and_recompute_compare() -> None:
     ok("一体化任务录制包与多参数离线重算对比闭环")
 
 
+def test_hardware_readiness_guards() -> None:
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt5.QtCore import QSettings
+    from PyQt5.QtWidgets import QApplication
+    from radarscope.core.transport import BleTransport, FileTransport, TransportError
+    from radarscope.drivers.ld2450 import LD2450Driver
+    from radarscope.ui.controllers import ReaderThread
+    from radarscope.ui.mainwindow import MainWindow
+
+    # 1. &record= 写盘周期刷新（无需 close 即已写入磁盘）
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+        rec_p = Path(td) / "raw.bin"
+        tr = FileTransport("nonexistent", loop=False)
+        tr._rec = open(rec_p, "wb")
+        tr._record(b"A" * 4200)
+        assert rec_p.stat().st_size >= 4200, "&record= 写入 4KB 后应立即 flush 落盘"
+        tr.close()
+
+    # 2. BLE 断连标记触发 TransportError
+    bt = BleTransport("AA:BB:CC:DD:EE:FF")
+    bt._err = "BLE 连接已中断"
+    try:
+        bt.read(64)
+        raise AssertionError("BLE 断连状态应抛出 TransportError")
+    except TransportError:
+        pass
+
+    # 3. LD2450 连帧缓存不丢尾帧 + 径向速度按视线方位准确投影到 (vx, vy)
+    def _enc_sm(val: int) -> bytes:
+        return ((0x8000 if val >= 0 else 0) | abs(val)).to_bytes(2, "little")
+
+    t1 = _enc_sm(1500) + _enc_sm(2000) + _enc_sm(50) + (500).to_bytes(2, "little")  # (1.5m, 2.0m, vr=+0.5m/s)
+    pkt = b"\xaa\xff\x03\x00" + t1 + (b"\x00" * 16) + b"\x55\xcc"
+    drv = LD2450Driver()
+    drv._tr = FileTransport("inmem")
+    drv._tr._data = pkt * 2
+    from radarscope.core.codec import FrameSpec, StreamDecoder
+    drv._dec = StreamDecoder(FrameSpec(header=b"\xaa\xff\x03\x00", tail=b"\x55\xcc", fixed_total=30))
+    drv._tr.chunk = 60
+    f1 = drv.read()
+    f2 = drv.read()
+    assert f1 is not None and f2 is not None and len(f1.targets) == 1, "连续双帧不应丢弃第一帧"
+    tg = f1.targets[0]
+    vr_proj = -(tg.x * tg.vx + tg.y * tg.vy) / tg.rng
+    assert abs(vr_proj - 0.50) < 1e-3, f"LD2450 径向速度矢量投影偏差: {vr_proj}"
+
+    # 4. ReaderThread 无有效帧看门狗超时
+    class _DeadDrv:
+        def read(self):
+            time.sleep(0.02)
+            return None
+
+    _app = QApplication.instance() or QApplication([])
+    got_err: list[str] = []
+    rt = ReaderThread(_DeadDrv(), stall_timeout_s=0.10)
+    rt.failed.connect(got_err.append)
+    rt.start()
+    rt.wait(1500)
+    _app.processEvents()
+    assert got_err and "超时" in got_err[0], f"设备静默卡死应触发超时重试信号，实际: {got_err}"
+
+    # 5. 驱动波特率自动匹配（LD19=230400 / 超声波=115200 / LD2450=256000）
+    settings = QSettings("RadarScope", "Console")
+    prev_drv = settings.value("driver")
+    prev_ep = settings.value("endpoint")
+    w = MainWindow()
+    try:
+        si = w.src_combo.findData("device")
+        w.src_combo.setCurrentIndex(si)
+        w.endpoint_combo.setCurrentText("serial://COM9?baud=256000")
+        w.drv_combo.setCurrentIndex(w.drv_combo.findData("ldlidar"))
+        assert "baud=230400" in w.endpoint_combo.currentText()
+        w.drv_combo.setCurrentIndex(w.drv_combo.findData("ultrasonic"))
+        assert "baud=115200" in w.endpoint_combo.currentText()
+        w.drv_combo.setCurrentIndex(w.drv_combo.findData("ld2450"))
+        assert "baud=256000" in w.endpoint_combo.currentText()
+    finally:
+        w.close()
+        for k, v in (("driver", prev_drv), ("endpoint", prev_ep)):
+            if v is None:
+                settings.remove(k)
+            else:
+                settings.setValue(k, v)
+    ok("真机防坑加固：静默断流看门狗、驱动波特率自适应、&record落盘、BLE断连与LD2450连帧矢量")
+
+
 def main() -> int:
     print("RadarScope 核心测试")
     for fn in (test_codec, test_ld2450_sign, test_pipeline, test_alarm,
@@ -1809,7 +1896,7 @@ def main() -> int:
                test_e6_mbtiles_nmea_and_land_mask, test_e8_ros_and_mcap_export,
                test_e7_3d_rhi_scope, test_ux_cohesion_and_controller_links,
                test_tracker_gnn_mn_kalman3d_and_imm, test_workspace_docks_canvas_edit_and_i18n,
-               test_mission_recorder_and_recompute_compare):
+               test_mission_recorder_and_recompute_compare, test_hardware_readiness_guards):
         fn()
     print(f"\n全部通过：{PASS} 组")
     return 0

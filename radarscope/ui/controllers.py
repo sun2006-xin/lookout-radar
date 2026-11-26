@@ -118,12 +118,13 @@ class ReaderThread(QThread):
     failed = pyqtSignal(str)
 
     def __init__(self, driver, parent=None, caps=None,
-                 thresh_getter=None, cfar_getter=None):
+                 thresh_getter=None, cfar_getter=None, stall_timeout_s: float = 0.0):
         super().__init__(parent)
         self.driver = driver
         self._caps = caps
         self._thresh_getter = thresh_getter or (lambda: 0.30)
         self._cfar_getter = cfar_getter or (lambda: "auto")
+        self._stall_timeout_s = max(0.0, float(stall_timeout_s))
         self._alive = True
 
     def stop(self) -> None:
@@ -131,6 +132,7 @@ class ReaderThread(QThread):
         self.wait(2000)
 
     def run(self) -> None:
+        last_rx = time.monotonic()
         while self._alive:
             try:
                 frame = self.driver.read()
@@ -138,6 +140,7 @@ class ReaderThread(QThread):
                 self.failed.emit(f"{type(exc).__name__}: {exc}")
                 return
             if frame is not None:
+                last_rx = time.monotonic()
                 if self._caps is not None:
                     try:
                         frame = pipeline.normalize(
@@ -151,20 +154,29 @@ class ReaderThread(QThread):
                         LOG.warning("后台流水线处理异常（跳过帧）：%s", exc)
                         continue
                 self.frameReady.emit(frame)
+            elif self._stall_timeout_s > 0.0 and (time.monotonic() - last_rx) >= self._stall_timeout_s:
+                self.failed.emit(f"设备数据超时（连续 {self._stall_timeout_s:.0f} 秒未收到有效帧）")
+                return
 
 
 
 class ConnectionController:
     """见模块说明。方法在运行时由 MainWindow 实例调用。"""
 
+    def _driver_baud(self) -> int:
+        did = self.drv_combo.currentData() if hasattr(self, "drv_combo") else None
+        cls = available_drivers().get(did) if did else None
+        return int(getattr(cls, "default_baud", 256000) or 256000)
+
     def _refresh_endpoints(self) -> None:
         cur = self.endpoint_combo.currentText()
         self.endpoint_combo.clear()
         items: list[str] = []
+        baud = self._driver_baud()
         try:
             from serial.tools import list_ports
             for p in list_ports.comports():
-                items.append(f"serial://{p.device}?baud=256000")
+                items.append(f"serial://{p.device}?baud={baud}")
         except Exception:
             pass
         items.extend(PRESET_ENDPOINTS)
@@ -250,6 +262,14 @@ class ConnectionController:
         except Exception:
             caps = Capabilities()
         self._apply_caps(caps)
+        # 串口波特率跟随当前实测驱动（例如 LD19=230400, LD2450=256000, 超声波=115200）
+        want_baud = int(getattr(cls, "default_baud", 256000) or 256000)
+        ep_cur = self.endpoint_combo.currentText().strip()
+        if ep_cur.startswith("serial://") and "baud=" in ep_cur:
+            for known in (115200, 230400, 256000):
+                if f"baud={known}" in ep_cur and known != want_baud:
+                    self.endpoint_combo.setCurrentText(ep_cur.replace(f"baud={known}", f"baud={want_baud}"))
+                    break
 
     def _toggle_connect(self) -> None:
         if self.reader is not None:
@@ -301,11 +321,19 @@ class ConnectionController:
         self._frames = 0
         self._fps_t = time.monotonic()
 
+        ep_low = endpoint.lower()
+        is_live_hw = (
+            not bool(getattr(drv, "simulated", False))
+            and getattr(caps, "source", "") == "device"
+            and not ep_low.startswith("file://")
+            and not ep_low.endswith((".bin", ".rad"))
+        )
         self.reader = ReaderThread(
             self.driver, self,
             caps=self.caps,
             thresh_getter=lambda: self._thresh,
             cfar_getter=lambda: getattr(self, "_cfar_mode", "auto"),
+            stall_timeout_s=5.0 if is_live_hw else 0.0,
         )
         self.reader.frameReady.connect(self._on_frame)
         self.reader.failed.connect(self._on_failed)
