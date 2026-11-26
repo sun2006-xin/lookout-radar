@@ -1503,8 +1503,11 @@ def test_e7_3d_rhi_scope() -> None:
     drv.open(mode="rhi_3d")
     caps = drv.capabilities()
     assert caps.has_elevation and "3D俯仰" in caps.summary()
-    time.sleep(0.06)
-    fr = drv.read()
+    fr = None
+    deadline = time.monotonic() + 0.5
+    while fr is None and time.monotonic() < deadline:
+        time.sleep(0.02)
+        fr = drv.read()
     assert fr is not None and fr.rhi is not None and fr.el_axis is not None
     assert fr.rhi.shape[0] == 25 and any(t.z > 0.2 for t in fr.targets)
     drv.close()
