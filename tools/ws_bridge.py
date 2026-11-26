@@ -12,6 +12,7 @@ import argparse
 import base64
 import hashlib
 import http.server
+import json
 import socket
 import struct
 import threading
@@ -19,6 +20,30 @@ from pathlib import Path
 
 WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 HTML_PATH = Path(__file__).resolve().parent / "web_viewer.html"
+
+
+def radarscope_json_to_foxglove(raw_json: str) -> str:
+    """将 Lookout Forwarder UDP JSON 转换为 Foxglove / ROS 2 兼容 JSON 消息。"""
+    try:
+        pkt = json.loads(raw_json)
+    except Exception:
+        return raw_json
+    if pkt.get("type") != "radarscope.frame":
+        return raw_json
+    ts = float(pkt.get("ts") or 0.0)
+    sec = int(ts)
+    nsec = int((ts - sec) * 1e9)
+    ros_msg = {
+        "op": "publish",
+        "topic": "/radar/targets",
+        "msg": {
+            "header": {"stamp": {"sec": sec, "nanosec": nsec}, "frame_id": "radar_link"},
+            "seq": int(pkt.get("seq", 0)),
+            "range_max": float(pkt.get("range_max", 0.0)),
+            "points": pkt.get("targets", []),
+        },
+    }
+    return json.dumps(ros_msg, ensure_ascii=False, separators=(",", ":"))
 
 
 def ws_accept_key(client_key: str) -> str:
@@ -41,10 +66,12 @@ def encode_ws_text(payload: str) -> bytes:
 class BridgeServer:
     """把 Forwarder 发出的 UDP JSON 帧实时广播给 WebSocket 客户端。"""
 
-    def __init__(self, udp_port: int = 9100, ws_port: int = 9101, http_port: int = 8088) -> None:
+    def __init__(self, udp_port: int = 9100, ws_port: int = 9101,
+                 http_port: int = 8088, ros_mode: bool = False) -> None:
         self.udp_port = udp_port
         self.ws_port = ws_port
         self.http_port = http_port
+        self.ros_mode = bool(ros_mode)
         self._clients: list[socket.socket] = []
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -72,7 +99,10 @@ class BridgeServer:
         while not self._stop.is_set():
             try:
                 data, _ = sock.recvfrom(65535)
-                self.broadcast(data.decode("utf-8", errors="replace"))
+                msg = data.decode("utf-8", errors="replace")
+                if self.ros_mode:
+                    msg = radarscope_json_to_foxglove(msg)
+                self.broadcast(msg)
             except socket.timeout:
                 continue
             except Exception:
@@ -138,9 +168,10 @@ def main() -> int:
     parser.add_argument("--udp-port", type=int, default=9100)
     parser.add_argument("--ws-port", type=int, default=9101)
     parser.add_argument("--http-port", type=int, default=8088)
+    parser.add_argument("--ros", action="store_true", help="转换为 Foxglove / ROS 兼容 JSON 载荷")
     args = parser.parse_args()
 
-    bridge = BridgeServer(args.udp_port, args.ws_port, args.http_port)
+    bridge = BridgeServer(args.udp_port, args.ws_port, args.http_port, ros_mode=args.ros)
     bridge.start()
 
     class _Handler(http.server.BaseHTTPRequestHandler):

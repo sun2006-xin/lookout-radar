@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog,
     QFormLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSpinBox,
     QVBoxLayout,
 )
@@ -147,10 +147,12 @@ class MapLocationDialog(QDialog):
     """联网地图底图与定位中心设置：支持自动 IP 获取与手动输入经纬度。"""
 
     def __init__(self, lat: float = 39.9, lon: float = 116.4,
-                 provider: str = "auto", map_enabled: bool = False, parent=None):
+                 provider: str = "auto", map_enabled: bool = False,
+                 mbtiles_path: str = "", nmea_port: int = 10111,
+                 nmea_enabled: bool = False, land_mask: bool = False, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("联网地图与定位设置")
-        self.resize(480, 340)
+        self.setWindowTitle("联网 / 离线海图与定位设置")
+        self.resize(520, 440)
         self._worker: _GeoLocateWorker | None = None
 
         form = QFormLayout()
@@ -180,10 +182,37 @@ class MapLocationDialog(QDialog):
         geo_row.addWidget(self.btn_auto)
         geo_row.addWidget(self.lbl_status, 1)
 
-        self.chk_enable = QCheckBox("确定后立即开启并刷新联网地图底图")
+        self.chk_enable = QCheckBox("确定后立即开启并刷新联网/离线地图底图")
         self.chk_enable.setChecked(bool(map_enabled))
         self.chk_fit_range = QCheckBox("开启地图且当前量程 < 100 m 时，自动切到 500 m 以便看清街道与岸线")
         self.chk_fit_range.setChecked(True)
+
+        # E6：离线 MBTiles、NMEA 本船定位与陆地静止杂波掩膜
+        mb_row = QHBoxLayout()
+        self.ed_mbtiles = QLineEdit(str(mbtiles_path or ""))
+        self.ed_mbtiles.setPlaceholderText("可选离线 .mbtiles 海图/地图数据库路径")
+        btn_mb = QPushButton("选择 .mbtiles…")
+        btn_mb.clicked.connect(self._pick_mbtiles)
+        btn_mb_clr = QPushButton("清除")
+        btn_mb_clr.clicked.connect(lambda: self.ed_mbtiles.setText(""))
+        mb_row.addWidget(self.ed_mbtiles, 1)
+        mb_row.addWidget(btn_mb)
+        mb_row.addWidget(btn_mb_clr)
+        form.addRow("离线 MBTiles", mb_row)
+
+        nmea_row = QHBoxLayout()
+        self.chk_nmea = QCheckBox("监听本船 NMEA UDP ($GGA/$RMC/$HDT)")
+        self.chk_nmea.setChecked(bool(nmea_enabled))
+        self.sp_nmea_port = QSpinBox()
+        self.sp_nmea_port.setRange(1024, 65535)
+        self.sp_nmea_port.setValue(int(nmea_port or 10111))
+        nmea_row.addWidget(self.chk_nmea, 1)
+        nmea_row.addWidget(QLabel("端口"))
+        nmea_row.addWidget(self.sp_nmea_port)
+        form.addRow("本船定位流", nmea_row)
+
+        self.chk_land_mask = QCheckBox("启用陆地静止杂波掩膜（自动抑制岸线与陆地区域固定回波）")
+        self.chk_land_mask.setChecked(bool(land_mask))
 
         tip = QLabel(
             "说明：\n"
@@ -203,8 +232,16 @@ class MapLocationDialog(QDialog):
         lay.addLayout(geo_row)
         lay.addWidget(self.chk_enable)
         lay.addWidget(self.chk_fit_range)
+        lay.addWidget(self.chk_land_mask)
         lay.addWidget(tip, 1)
         lay.addWidget(self.buttons)
+
+    def _pick_mbtiles(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择离线 MBTiles 海图/地图", "", "MBTiles 数据库 (*.mbtiles);;所有文件 (*.*)"
+        )
+        if path:
+            self.ed_mbtiles.setText(path)
 
     def _start_auto(self) -> None:
         if self._worker is not None and self._worker.isRunning():
@@ -261,3 +298,11 @@ class MapLocationDialog(QDialog):
             str(self.cb_provider.currentData() or "auto"),
             self.chk_enable.isChecked(),
         )
+
+    def e6_options(self) -> dict:
+        return {
+            "mbtiles_path": self.ed_mbtiles.text().strip(),
+            "nmea_enabled": self.chk_nmea.isChecked(),
+            "nmea_port": int(self.sp_nmea_port.value()),
+            "land_mask": self.chk_land_mask.isChecked(),
+        }

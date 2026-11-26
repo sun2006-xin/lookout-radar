@@ -76,8 +76,10 @@
 | `maptiles.py` | Web Mercator 换算、瓦片下载、磁盘缓存 | `zoom_for_range()` **从 z=18 往下找**第一个装得下的；`prune(200MB)` 清最旧；UA 与归属见 `PROVIDERS` |
 | `selftest.py` | `run_core_checks()`：跑真实驱动 + 算法，返回 `(ok, 摘要)` | 三个入口共用：`main.py --selftest`、帮助菜单、`tools/check.py` |
 | `paths.py` | 开发/打包两套数据目录解析 | `data_dir()`；打包版落到 `%LOCALAPPDATA%\Lookout\data` |
-| `sim_targets.py` | 模拟电子站引擎：`ElectronicStation` 动态/行业场景 + 教学级电子对抗波形注入（噪声/DRFM/RGPO） | `set_scenario()`、`inject()`、`merge_into_frame()`；无硬件也可测防区/CPA/CFAR 抗干扰 |
-| `custom_proto.py` | 零代码通用协议解析引擎：NMEA `$--TTM`、CSV 坐标/极坐标、声明式结构体二进制帧 | `builtin_presets()`、`preview_sample()`、`build_driver_class()` |
+| `sim_targets.py` | 模拟电子站引擎：`ElectronicStation` 动态/行业场景 + 教学级电子对抗（噪声/DRFM/RGPO/VGPO/箔条/ISRJ + ECCM/火控推演） | `set_scenario()`、`inject()`、`merge_into_frame()`、`compute_ew_metrics()` |
+| `custom_proto.py` | 零代码通用协议解析引擎：7 套开箱预设（NMEA `$--TTM`、CSV/极坐标 `$SCAN`、TF/CAN-UDP/Modbus 结构体二进制帧） | `builtin_presets()`、`preview_sample()`、`build_driver_class()` |
+| `nmea_nav.py` | NMEA 本船定位与航向解析：`$GPGGA/$GNRMC/$HEHDT/$RARSD` 校验与 UDP 监听 | `NmeaOwnShip`、`feed_line()`、`snapshot()` |
+| `ros_export.py` | ROS 2 / Foxglove 遥测导出与二进制 MCAP v0 日志封装 | `to_ros_laserscan()`、`to_ros_pointcloud2()`、`write_mcap_json_log()` |
 
 ---
 
@@ -116,6 +118,7 @@
 | `ascope.py` | A 显（距离剖面） | `set_capabilities()` / `set_threshold()` |
 | `waterfall.py` | 距离-时间瀑布图（按航迹 `tid` 画独立距离折线，B1 已重设计） | `push_frame(frame, tracks)` / `track_series()` |
 | `rdscope.py` | 距离-多普勒热图 | 数组第 0 行是 `-V_MAX`，显示前 `arr[::-1]` |
+| `rhiscope.py` | 3D 俯仰 RHI 距离-高度剖面图（`has_elevation` 设备自动显示） | 支持 0°~45° 仰角网格、高度分层过滤与 3D 航迹投影 |
 | `tracktable.py` | 航迹表，列随 `Capabilities` 变化 | `configure(caps)` / `refresh(tracks)` / `set_locked(tid)` |
 | `sensorpanel.py` | 多站传感器状态表 | `update_sensors(list[dict])`；单站驱动由主窗口合成一行回退数据，避免空表 |
 | `eventlog.py` | 事件日志 + 导出 | `push(level, text)`；告警条与日志同源 |
@@ -149,7 +152,7 @@
 
 | 文件 | 具体职责 |
 |---|---|
-| `check.py` | **提交前必跑**：编译 + 42 组测试 + 链路自检 + 录制夹具回归，判据与 CI 一致 |
+| `check.py` | **提交前必跑**：编译 + 45 组测试 + 链路自检 + 录制夹具回归，判据与 CI 一致 |
 | `selftest.py` | 独立的无界面链路自检（含 `validate_frame_meta` 校验） |
 | `capture_check.py` | 离线校验 `.bin`/`.rad` 录制夹具（帧数/峰值/目标数/CRC 拒绝数），默认批量跑 `tests/fixtures/manifest.json` |
 | `ws_bridge.py` | 零依赖 UDP→WebSocket 桥接与静态页服务器（配合 `web_viewer.html` 做 Web 订阅端） |
@@ -167,7 +170,7 @@
 
 ## `tests/` —— 测试即规格
 
-`tests/test_core.py` 共 **42 组**，不依赖 pytest，直接 `python tests/test_core.py`。
+`tests/test_core.py` 共 **45 组**，不依赖 pytest，直接 `python tests/test_core.py`。
 **不打桩、不 mock**：直接跑真实算法与真实 SQLite。
 
 | 组 | 盯的是什么 |

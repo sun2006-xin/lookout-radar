@@ -68,6 +68,26 @@ class MapLayer(QObject):
             if self.enabled and self._last_req is not None:
                 self.update_for(*self._last_req)
 
+    def set_mbtiles(self, path: str | None) -> bool:
+        ok = self.store.set_mbtiles(path)
+        self._key = None
+        if self.enabled and self._last_req is not None:
+            self.update_for(*self._last_req)
+        return ok
+
+    def to_rgb_array(self):
+        """将当前拼接底图导出为 (H, W, 3) uint8 数组供陆地杂波掩膜提取岸线。"""
+        if self.image is None or self.image.isNull():
+            return None
+        import numpy as np
+
+        rgb_img = self.image.convertToFormat(QImage.Format_RGB888)
+        h, w = rgb_img.height(), rgb_img.width()
+        ptr = rgb_img.bits()
+        ptr.setsize(rgb_img.byteCount())
+        arr = np.frombuffer(ptr, dtype=np.uint8).reshape((h, rgb_img.bytesPerLine()))
+        return arr[:, : w * 3].reshape((h, w, 3)).copy()
+
     # ------------------------------------------------------------------ #
     def update_for(self, lat: float, lon: float, range_m: float,
                    width_px: float) -> None:
@@ -95,7 +115,7 @@ class MapLayer(QObject):
         loaded = 0
         for ix, x in enumerate(range(x0, x1)):
             for iy, y in enumerate(range(y0, y1)):
-                data = self.store.get(z, x, y) if self.store.path_of(z, x, y).exists() else None
+                data = self.store.get(z, x, y) if self.store.has_local_tile(z, x, y) else None
                 if data is None:
                     missing.append((x, y))
                     continue

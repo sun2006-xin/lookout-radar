@@ -1402,6 +1402,126 @@ def test_ew_f1_f2_f3_and_deception() -> None:
     ok("F1/F2/F3 电子战进阶波形、烧穿距离、模拟火控引导与多站抗欺骗")
 
 
+def test_e6_mbtiles_nmea_and_land_mask() -> None:
+    import sqlite3
+    from radarscope.core.maptiles import TileStore
+    from radarscope.core.nmea_nav import NmeaOwnShip
+    from radarscope.core.pipeline import LandMask
+
+    def _nmea(body: str) -> str:
+        cs = 0
+        for ch in body:
+            cs ^= ord(ch)
+        return f"${body}*{cs:02X}"
+
+    with tempfile.TemporaryDirectory() as td:
+        import contextlib
+        td_p = Path(td)
+        mb = td_p / "harbor.mbtiles"
+        png_bytes = b"\x89PNG\r\n\x1a\nfaketiledata"
+        with contextlib.closing(sqlite3.connect(str(mb))) as conn:
+            conn.execute("CREATE TABLE metadata (name TEXT, value TEXT)")
+            conn.execute("INSERT INTO metadata VALUES ('name', 'TestHarbor')")
+            conn.execute("CREATE TABLE tiles (zoom_level INTEGER, tile_column INTEGER, tile_row INTEGER, tile_data BLOB)")
+            z, x, y = 12, 3371, 1546
+            tms_y = (1 << z) - 1 - y
+            conn.execute("INSERT INTO tiles VALUES (?, ?, ?, ?)", (z, x, tms_y, png_bytes))
+            conn.commit()
+        ts = TileStore(td_p / "cache")
+        assert ts.set_mbtiles(mb)
+        assert ts.has_local_tile(z, x, y)
+        assert ts.get(z, x, y) == png_bytes
+        assert "harbor.mbtiles" in ts.attribution
+
+    nav = NmeaOwnShip()
+    assert nav.feed_line(_nmea("GPGGA,123519,3113.8000,N,12128.4000,E,1,08,0.9,5.0,M,0.0,M,,"))
+    assert abs(nav.lat - (31.0 + 13.8 / 60.0)) < 1e-4
+    assert abs(nav.lon - (121.0 + 28.4 / 60.0)) < 1e-4
+    assert nav.feed_line(_nmea("GPRMC,123520,A,3113.8000,N,12128.4000,E,10.0,084.4,261126,0.0,E"))
+    assert abs(nav.speed_ms - 10.0 * 1852.0 / 3600.0) < 1e-3
+    assert nav.feed_line(_nmea("HEHDT,275.5,T"))
+    assert abs(nav.heading_deg - 275.5) < 1e-3
+    assert not nav.feed_line("$HEHDT,100.0,T*00"), "校验和错误应被拒收"
+
+    # 水陆 RGB 先验掩膜：北面 (y < 80) 为米黄陆地，南面为蓝色水域
+    rgb = np.zeros((200, 200, 3), dtype=np.uint8)
+    rgb[:80, :, :] = [215, 200, 175]
+    rgb[80:, :, :] = [20, 85, 175]
+    az = np.radians(np.array([0.0, 180.0], dtype=np.float32))  # 0°朝北(陆地)，180°朝南(水域)
+    r_ax = np.array([25.0, 50.0], dtype=np.float32)
+    scan = np.array([[0.9, 0.9], [0.9, 0.9]], dtype=np.float32)
+    fr = RadarFrame(timestamp=1.0, scan=scan.copy(), az_axis=az, r_axis=r_ax)
+    lm = LandMask(attenuation=0.9, min_land_range_m=10.0)
+    lm.enabled = True
+    lm.update_from_map_rgb(rgb, mpp=1.0, anchor_px=(100.0, 100.0), az_axis=az, r_axis=r_ax)
+    out = lm.apply(fr)
+    assert out.scan[0, 1] < 0.25, f"北向 50m 陆地静止回波应被大幅抑制: {out.scan}"
+    assert out.scan[1, 1] > 0.85, f"南向 50m 水域目标回波应完整保留: {out.scan}"
+    ok("E6 离线 MBTiles 海图、NMEA 本船定位与陆地杂波掩膜")
+
+
+def test_e8_ros_and_mcap_export() -> None:
+    from radarscope.core.ros_export import to_ros_laserscan, to_ros_pointcloud2, write_mcap_json_log
+    from tools.ws_bridge import radarscope_json_to_foxglove
+
+    az = np.radians(np.linspace(-60.0, 60.0, 5, dtype=np.float32))
+    r_ax = np.linspace(0.5, 10.0, 10, dtype=np.float32)
+    scan = np.zeros((5, 10), dtype=np.float32)
+    scan[2, 4] = 0.92
+    fr = RadarFrame(
+        timestamp=1700000000.25, scan=scan, az_axis=az, r_axis=r_ax,
+        targets=[Target(x=1.0, y=4.0, z=1.5, vx=0.2, vy=-0.1, snr=0.92, tid=3)],
+    )
+    ls = to_ros_laserscan(fr)
+    assert ls["header"]["frame_id"] == "radar_link" and len(ls["ranges"]) == 5
+    assert ls["ranges"][2] is not None and ls["ranges"][0] is None
+
+    pc = to_ros_pointcloud2(fr)
+    assert pc["count"] == 1 and abs(pc["points"][0]["z"] - 1.5) < 1e-4
+
+    fg_str = radarscope_json_to_foxglove('{"type":"radarscope.frame","ts":1700000000.5,"seq":7,"range_max":12.0,"targets":[{"tid":1,"x":2.0,"y":3.0}]}')
+    assert '"op":"publish"' in fg_str and '"/radar/targets"' in fg_str
+
+    with tempfile.TemporaryDirectory() as td:
+        mp = Path(td) / "test.mcap"
+        n = write_mcap_json_log(mp, [ls, ls])
+        assert n == 2
+        blob = mp.read_bytes()
+        assert blob.startswith(b"\x89MCAP0\r\n") and blob.endswith(b"\x89MCAP0\r\n")
+        assert b"/radar/laserscan" in blob
+    ok("E8 ROS 2 LaserScan/PointCloud2 互通与 Foxglove MCAP 日志导出")
+
+
+def test_e7_3d_rhi_scope() -> None:
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt5.QtWidgets import QApplication
+    from radarscope.drivers.simulator import SimulatorDriver
+    from radarscope.ui.mainwindow import MainWindow
+
+    drv = SimulatorDriver()
+    drv.open(mode="rhi_3d")
+    caps = drv.capabilities()
+    assert caps.has_elevation and "3D俯仰" in caps.summary()
+    time.sleep(0.06)
+    fr = drv.read()
+    assert fr is not None and fr.rhi is not None and fr.el_axis is not None
+    assert fr.rhi.shape[0] == 25 and any(t.z > 0.2 for t in fr.targets)
+    drv.close()
+
+    _app = QApplication.instance() or QApplication([])
+    w = MainWindow()
+    w.show()
+    w._apply_caps(caps)
+    _app.processEvents()
+    assert not w.rhiscope.isHidden() and w.rhiscope.isVisible(), "3D 俯仰雷达加载后应自动展开 RHI 剖面面板"
+    w.rhiscope.push_frame(fr, fr.targets)
+    w.rhiscope.resize(400, 160)
+    w.rhiscope.grab()
+    w.close()
+    ok("E7 3D 俯仰 RHI 距离-高度剖面驱动与视图渲染")
+
+
 def main() -> int:
     print("RadarScope 核心测试")
     for fn in (test_codec, test_ld2450_sign, test_pipeline, test_alarm,
@@ -1418,7 +1538,9 @@ def main() -> int:
                test_map_geolocate_and_provider, test_statusbar_and_map_dialog,
                test_ew_jamming_and_clutter_map, test_custom_proto_and_nmea_ttm,
                test_protowizard_and_sim_ew_ui, test_multi_themes_and_palettes,
-               test_raw_stream_inspector_and_presets, test_ew_f1_f2_f3_and_deception):
+               test_raw_stream_inspector_and_presets, test_ew_f1_f2_f3_and_deception,
+               test_e6_mbtiles_nmea_and_land_mask, test_e8_ros_and_mcap_export,
+               test_e7_3d_rhi_scope):
         fn()
     print(f"\n全部通过：{PASS} 组")
     return 0

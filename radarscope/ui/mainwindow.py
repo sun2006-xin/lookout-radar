@@ -24,6 +24,8 @@ from PyQt5.QtWidgets import (
 from ..core import cpa, pipeline
 from ..core.aisfeed import AisFeed
 from ..core.forwarder import Forwarder
+from ..core.nmea_nav import NmeaOwnShip
+from ..core.ros_export import to_ros_laserscan, to_ros_pointcloud2, write_mcap_json_log
 from ..core.alarm import DEFAULT_RULES, AlarmEngine, merge_rules, rules_from_json
 from ..core.maptiles import resolve_provider
 from .. import drivers as _builtin_drivers  # noqa: F401  保证单独实例化 MainWindow 也能注册内置驱动
@@ -42,6 +44,7 @@ from .maplayer import MapLayer
 from .pluginsdialog import PluginsDialog
 from .ppi import PPIWidget
 from .rdscope import RDScopeWidget
+from .rhiscope import RHIScopeWidget
 from .rulesdialog import RulesDialog
 from .sensorpanel import SensorPanel
 from .sensorsdialog import SensorsDialog
@@ -123,15 +126,22 @@ class MainWindow(ConnectionController, ExportController,
         self._rec_dir: Path | None = None
         self._rec_n = 0
         self._rec_t = 0.0
-        # AIS / 地图中心坐标
+        # AIS / NMEA 本船定位 / 地图中心坐标 / 离线 MBTiles / 陆地杂波掩膜
         self.ais = AisFeed()
+        self.nmea_nav = NmeaOwnShip()
         self._ais_ref = (39.9, 116.4)
         self._map_provider = "auto"
+        self._mbtiles_path = ""
+        self._nmea_enabled = False
+        self._nmea_port = 10111
+        self._last_frame_ref = None
         # 模拟电子站（动态虚拟目标与电子对抗教学叠加）
         from ..core.sim_targets import ElectronicStation
         self.sim_station = ElectronicStation()
         self.clutter_map = pipeline.ClutterMap()
         self.clutter_map.enabled = bool(self.settings.value("clutter_suppress", False, type=bool))
+        self.land_mask = pipeline.LandMask()
+        self.land_mask.enabled = bool(self.settings.value("land_mask", False, type=bool))
         # 联网地图（懒创建，只在开启时建）
         self.map_layer: MapLayer | None = None
         self._map_t = 0.0
@@ -151,6 +161,8 @@ class MainWindow(ConnectionController, ExportController,
         self.ppi.targetPicked.connect(self._on_target_picked)
         self.ascope = AScopeWidget()
         self.rdscope = RDScopeWidget()
+        self.rhiscope = RHIScopeWidget()
+        self.rhiscope.setVisible(False)
         self.waterfall = WaterfallWidget()
         self.table = TrackTable()
         self.log = EventLog()
@@ -179,6 +191,7 @@ class MainWindow(ConnectionController, ExportController,
         rv.setSpacing(8)
         rv.addWidget(self.ascope)
         rv.addWidget(self.rdscope)
+        rv.addWidget(self.rhiscope)
         rv.addWidget(self.waterfall)
         self.tabs = QTabWidget()
         self.tabs.addTab(self.table, "航迹")
@@ -241,6 +254,7 @@ class MainWindow(ConnectionController, ExportController,
         self.mode_combo = QComboBox()
         self.mode_combo.addItem("旋转扫描", "rotating")
         self.mode_combo.addItem("凝视扇区", "staring")
+        self.mode_combo.addItem("3D 俯仰扫掠 (RHI)", "rhi_3d")
 
         tb.addWidget(QLabel("  端点 "))
         self.endpoint_combo = QComboBox()
@@ -473,6 +487,7 @@ class MainWindow(ConnectionController, ExportController,
         m_file = self.menuBar().addMenu("文件(&F)")
         self._m_file = m_file
         m_file.addAction("导出事件日志…", self._export_log)
+        m_file.addAction("导出 ROS / Foxglove (.mcap / JSON)…", self._export_ros_log)
         m_file.addAction("导出当前画面…", self._export_screenshot)
         m_file.addAction("打开数据目录", self._open_data_dir)
         m_file.addSeparator()
@@ -537,7 +552,8 @@ class MainWindow(ConnectionController, ExportController,
         m_view = self.menuBar().addMenu("视图(&V)")
         self._m_view = m_view
         for text, w in (("A 显", self.ascope), ("瀑布图", self.waterfall),
-                        ("距离-多普勒", self.rdscope), ("传感器页签", self.sensors_panel)):
+                        ("距离-多普勒", self.rdscope), ("3D 俯仰 RHI", self.rhiscope),
+                        ("传感器页签", self.sensors_panel)):
             act = QAction(text, self)
             act.setCheckable(True)
             act.setChecked(True)
@@ -685,6 +701,11 @@ class MainWindow(ConnectionController, ExportController,
         if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0:
             self._ais_ref = (lat, lon)
         self._map_provider = str(self.settings.value("map_provider", "auto") or "auto")
+        self._mbtiles_path = str(self.settings.value("mbtiles_path", "") or "")
+        self._nmea_port = int(self.settings.value("nmea_port", 10111) or 10111)
+        self._nmea_enabled = bool(self.settings.value("nmea_enabled", False, type=bool))
+        if self._nmea_enabled:
+            self.nmea_nav.start(self._nmea_port)
         key = self.settings.value("palette", DEFAULT_PALETTE)
         idx = self.pal_combo.findData(key) if isinstance(key, str) else -1
         if idx >= 0:
@@ -717,6 +738,10 @@ class MainWindow(ConnectionController, ExportController,
         self.settings.setValue("ais_lat", self._ais_ref[0])
         self.settings.setValue("ais_lon", self._ais_ref[1])
         self.settings.setValue("map_provider", self._map_provider)
+        self.settings.setValue("mbtiles_path", self._mbtiles_path)
+        self.settings.setValue("nmea_port", self._nmea_port)
+        self.settings.setValue("nmea_enabled", self._nmea_enabled)
+        self.settings.setValue("land_mask", self.land_mask.enabled)
 
     # ================================================================== #
     # 端点
@@ -798,6 +823,7 @@ class MainWindow(ConnectionController, ExportController,
         self.ascope.set_palette(key)
         self.waterfall.set_palette(key)
         self.rdscope.set_palette(key)
+        self.rhiscope.set_palette(key)
 
     def _on_orientation_changed(self, *_args) -> None:
         self.ppi.set_orientation(self.btn_north.isChecked(), self.heading_spin.value())
@@ -837,12 +863,15 @@ class MainWindow(ConnectionController, ExportController,
         self.waterfall.set_range(self.caps.range_max)
         self.waterfall.reset()
         self.rdscope.reset()
-        # RD 面板只在雷达真的给得出来的时候才占位置
+        self.rhiscope.set_capabilities(self.caps)
+        # RD / RHI 面板只在雷达声明支持对应维度时展开
         self.rdscope.setVisible(caps.has_range_doppler)
+        self.rhiscope.setVisible(caps.has_elevation)
         self.table.configure(self.caps)
         self.tracker.reset()
         self.alarm.reset()
         self.clutter_map.reset()
+        self.land_mask.reset()
         self._locked_id = -1
         self.status_left.setText(f"{caps.name} ｜ {caps.summary()} ｜ {caps.notes}")
 
@@ -867,6 +896,17 @@ class MainWindow(ConnectionController, ExportController,
         dt = (now - self._last_ts) if self._last_ts else 0.1
         self._last_ts = now
         self._last_frame_mono = time.monotonic()
+
+        if self.land_mask.enabled and f.has_scan:
+            if self.map_layer is not None and self.map_layer.enabled and self.map_layer.image is not None:
+                self.land_mask.update_from_map_rgb(
+                    self.map_layer.to_rgb_array(),
+                    self.map_layer.mpp,
+                    self.map_layer.anchor_px,
+                    f.az_axis, f.r_axis,
+                    float(self.heading_spin.value()),
+                )
+            f = self.land_mask.apply(f)
 
         if self.clutter_map.enabled and f.has_scan:
             f = self.clutter_map.apply(f)
@@ -916,11 +956,22 @@ class MainWindow(ConnectionController, ExportController,
         self._update_cpa_label()
 
         # ---- 对外转发（按速率限制，内部自己判） ----
+        self._last_frame_ref = f
         if self.forwarder.enabled:
             self.forwarder.send(f, all_tracks)
 
         self.ppi.push_frame(f, all_tracks)
         self._maybe_record(now)
+
+        # NMEA 本船定位流自动同步经纬度 / 真航向 / 航速
+        if self._nmea_enabled and self.nmea_nav.received > 0:
+            ns = self.nmea_nav.snapshot()
+            if ns["lat"] is not None and ns["lon"] is not None:
+                self._ais_ref = (float(ns["lat"]), float(ns["lon"]))
+            if ns["heading_deg"] is not None and abs(float(ns["heading_deg"]) - self.heading_spin.value()) > 0.2:
+                self.heading_spin.setValue(float(ns["heading_deg"]))
+            if ns["speed_ms"] is not None and abs(float(ns["speed_ms"]) - self.speed_spin.value()) > 0.05:
+                self.speed_spin.setValue(float(ns["speed_ms"]))
 
         # 真运动：按航向航速积分本舰位移，画面整体反向平移
         if self.ppi.true_motion:
@@ -953,6 +1004,8 @@ class MainWindow(ConnectionController, ExportController,
         self.waterfall.push_frame(f, all_tracks)
         if self.caps.has_range_doppler:
             self.rdscope.push_frame(f)
+        if self.caps.has_elevation:
+            self.rhiscope.push_frame(f, all_tracks)
 
         # ---- 落库 ----
         if self.store.session_id is not None:
@@ -1153,6 +1206,8 @@ class MainWindow(ConnectionController, ExportController,
                 self.map_layer.ready.connect(self.ppi.update)
             prov = resolve_provider(self._map_provider, self._theme)
             self.map_layer.set_provider(prov)
+            if self._mbtiles_path:
+                self.map_layer.set_mbtiles(self._mbtiles_path)
             self.map_layer.enabled = True
             self.ppi.map_layer = self.map_layer
             lat, lon = self._ais_ref
@@ -1175,23 +1230,75 @@ class MainWindow(ConnectionController, ExportController,
     def _open_map_settings(self) -> None:
         cur_on = bool(self.map_layer is not None and self.map_layer.enabled)
         dlg = MapLocationDialog(
-            self._ais_ref[0], self._ais_ref[1], self._map_provider, cur_on, self
+            self._ais_ref[0], self._ais_ref[1], self._map_provider, cur_on,
+            mbtiles_path=self._mbtiles_path,
+            nmea_port=self._nmea_port,
+            nmea_enabled=self._nmea_enabled,
+            land_mask=self.land_mask.enabled,
+            parent=self,
         )
         if dlg.exec_() != QDialog.Accepted:
             return
         lat, lon, prov, want_on = dlg.values()
+        opts = dlg.e6_options()
         self._ais_ref = (lat, lon)
         self._map_provider = prov
+        self._mbtiles_path = opts["mbtiles_path"]
+        self._nmea_port = int(opts["nmea_port"])
+        self._nmea_enabled = bool(opts["nmea_enabled"])
+        self.land_mask.enabled = bool(opts["land_mask"])
         self.settings.setValue("ais_lat", lat)
         self.settings.setValue("ais_lon", lon)
         self.settings.setValue("map_provider", prov)
+        self.settings.setValue("mbtiles_path", self._mbtiles_path)
+        self.settings.setValue("nmea_port", self._nmea_port)
+        self.settings.setValue("nmea_enabled", self._nmea_enabled)
+        self.settings.setValue("land_mask", self.land_mask.enabled)
+
+        self.nmea_nav.stop()
+        if self._nmea_enabled:
+            err = self.nmea_nav.start(self._nmea_port)
+            if err:
+                self._log_level("warn", err)
+            else:
+                self.log.push("ok", f"已开启 NMEA 本船定位监听（UDP :{self._nmea_port}）")
+
         if want_on and dlg.auto_fit_range() and float(self.range_spin.value()) < 100.0:
             self.range_spin.setValue(500.0)
         if self.map_layer is not None:
+            self.map_layer.set_mbtiles(self._mbtiles_path or None)
             self.map_layer._key = None
         self._toggle_map(want_on)
         if not want_on:
-            self.log.push("ok", f"已保存地图与定位中心：{lat:.5f}, {lon:.5f}")
+            self.log.push("ok", f"已保存海图与定位设置：{lat:.5f}, {lon:.5f}")
+
+    def _export_ros_log(self) -> None:
+        """E8：将当前帧或航迹快照导出为标准 Foxglove .mcap 或 ROS LaserScan/PointCloud2 JSON。"""
+        import json as _json
+        frame = self._last_frame_ref
+        if frame is None:
+            QMessageBox.information(self, "导出 ROS / Foxglove", "请先连接雷达或模拟器采集至少一帧数据后再导出。")
+            return
+        path, sel = QFileDialog.getSaveFileName(
+            self, "导出 ROS / Foxglove 日志",
+            str(self.data_dir / "radar_telemetry.mcap"),
+            "Foxglove MCAP 日志 (*.mcap);;ROS LaserScan/PointCloud JSON (*.json)",
+        )
+        if not path:
+            return
+        p = Path(path)
+        tracks = self.tracker.tracks
+        if p.suffix.lower() == ".json" or "JSON" in sel:
+            payload = {
+                "laserscan": to_ros_laserscan(frame, threshold=self._thresh),
+                "pointcloud2": to_ros_pointcloud2(frame, tracks=tracks),
+            }
+            p.write_text(_json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            self.log.push("ok", f"已导出 ROS JSON：{p.name}")
+        else:
+            msg = to_ros_laserscan(frame, threshold=self._thresh)
+            n = write_mcap_json_log(p, [msg])
+            self.log.push("ok", f"已导出 Foxglove MCAP 日志：{p.name}（{n} 帧）")
 
     def _sync_scene_ui(self) -> None:
         sc = self.sim_station.scenario
@@ -1382,6 +1489,7 @@ class MainWindow(ConnectionController, ExportController,
         self._save()
         self._want_connect = False
         self._teardown_reader()
+        self.nmea_nav.stop()
         if self.store.session_id is not None:
             self.store.end_session("正常退出")
         else:

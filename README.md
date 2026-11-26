@@ -38,13 +38,13 @@
 
 | 分类 | 能力 |
 |---|---|
-| **显示** | PPI 环视、A 显距离剖面、航迹距离-时间瀑布图、距离-多普勒图、余晖拖尾、尾迹、多普勒趋近着色、双量程近距窗、**7 套现代 UI 主题 × 8 套雷达色板** |
+| **显示** | PPI 环视、A 显距离剖面、航迹距离-时间瀑布图、距离-多普勒图、**3D 俯仰 RHI 距离-高度剖面**、余晖拖尾、尾迹、多普勒趋近着色、双量程近距窗、**7 套现代 UI 主题 × 8 套雷达色板** |
 | **测量** | 点击测距、EBL 电子方位线 + VRM 距离圈、北向/艏向切换、真运动/相对运动 |
 | **告警** | 距离/速度/圆形与多边形防区/目标数/接近率规则、画布绘制与右键编辑移动、分级提示、静音、CPA 最近会遇 |
-| **检测** | 自适应 GO-CFAR、抗干扰 OS-CFAR、CA-CFAR、静态杂波背景图学习抑制（Clutter Map） |
+| **检测** | 自适应 GO-CFAR、抗干扰 OS-CFAR、CA-CFAR、静态杂波背景图学习抑制（Clutter Map）、**陆地静止杂波掩膜 (Land Mask)** |
 | **多站** | 6×60° 全向拼接、扇区共视、航迹级加权最小二乘交会、**多站交叉抗欺骗（疑似欺骗标黄）**、盲区标定、朝向标定向导 |
 | **接入** | 串口（自动识别 CH340/CP210x + **Hex/ASCII 实时窥视与帧头嗅探**）、TCP/UDP、蓝牙 BLE、文件回放、**零代码通用协议适配向导**（7 套 NMEA TTM / `$SCAN` / TF / 77G / Modbus 预设） |
-| **扩展** | AIS（NMEA 解析）、联网地图底图（OSM/CARTO，支持 IP 自动定位与手动经纬度）、UDP 数据转发、WebSocket 实时订阅端、插件系统（SHA256 信任确认） |
+| **扩展** | AIS（NMEA 解析）、**NMEA 本船定位 (`$GGA/$RMC/$HDT`)**、在线图源与 **离线 `.mbtiles` 海图**、UDP 数据转发、WebSocket / **ROS 2 & Foxglove `.mcap` 互通**、插件系统（SHA256 信任确认） |
 | **仿真** | 内置合成雷达 + 相控阵模拟 + **模拟电子站 & 电子战教学**（压制/DRFM/RGPO/VGPO/箔条云/ISRJ 干扰、烧穿距离圈、ESM 方位弧与模拟火控引导） |
 | **工程** | SQLite 会话/航迹/事件、时间轴轨迹回放、统计分析、HTML/CSV 报表导出、中英双语切换、录像、无窗口自检 |
 
@@ -53,7 +53,7 @@
 ### 直接用（推荐，无需安装 Python）
 
 - **方式一（克隆 / 下载仓库 ZIP 即用）**：克隆本仓库或点击 GitHub 页面右上角 `Code → Download ZIP` 解压后，直接双击运行仓库内的 **`dist/Lookout/Lookout.exe`**。
-- **方式二（Release 独立压缩包）**：前往 [GitHub Releases](https://github.com/sun2006-xin/lookout-radar/releases/latest) 下载 `Lookout-v1.1.3-win64.zip`，解压后双击 `Lookout.exe` 即可运行。
+- **方式二（Release 独立压缩包）**：前往 [GitHub Releases](https://github.com/sun2006-xin/lookout-radar/releases/latest) 下载 `Lookout-v1.2.0-win64.zip`，解压后双击 `Lookout.exe` 即可运行。
 
 首次打开默认进入 **数据源 → 模拟与演示 → 模拟器 · 合成雷达**，点击「连接」即可看到动态扫描与航迹；可在顶栏 **`场景`** 一键切换航海轮船避碰、车载 77G、低空无人机或教学电子战干扰模式。
 
@@ -165,7 +165,7 @@ def setup(api):
 ## 测试
 
 ```bat
-.venv\Scripts\python.exe tests\test_core.py   :: 42 组
+.venv\Scripts\python.exe tests\test_core.py   :: 45 组
 .venv\Scripts\python.exe tools\check.py       :: 编译 + 测试 + 链路自检 + 夹具回归
 ```
 
@@ -187,7 +187,8 @@ def setup(api):
 - [x] 目标历史轨迹回放（时间轴拖动与倍速播放）
 - [x] 告警区支持多边形与画布右键编辑/移动/单个删除
 - [x] 中英文界面实时切换（i18n）与 HTML/CSV 报表导出
-- [x] 模拟电子站（动态场景与虚拟目标叠加注入）
+- [x] 模拟电子站、教学级电子对抗全流程与多站抗欺骗（E1~E5、E9、F1~F3）
+- [x] 离线 MBTiles 海图 + NMEA 本船定位 + 陆地掩膜 + ROS/Foxglove `.mcap` + 3D RHI 剖面（E6~E8）
 - [ ] **阶段 A 实机联调**：LD19/LD06、LD2450/LD2410、BLE 真机与真实多站组网
 - [ ] **阶段 B4 原始 ADC → FFT 链路**：需要 IWR6843 + DCA1000 等相参硬件
 - [ ] 真机雷达参数下行下发与协议适配扩展

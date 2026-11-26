@@ -301,3 +301,72 @@ class ClutterMap:
         if self.frames >= self.warmup:
             frame.scan = np.clip(scan - self.gain * bg_prev, 0.0, 1.0)
         return frame
+
+
+class LandMask:
+    """陆地静止杂波掩膜（ROADMAP E6）：按岸线/地图色彩特征或固定岸界扇区抑制陆地强反射。"""
+
+    def __init__(self, attenuation: float = 0.85, min_land_range_m: float = 15.0) -> None:
+        self.enabled: bool = False
+        self.attenuation: float = max(0.1, min(1.0, float(attenuation)))
+        self.min_land_range_m: float = float(min_land_range_m)
+        self.sectors: list[tuple[float, float, float]] = []  # (az0_deg, az1_deg, r_min_m)
+        self._grid_mask: np.ndarray | None = None
+
+    def reset(self) -> None:
+        self._grid_mask = None
+
+    def set_sectors(self, sectors: list[tuple[float, float, float]]) -> None:
+        self.sectors = [(float(a0), float(a1), float(r0)) for a0, a1, r0 in sectors]
+
+    def update_from_map_rgb(
+        self,
+        rgb: np.ndarray | None,
+        mpp: float,
+        anchor_px: tuple[float, float],
+        az_axis: np.ndarray | None,
+        r_axis: np.ndarray | None,
+        heading_deg: float = 0.0,
+    ) -> None:
+        """基于离线/在线海图 RGB 像素水陆颜色先验构建极坐标陆地掩膜。"""
+        if rgb is None or rgb.ndim != 3 or mpp <= 1e-6 or az_axis is None or r_axis is None:
+            self._grid_mask = None
+            return
+        h, w, _ = rgb.shape
+        ax, ay = float(anchor_px[0]), float(anchor_px[1])
+        ang = az_axis[:, None] + radians(heading_deg)
+        px = np.rint(ax + np.sin(ang) * (r_axis[None, :] / mpp)).astype(np.int32)
+        py = np.rint(ay - np.cos(ang) * (r_axis[None, :] / mpp)).astype(np.int32)
+        inside = (px >= 0) & (px < w) & (py >= 0) & (py < h)
+        px_c = np.clip(px, 0, w - 1)
+        py_c = np.clip(py, 0, h - 1)
+        sampled = rgb[py_c, px_c].astype(np.int16)
+        r_c, g_c, b_c = sampled[..., 0], sampled[..., 1], sampled[..., 2]
+        # 水体在常见海图/深浅底图中通常呈现 B 通道高于 R，或整体低亮度深海色；其余浅灰/米黄/绿色块按陆地抑制
+        is_water = (b_c > r_c + 8) | ((r_c + g_c + b_c) < 80)
+        far_enough = r_axis[None, :] >= self.min_land_range_m
+        self._grid_mask = inside & far_enough & (~is_water)
+
+    def apply(self, frame: RadarFrame) -> RadarFrame:
+        if not self.enabled or not frame.has_scan or frame.scan is None:
+            return frame
+        if frame.az_axis is None or frame.r_axis is None:
+            return frame
+        scan = frame.scan.astype(np.float32, copy=True)
+        mask = np.zeros_like(scan, dtype=bool)
+        if self._grid_mask is not None and self._grid_mask.shape == scan.shape:
+            mask |= self._grid_mask
+        if self.sectors:
+            az_deg = np.degrees(frame.az_axis) % 360.0
+            for a0, a1, r_min in self.sectors:
+                a0m, a1m = a0 % 360.0, a1 % 360.0
+                if a0m <= a1m:
+                    az_ok = (az_deg >= a0m) & (az_deg <= a1m)
+                else:
+                    az_ok = (az_deg >= a0m) | (az_deg <= a1m)
+                r_ok = frame.r_axis >= r_min
+                mask |= az_ok[:, None] & r_ok[None, :]
+        if np.any(mask):
+            scan[mask] *= (1.0 - self.attenuation)
+            frame.scan = scan
+        return frame

@@ -33,6 +33,8 @@ class Target:
     threat: int = 0           # 威胁等级 0无 1低 2中 3高，高端雷达会给出
     cls: str = ""             # 目标分类（敌/我/未知/民航…），支持 IFF 的雷达才有
     rcs: float = 0.0          # 雷达截面积估值，dBsm；0 表示平台不提供
+    z: float = 0.0            # 高度 / 海拔（米），支持 3D 俯仰雷达时有效
+    el_deg: float = 0.0       # 俯仰角（度），向上为正
 
     @property
     def rng(self) -> float:
@@ -73,6 +75,8 @@ class RadarFrame:
     # 存在感应模块拿不到，脉冲多普勒 / FMCW 相参雷达才有。
     rd: np.ndarray | None = None
     rd_v_axis: np.ndarray | None = None   # (n_doppler,) 速度轴，m/s，负=远离
+    rhi: np.ndarray | None = None         # (n_el, n_rng) 距离-高度/俯仰剖面矩阵
+    el_axis: np.ndarray | None = None     # (n_el,) 俯仰角轴，弧度
     source: str = ""
     meta: dict[str, Any] = field(default_factory=dict)
 
@@ -142,6 +146,8 @@ class Capabilities:
             parts.append("速度")
         if self.has_range_doppler:
             parts.append("RD")
+        if self.has_elevation:
+            parts.append("3D俯仰")
         if self.has_iff:
             parts.append("IFF")
         if self.has_threat:

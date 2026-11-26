@@ -1,6 +1,6 @@
 # 开发路线图与未来计划
 
-> 版本：v1.1.3（2026-11-26）· 状态：**软件生态（E1~E5、E9）、电子战教学全线（F1~F3）、现代多主题与微调控件体系已落地；下一阶段聚焦离线海图 E6、ROS/RHI（E7~E8）及实机硬件联调**。
+> 版本：v1.2.0（2026-11-26）· 状态：**全部纯软件主线（A5、B1~B3、C1~C4、D1~D6、E1~E9、F1~F3）已 100% 落地并通过 45 组真实单元测试；后续仅余实机硬件到达后的阶段 A 联调与 B4 原始 ADC→FFT**。
 >
 > 配套文档：[ARCHITECTURE.md](ARCHITECTURE.md)（系统分层与数据契约）· [STRUCTURE.md](STRUCTURE.md)（代码文件索引）。
 
@@ -11,17 +11,17 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | 瞭望 Lookout（Python 包名 `radarscope`） |
-| 源码规模 | 约 14 200 行 / 73 个 Python 文件 / 42 组单元测试 |
+| 源码规模 | 约 14 900 行 / 76 个 Python 文件 / 45 组单元测试 |
 | 主窗口结构 | `ui/mainwindow.py` + `ui/controllers.py`（三控制器 mixin） |
 | 打包方式 | `pyinstaller --noconfirm --clean installer/Lookout.spec`（生成 `dist/Lookout/Lookout.exe`） |
 | 开源仓库 | https://github.com/sun2006-xin/lookout-radar （MIT） |
 | 默认视觉 | 7 套现代 UI 主题 × 8 套雷达色板 + 矢量微调控件 |
-| 已完成阶段 | A5、B1~B3、C1~C4、D1~D6、E1~E5、E9、F1~F3 |
+| 已完成阶段 | A5、B1~B3、C1~C4、D1~D6、E1~E9、F1~F3 |
 
 **本地开发检查命令**（提交或发版前确保全部通过）：
 
 ```bat
-.venv\Scripts\python.exe tests\test_core.py     :: 42 组单元测试
+.venv\Scripts\python.exe tests\test_core.py     :: 45 组单元测试
 .venv\Scripts\python.exe tools\check.py         :: 字节码编译 + 单元测试 + 无窗口链路自检 + 夹具回归
 .venv\Scripts\python.exe main.py --selftest     :: 打包前/后无界面自检（退出码 0）
 ```
@@ -172,9 +172,9 @@
 | E3 | 零代码通用雷达协议适配器 | `[x]` 已完成 | 新增 `core/custom_proto.py`、`drivers/custom_generic.py`、`ui/protodialog.py`，内置 NMEA `$RATTM` 航海雷达、77G `$TGT` CSV 与二进制结构体帧，开箱即用 |
 | E4 | 航海 / 车载 / 无人机预设场景 | `[x]` 已完成 | `ElectronicStation` 新增 `marine`（航道避碰）、`automotive`（77G 多车道）、`drone`（低空周界突防）动态演练场景 |
 | E5 | 原始报文实时窥视与字节切帧诊断 | `[x]` 已完成 | `ui/linkdialog.py` 新增实时 Hex/ASCII 并排窥视区、常见雷达魔数签名嗅探（LD19/LD2450/LD2410/TF/NMEA/CSV）与唤醒探针发送 |
-| E6 | 离线 MBTiles 海图、NMEA 本船定位与陆地掩膜 | `[ ]` 排期 | 借鉴 `OpenCPN` 与 `Furuno Smart Radar`：支持离线 `.mbtiles`、解析 `$GPGGA/$GNRMC/$HEHDT/$RARSD` 自动更新本船坐标航向、陆地静止回波掩膜 |
-| E7 | 3D 俯仰 RHI 显示（Distance-Height） | `[ ]` 排期 | 借鉴 ROS RViz2：针对 4D 成像毫米波/3D 激光（`Capabilities.has_elevation`），扩展距离-高度（RHI）剖面与高度分层过滤 |
-| E8 | 机器人与遥测标准协议互通（ROS / Foxglove） | `[ ]` 排期 | 借鉴 `Foxglove Studio`：扩展 `tools/ws_bridge.py` 与导出链路，支持标准 `LaserScan / PointCloud2` JSON 及 `.mcap` 回放日志互通 |
+| E6 | 离线 MBTiles 海图、NMEA 本船定位与陆地掩膜 | `[x]` 已完成 | `core/maptiles.py` 支持离线 `.mbtiles` 读取、`core/nmea_nav.py` 解析 `$GPGGA/$GNRMC/$HEHDT/$RARSD` 同步本船位置航向、`core/pipeline.LandMask` 基于水陆颜色先验/扇区抑制陆地静止杂波 |
+| E7 | 3D 俯仰 RHI 显示（Distance-Height） | `[x]` 已完成 | 新增 `ui/rhiscope.py` 距离-高度剖面控件（仰角射线/高度滤除/3D 航迹）、扩展 `model.py`（`Target.z`/`RadarFrame.rhi`）与模拟器 `rhi_3d` 模式 |
+| E8 | 机器人与遥测标准协议互通（ROS / Foxglove） | `[x]` 已完成 | 新增 `core/ros_export.py`（`LaserScan`/`PointCloud2` JSON 与标准二进制 `.mcap` v0 封装）、主菜单导出与 `tools/ws_bridge.py --ros` 桥接 |
 | E9 | 常用消费/工业雷达零代码模板扩充 | `[x]` 已完成 | `core/custom_proto.py` 扩充至 **7 套开箱预设**：新增极坐标 `$SCAN`、北醒 TF 系列 9B 帧（`59 59`）、77G CAN-UDP 浮点帧与 Modbus-RTU 帧，并补全 `binary_point` 解析 |
 
 ---
@@ -202,11 +202,9 @@
 
 ## 6. 建议的演进顺序
 
-> **当前进度（2026-11-26）**：`A5`、`B1~B3`、`C1~C4`、`D1~D6`、`E1~E5`、`E9`、`F1~F3` 已全部完成并有 42 组测试兜底；以下按剩余纯软件扩展与硬件联调主线推进：
+> **当前进度（2026-11-26）**：`A5`、`B1~B3`、`C1~C4`、`D1~D6`、`E1~E9`、`F1~F3` 全部纯软件研发任务已收官并通过 **45 组**真实回归测试；以下仅待实机硬件到位后开展联调：
 
 ```
-软件主线 1（航海海图生态）：E6（离线 MBTiles + NMEA 本船定位 + 陆地掩膜）
-软件主线 2（机器人/三维扩展）：E8（ROS/Foxglove 生态互通）→ E7（俯仰 RHI 剖面）
 硬件主线（实体硬件到位后再开）：A1 → A2 → A3 → A4（真机联调与样本录制）→ B4（IWR6843+DCA1000 原始 ADC→FFT）
 ```
 

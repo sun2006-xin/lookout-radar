@@ -8,19 +8,21 @@
 from __future__ import annotations
 
 import time
-from math import cos, radians, sin
+from math import atan2, cos, hypot, radians, sin
 
 import numpy as np
 
 from ..core.driver import RadarDriver, register
-from ..core.model import Capabilities, RadarFrame
+from ..core.model import Capabilities, RadarFrame, Target
 
 
 class _Mover:
-    __slots__ = ("x", "y", "vx", "vy", "amp")
+    __slots__ = ("x", "y", "z", "vx", "vy", "vz", "amp")
 
-    def __init__(self, x, y, vx, vy, amp):
-        self.x, self.y, self.vx, self.vy, self.amp = x, y, vx, vy, amp
+    def __init__(self, x, y, vx, vy, amp, z: float = 0.0, vz: float = 0.0):
+        self.x, self.y, self.z = x, y, z
+        self.vx, self.vy, self.vz = vx, vy, vz
+        self.amp = amp
 
 
 @register
@@ -57,6 +59,17 @@ class SimulatorDriver(RadarDriver):
                 views=("ppi", "ascope", "waterfall", "tracks"),
                 notes="360° 机械扫描，每帧只刷新一个扇区",
             )
+        if self.mode == "rhi_3d":
+            return Capabilities(
+                name="模拟 · 3D 俯仰扫掠 (RHI)",
+                has_scan=True, has_azimuth=True, has_targets=True,
+                has_velocity=True, has_elevation=True,
+                az_fov=120.0, az_resolution=1.0, range_min=0.2, range_max=8.0,
+                scan_mode="staring", scan_rate=self._rate,
+                tier="aesa", transports=("virtual",),
+                views=("ppi", "ascope", "waterfall", "tracks", "rhi"),
+                notes="±60° 方位 × 0°~45° 俯仰三维扫掠（带高度 Z 与 RHI 剖面）",
+            )
         return Capabilities(
             name="模拟 · 凝视扇区",
             has_scan=True, has_azimuth=True, has_targets=False,
@@ -82,10 +95,11 @@ class SimulatorDriver(RadarDriver):
         self._scan = np.zeros((self._az.size, self._r.size), dtype=np.float32)
 
         self._movers = [
-            _Mover(1.0, 2.2, 0.28, -0.10, 0.85),
-            _Mover(-1.7, 3.6, 0.12, 0.22, 0.62),
-            _Mover(2.5, 4.8, -0.32, 0.05, 0.45),
+            _Mover(1.0, 2.2, 0.28, -0.10, 0.85, z=1.4, vz=0.12),
+            _Mover(-1.7, 3.6, 0.12, 0.22, 0.62, z=2.8, vz=-0.08),
+            _Mover(2.5, 4.8, -0.32, 0.05, 0.45, z=3.9, vz=0.05),
         ]
+        self._el = np.radians(np.linspace(0.0, 45.0, 25)).astype(np.float32) if self.mode == "rhi_3d" else None
         # 静止杂波：验证 CFAR 会不会把墙/椅子当成目标
         self._clutter = [_Mover(0.9, 5.3, 0.0, 0.0, 0.55)]
 
@@ -104,6 +118,11 @@ class SimulatorDriver(RadarDriver):
         for idx_m, m in enumerate(self._movers):
             m.x += m.vx * dt
             m.y += m.vy * dt
+            if self.mode == "rhi_3d":
+                m.z += m.vz * dt
+                if m.z < 0.4 or m.z > 5.2:
+                    m.vz = -m.vz
+                    m.z = max(0.4, min(5.2, m.z))
             # 轻微正弦机动，模拟非直线目标运动
             turn = 0.12 * sin(self._age * 0.5 + idx_m * 1.7) * dt
             nvx = m.vx * cos(turn) - m.vy * sin(turn)
@@ -200,11 +219,31 @@ class SimulatorDriver(RadarDriver):
         assert self._scan is not None and self._az is not None and self._r is not None
         start = (self._sweep - self._step) % self._az.size
         stop = start + self._step
+        rhi = None
+        el_axis = None
+        tgts_3d: list[Target] = []
+        if self.mode == "rhi_3d" and self._el is not None:
+            rhi = np.clip(self._rng.normal(0.02, 0.012, size=(self._el.size, self._r.size)), 0.0, 1.0).astype(np.float32)
+            for m in self._movers:
+                hr = hypot(m.x, m.y)
+                el_rad = atan2(m.z, max(0.2, hr))
+                pe = np.exp(-0.5 * ((self._el - el_rad) / radians(4.5)) ** 2).astype(np.float32)
+                pr = np.exp(-0.5 * ((self._r - hypot(hr, m.z)) / 0.22) ** 2).astype(np.float32)
+                rhi = np.maximum(rhi, m.amp * np.outer(pe, pr))
+                tgts_3d.append(Target(
+                    x=m.x, y=m.y, vx=m.vx, vy=m.vy, snr=m.amp,
+                    z=round(m.z, 2), el_deg=round(float(np.degrees(el_rad)), 1),
+                ))
+            el_axis = self._el.copy()
+
         frame = RadarFrame(
             timestamp=now,
             scan=self._apply_control(self._scan),
             az_axis=self._az.copy(),
             r_axis=self._r.copy(),
+            targets=tgts_3d,
+            rhi=rhi,
+            el_axis=el_axis,
             source=self.label,
             meta={
                 "fresh_az": (int(start), int(stop)),

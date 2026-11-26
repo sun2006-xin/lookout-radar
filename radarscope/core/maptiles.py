@@ -14,8 +14,10 @@
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import math
+import sqlite3
 import urllib.request
 from pathlib import Path
 
@@ -133,8 +135,50 @@ def tile_span(lat: float, lon: float, z: int, cols: int,
     return x0, y0, x0 + cols, y0 + rows
 
 
+class MBTilesReader:
+    """离线 MBTiles (SQLite) 瓦片数据库读取器（兼容 TMS 反向 Y 与 XYZ）。"""
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        self._meta: dict[str, str] | None = None
+
+    def metadata(self) -> dict[str, str]:
+        if self._meta is not None:
+            return dict(self._meta)
+        out: dict[str, str] = {}
+        try:
+            with contextlib.closing(sqlite3.connect(str(self.path), timeout=2.0)) as conn:
+                for k, v in conn.execute("SELECT name, value FROM metadata"):
+                    out[str(k)] = str(v)
+        except Exception:
+            pass
+        self._meta = out
+        return dict(out)
+
+    def get_tile(self, z: int, x: int, y: int) -> bytes | None:
+        if not self.path.exists():
+            return None
+        tms_y = (1 << z) - 1 - y
+        try:
+            with contextlib.closing(sqlite3.connect(str(self.path), timeout=2.0)) as conn:
+                row = conn.execute(
+                    "SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?",
+                    (z, x, tms_y),
+                ).fetchone()
+                if row is None:
+                    row = conn.execute(
+                        "SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?",
+                        (z, x, y),
+                    ).fetchone()
+                if row and row[0]:
+                    return bytes(row[0])
+        except Exception:
+            pass
+        return None
+
+
 class TileStore:
-    """磁盘缓存的瓦片库。
+    """磁盘缓存与离线 MBTiles 瓦片库。
 
     磁盘缓存不是优化，是必需品：地图瓦片每块 5~20 KB，
     移一下视野就要几十块，不缓存等于每次都在打别人的服务器。
@@ -149,19 +193,42 @@ class TileStore:
         self.downloaded = 0
         self.failed = 0
         self.last_error = ""
+        self.mbtiles: MBTilesReader | None = None
+
+    def set_mbtiles(self, path: str | Path | None) -> bool:
+        if not path:
+            self.mbtiles = None
+            return False
+        p = Path(path)
+        if not p.exists():
+            self.mbtiles = None
+            return False
+        self.mbtiles = MBTilesReader(p)
+        return True
 
     @property
     def attribution(self) -> str:
+        if self.mbtiles is not None:
+            return f"离线海图 · {self.mbtiles.path.name}"
         return PROVIDERS[self.provider]["attribution"]
 
     def path_of(self, z: int, x: int, y: int) -> Path:
         return self.root / self.provider / str(z) / str(x) / f"{y}.png"
 
+    def has_local_tile(self, z: int, x: int, y: int) -> bool:
+        if self.mbtiles is not None and self.mbtiles.get_tile(z, x, y) is not None:
+            return True
+        return self.path_of(z, x, y).exists()
+
     def get(self, z: int, x: int, y: int) -> bytes | None:
-        """取瓦片字节；本地没有就下载。失败返回 None。"""
+        """取瓦片字节；优先查离线 MBTiles，其次查磁盘缓存，最后在线下载。"""
         n = 2 ** z
         if not (0 <= x < n) or not (0 <= y < n):
             return None
+        if self.mbtiles is not None:
+            mb = self.mbtiles.get_tile(z, x, y)
+            if mb is not None:
+                return mb
         p = self.path_of(z, x, y)
         if p.exists():
             try:
