@@ -26,7 +26,7 @@
 | 目录 | 内容 |
 |---|---|
 | `radarscope/` | Python 包：`core/` `drivers/` `ui/` `paths.py` |
-| `assets/` | `logo.png`（512 透明底）、`app.ico`（7 尺寸）、`demo.gif`（20 帧演示）；由 `tools/make_*.py` 生成 |
+| `assets/` | `logo.png`（512 透明底）、`app.ico`（7 尺寸）、`demo-v1.1.gif`（20 帧演示）；由 `tools/make_*.py` 生成 |
 | `dist/Lookout/` | 打包产物：`Lookout.exe` + `_internal/` + `plugins/`。可删，重打包生成 |
 | `data/` | 运行时生成，**不进版本库**：见下表 |
 | `plugins/` | 用户插件目录，丢 `.py` 即生效 |
@@ -204,7 +204,7 @@
 | [ROADMAP.md](ROADMAP.md) | 开发计划与未来路线图（阶段 A~F） | 查看已落地能力与后续排期 |
 | [ADR/0001-language-choice.md](ADR/0001-language-choice.md) | 技术栈选型依据（Python + PyQt5 + NumPy 性能剖析） | — |
 | [ADR/0002-product-positioning.md](ADR/0002-product-positioning.md) | 产品定位与取舍原则 | — |
-| `screenshot.png` | 主界面展示截图 | 用于 README 展示 |
+| `screenshot-v1.1.png` | 最新主界面展示截图 | 用于 README 展示 |
 
 ---
 
@@ -223,7 +223,7 @@
 | 路径 | 说明 |
 |---|---|
 | `build/` | PyInstaller 编译临时缓存，可随时删除 |
-| `dist/Lookout/` | `pyinstaller --noconfirm --clean installer/Lookout.spec` 打包产物 |
+| `dist/Lookout/` | Windows 便携可执行版（`Lookout.exe` + `_internal/` + `plugins/`），已随仓库提供以便克隆/下载即用，也可用 `installer/Lookout.spec` 重建 |
 | `data/` | 开发期运行时数据（SQLite、帧归档、`rules.json`、`custom_drivers.json`）；打包版位于 `%LOCALAPPDATA%\Lookout\data` |
 | `data/tiles/` | 地图瓦片磁盘缓存（上限 200 MB 自动清理） |
 | `__pycache__/` | Python 字节码缓存，可随时删除 |

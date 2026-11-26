@@ -9,9 +9,9 @@
 支持毫米波 / 激光雷达 / 超声波 / 多站融合 / AIS / 联网地图，
 一个界面覆盖从"刚焊好板子想看看有没有回波"到"多传感器组网监控"的全过程。
 
-![界面](docs/screenshot.png)
+![界面](docs/screenshot-v1.1.png)
 
-![扫描演示](assets/demo.gif)
+![扫描演示](assets/demo-v1.1.gif)
 
 </div>
 
@@ -48,11 +48,12 @@
 
 ## 快速开始
 
-### 直接用（推荐）
+### 直接用（推荐，无需安装 Python）
 
-前往 [GitHub Releases](https://github.com/sun2006-xin/lookout-radar/releases/latest) 下载 `Lookout-v1.1.0-win64.zip`，解压后直接双击 `Lookout.exe` 即可运行，不需要装 Python。
+- **方式一（克隆 / 下载仓库 ZIP 即用）**：克隆本仓库或点击 GitHub 页面右上角 `Code → Download ZIP` 解压后，直接双击运行仓库内的 **`dist/Lookout/Lookout.exe`**。
+- **方式二（Release 独立压缩包）**：前往 [GitHub Releases](https://github.com/sun2006-xin/lookout-radar/releases/latest) 下载 `Lookout-v1.1.1-win64.zip`，解压后双击 `Lookout.exe` 即可运行。
 
-首次打开选 **数据源 → 模拟与演示 → 模拟器 · 合成雷达**，点「连接」，立刻能看到效果。
+首次打开默认进入 **数据源 → 模拟与演示 → 模拟器 · 合成雷达**，点击「连接」即可看到动态扫描与航迹；可在顶栏 **`场景`** 一键切换航海轮船避碰、车载 77G、低空无人机或教学电子战干扰模式。
 
 ### 从源码跑
 

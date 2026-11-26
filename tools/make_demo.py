@@ -22,7 +22,7 @@ from PyQt5.QtWidgets import QApplication                      # noqa: E402
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))          # 从 tools/ 直接跑时项目根不在 path
-OUT = ROOT / "assets" / "demo.gif"
+OUT = ROOT / "assets" / "demo-v1.1.gif"
 FRAMES = 20
 
 
@@ -40,6 +40,7 @@ def main() -> int:
     import radarscope.drivers  # noqa: F401
     from radarscope.core.driver import available_drivers
     from radarscope.core.pipeline import detect_targets
+    from radarscope.core.tracker import Tracker
     from radarscope.ui.ppi import PPIWidget
     from radarscope.ui.theme import DEFAULT_PALETTE, build_stylesheet
 
@@ -50,6 +51,7 @@ def main() -> int:
     d = available_drivers()["sim"]()
     d.open(mode="staring")
     caps = d.capabilities()
+    tracker = Tracker()
 
     w = PPIWidget()
     w.resize(560, 560)
@@ -66,7 +68,8 @@ def main() -> int:
                 break
             time.sleep(0.01)
         if f is not None:
-            tracks = detect_targets(f, threshold=0.30, max_targets=8)
+            raw = detect_targets(f, threshold=0.30, max_targets=8)
+            tracks = tracker.update(raw, 0.12, -1)
             w.push_frame(f, tracks)
         app.processEvents()
 
