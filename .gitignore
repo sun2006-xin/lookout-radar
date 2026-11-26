@@ -21,6 +21,7 @@ data/
 *.db-wal
 *.log
 *.rad
+!tests/fixtures/*.rad
 capture*.bin
 tiles/
 
