@@ -466,6 +466,29 @@ class ElectronicStation:
                 scan = np.maximum(scan, (0.50 + 0.40 * jsr) * np.outer(prof_a, prof_r))
         frame.scan = np.clip(scan, 0.0, 1.0)
 
+    @staticmethod
+    def _stamp_targets(
+        scan: np.ndarray,
+        az_axis: np.ndarray,
+        r_axis: np.ndarray,
+        caps: Capabilities,
+        targets: list[Target],
+    ) -> np.ndarray:
+        sigma_r = max(0.10, (caps.range_max - caps.range_min) / max(1, r_axis.size) * 1.2)
+        sigma_a = math.radians(3.5)
+        for t in targets:
+            r0 = t.rng
+            if r0 < caps.range_min * 0.5 or r0 > caps.range_max * 1.02:
+                continue
+            prof_r = np.exp(-0.5 * ((r_axis - r0) / sigma_r) ** 2).astype(np.float32)
+            if az_axis.size == 1:
+                scan[0] = np.maximum(scan[0], t.snr * prof_r)
+            else:
+                da = (az_axis - t.az + math.pi) % (2 * math.pi) - math.pi
+                prof_a = np.exp(-0.5 * (da / sigma_a) ** 2).astype(np.float32)
+                scan = np.maximum(scan, t.snr * np.outer(prof_a, prof_r))
+        return scan
+
     def merge_into_frame(
         self,
         frame: RadarFrame,
@@ -484,8 +507,10 @@ class ElectronicStation:
         )
         if exclusive_sim and frame.az_axis is not None and frame.r_axis is not None:
             frame.targets = list(v_targets)
-            syn = pipeline.synthesize_scan(caps, v_targets, az_axis=frame.az_axis, r_axis=frame.r_axis)
-            scan = syn.scan.astype(np.float32, copy=True) if syn.scan is not None else np.zeros_like(frame.scan)
+            frame.r_axis = np.linspace(caps.range_min, caps.range_max, frame.r_axis.size, dtype=np.float32)
+            base_shape = frame.scan.shape if frame.scan is not None else (frame.az_axis.size, frame.r_axis.size)
+            scan = self._np_rng.uniform(0.0, 0.03, size=base_shape).astype(np.float32)
+            scan = self._stamp_targets(scan, frame.az_axis, frame.r_axis, caps, v_targets)
             # 按场景叠加真实背景先验特征：航海近距海浪、低空地形地物回波、车载静噪
             if self.scenario == "marine":
                 sea = np.exp(-((frame.r_axis - caps.range_min) / max(1.0, caps.range_max * 0.11)) ** 2).astype(np.float32)
@@ -508,19 +533,7 @@ class ElectronicStation:
             frame.targets = list(frame.targets) + v_targets
             if frame.has_scan and frame.az_axis is not None and frame.r_axis is not None:
                 scan = frame.scan.astype(np.float32, copy=True)
-                sigma_r = max(0.10, (caps.range_max - caps.range_min) / max(1, frame.r_axis.size) * 1.2)
-                sigma_a = math.radians(3.5)
-                for t in v_targets:
-                    r0 = t.rng
-                    if r0 < caps.range_min * 0.5 or r0 > caps.range_max * 1.02:
-                        continue
-                    prof_r = np.exp(-0.5 * ((frame.r_axis - r0) / sigma_r) ** 2).astype(np.float32)
-                    if frame.az_axis.size == 1:
-                        scan[0] = np.maximum(scan[0], t.snr * prof_r)
-                    else:
-                        da = (frame.az_axis - t.az + math.pi) % (2 * math.pi) - math.pi
-                        prof_a = np.exp(-0.5 * (da / sigma_a) ** 2).astype(np.float32)
-                        scan = np.maximum(scan, t.snr * np.outer(prof_a, prof_r))
+                scan = self._stamp_targets(scan, frame.az_axis, frame.r_axis, caps, v_targets)
                 frame.scan = np.clip(scan, 0.0, 1.0)
 
         if self.jam_mode != "none":

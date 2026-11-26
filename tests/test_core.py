@@ -1668,6 +1668,20 @@ def test_workspace_docks_canvas_edit_and_i18n() -> None:
         assert abs(w.range_spin.value() - 150.0) < 1e-3
         assert not w.rhiscope.isHidden() and not w.dock_zones.isHidden() and not w.scene_banner.isHidden()
 
+        # 显式验证 drone 专有场景实时合帧（含 RHI 高度投影 + 150m r_axis 重标定）不会抛出异常
+        from radarscope.drivers.simulator import SimulatorDriver
+        sim_d = SimulatorDriver()
+        sim_d.open(mode="rhi_3d")
+        fr_d = None
+        dl_d = time.monotonic() + 0.5
+        while fr_d is None and time.monotonic() < dl_d:
+            time.sleep(0.02)
+            fr_d = sim_d.read()
+        sim_d.close()
+        assert fr_d is not None
+        merged_d = w.sim_station.merge_into_frame(fr_d, w.caps, 0.05)
+        assert float(merged_d.r_axis[-1]) > 100.0 and len(merged_d.targets) == 2 and any(t.z > 5.0 for t in merged_d.targets)
+
         w._set_jam_mode("isrj")
         _app.processEvents()
         assert not w.dock_ew.isHidden()
