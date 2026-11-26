@@ -55,17 +55,17 @@
 ### 从源码跑
 
 ```bat
-1-安装依赖.bat
+.venv\Scripts\python.exe -m pip install -r requirements.txt
 .venv\Scripts\python.exe main.py
 ```
 
 ### 打包成 exe
 
 ```bat
-2-打包EXE.bat
+.venv\Scripts\pyinstaller.exe --noconfirm --clean --windowed --name Lookout --icon assets/app.ico --collect-submodules radarscope main.py
 ```
 
-脚本打完会自动跑一次 `--selftest`（**不开窗口**）验证产物，失败即中止。
+打完后跑一次 `dist\Lookout\Lookout.exe --selftest`（**不开窗口**）验证产物。
 
 ## 接自己的设备
 

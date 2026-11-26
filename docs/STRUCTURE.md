@@ -14,9 +14,7 @@
 | 文件 | 具体职责 | 改动注意 |
 |---|---|---|
 | `main.py` | 程序入口：日志初始化、全局异常兜底、`--selftest` 分支、创建 QApplication 与 MainWindow、套用上次主题 | `--selftest` **不创建窗口**，靠退出码表达成败；自检逻辑已抽到 `core/selftest.py` |
-| `selftest.py` | 独立的无界面自检脚本（历史入口，链路验证） | 与 `main.py --selftest` 有重叠，新代码优先用 `core/selftest.py` |
-| `1-安装依赖.bat` | 首次使用：建 `.venv`、装 `requirements.txt` | Windows 批处理，CRLF |
-| `2-打包EXE.bat` | 重新打包：检查占用 → PyInstaller `--name Lookout --icon assets/app.ico` → 拷插件 → **跑 `--selftest` 验证** | 程序开着会 `Permission denied`，先关窗口 |
+| `selftest.py` | 独立的无界面自检脚本（链路验证） | 与 `main.py --selftest` 有重叠，新代码优先用 `core/selftest.py` |
 | `requirements.txt` | 运行时依赖（PyQt5 / numpy / pyserial；`bleak` 可选） | 新依赖必须确认能进 PyInstaller 包体 |
 | `requirements-dev.txt` | 仅文档/开发工具：Pillow（动图）、PyInstaller | **不要**和运行依赖混在一起 |
 | `README.md` | 项目门面：Logo、动图、特性表、快速开始、设备表、转发协议、插件、文档索引 | 已知限制与路线图要跟代码同步 |

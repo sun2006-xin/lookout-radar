@@ -84,6 +84,24 @@ def build(target: Path, workdir: Path, icon: Path) -> bytes:
     return header + link_info + strings + terminal
 
 
+def create_via_com(out: Path, target: Path, workdir: Path, icon: Path) -> bool:
+    """优先用 WScript.Shell 生成标准快捷方式（含完整 IDList，资源管理器100%可打开）。"""
+    import subprocess
+
+    ps = (
+        f"$s = (New-Object -ComObject WScript.Shell).CreateShortcut('{out}');"
+        f"$s.TargetPath = '{target}';"
+        f"$s.WorkingDirectory = '{workdir}';"
+        f"$s.IconLocation = '{icon},0';"
+        "$s.Save()"
+    )
+    r = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", ps],
+        capture_output=True, text=True, timeout=10,
+    )
+    return r.returncode == 0 and out.exists()
+
+
 def main() -> int:
     for p in (TARGET, ICON):
         if not p.exists():
@@ -91,7 +109,8 @@ def main() -> int:
             return 1
     DESKTOP.mkdir(parents=True, exist_ok=True)
     out = DESKTOP / "瞭望 Lookout.lnk"
-    out.write_bytes(build(TARGET, WORKDIR, ICON))
+    if not create_via_com(out, TARGET, WORKDIR, ICON):
+        out.write_bytes(build(TARGET, WORKDIR, ICON))
     print(f"已写入 {out} ({out.stat().st_size} bytes)")
     return 0
 
