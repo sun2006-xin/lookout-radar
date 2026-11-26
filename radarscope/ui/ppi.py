@@ -16,7 +16,7 @@ from math import atan2, cos, degrees, exp, hypot, radians, sin, sqrt
 
 import numpy as np
 from PyQt5.QtCore import QPointF, QRectF, Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPolygonF
+from PyQt5.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PyQt5.QtWidgets import QMenu, QSizePolicy, QWidget
 
 from ..core.model import Capabilities, RadarFrame, Target
@@ -110,6 +110,8 @@ class PPIWidget(QWidget):
         self.true_motion = False
         #: AIS 目标（本地米制坐标 + 名称）
         self.map_layer = None      # 由主窗口注入，需提供 image/mpp/anchor_px
+        self._map_pix_cache: QPixmap | None = None
+        self._map_pix_key: tuple | None = None
         self._ais: list[tuple[float, float, str, float]] = []
         self.show_ais = True
         self._sweep_az: float | None = None
@@ -1196,13 +1198,22 @@ class PPIWidget(QWidget):
                 w = img.width() * mpp * scale
                 h = img.height() * mpp * scale
                 ax, ay = getattr(m, "anchor_px", (img.width() / 2, img.height() / 2))
+                m_rev = int(getattr(m, "revision", 0))
+                w_i = max(8, min(2048, int(round(w))))
+                h_i = max(8, min(2048, int(round(h))))
+                cache_key = (id(img), m_rev, w_i, h_i)
+                if self._map_pix_key != cache_key or self._map_pix_cache is None:
+                    self._map_pix_cache = QPixmap.fromImage(
+                        img.scaled(w_i, h_i, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+                    )
+                    self._map_pix_key = cache_key
 
                 p.save()
                 p.translate(cx, cy)
                 p.rotate(-self._heading_deg)
                 p.translate(-cx, -cy)
                 p.setOpacity(0.9)
-                p.drawImage(QRectF(cx - ax * mpp * scale, cy - ay * mpp * scale, w, h), img)
+                p.drawPixmap(QRectF(cx - ax * mpp * scale, cy - ay * mpp * scale, w, h), self._map_pix_cache, QRectF(0, 0, w_i, h_i))
                 p.setOpacity(1.0)
                 p.restore()
 

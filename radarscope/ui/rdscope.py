@@ -20,8 +20,8 @@ from .theme import PALETTES, color_table, mono_font
 class RDScopeWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumHeight(160)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setMinimumHeight(115)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._rd: np.ndarray | None = None
         self._v: np.ndarray | None = None
         self._r: np.ndarray | None = None

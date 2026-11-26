@@ -21,8 +21,8 @@ class RHIScopeWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumHeight(155)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setMinimumHeight(115)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._caps = Capabilities()
         self._rhi: np.ndarray | None = None
         self._el_axis: np.ndarray | None = None
@@ -32,7 +32,7 @@ class RHIScopeWidget(QWidget):
         self._ctable = self._ctable_for(DEFAULT_PALETTE)
         self.z_max: float = 6.0
         self.z_filter_min: float = -2.0
-        self.z_filter_max: float = 100.0
+        self.z_filter_max: float = 200.0
 
     @staticmethod
     def _ctable_for(name: str) -> list[int]:
@@ -53,6 +53,18 @@ class RHIScopeWidget(QWidget):
         self.z_max = max(2.0, round(caps.range_max * 0.75, 1))
         self.reset()
 
+    def set_range(self, range_max: float) -> None:
+        rmax = max(0.5, float(range_max))
+        self._caps = Capabilities(
+            source=self._caps.source, form=self._caps.form, vendor=self._caps.vendor,
+            range_min=self._caps.range_min, range_max=rmax, az_fov=self._caps.az_fov,
+            has_scan=self._caps.has_scan, has_velocity=self._caps.has_velocity,
+            has_range_doppler=self._caps.has_range_doppler, has_elevation=self._caps.has_elevation,
+            max_targets=self._caps.max_targets,
+        )
+        self.z_max = max(2.0, round(rmax * 0.5, 1))
+        self.update()
+
     def set_height_filter(self, z_min: float, z_max: float) -> None:
         self.z_filter_min = float(z_min)
         self.z_filter_max = float(z_max)
@@ -68,6 +80,9 @@ class RHIScopeWidget(QWidget):
         self._el_axis = frame.el_axis
         self._r_axis = frame.r_axis
         self._tracks = list(tracks if tracks is not None else frame.targets)
+        max_z = max((float(getattr(t, "z", 0.0)) for t in self._tracks), default=0.0)
+        if max_z > self.z_max * 0.92:
+            self.z_max = round(max(self.z_max, max_z * 1.25), 1)
         self.update()
 
     def paintEvent(self, _ev) -> None:

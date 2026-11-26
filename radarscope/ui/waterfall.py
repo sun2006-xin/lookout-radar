@@ -32,8 +32,8 @@ class WaterfallWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumHeight(150)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setMinimumHeight(96)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._history: deque[dict[int, float]] = deque(maxlen=self.ROWS)
         self._palette_name = "green"
         self._range_max = 6.0

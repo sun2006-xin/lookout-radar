@@ -1637,7 +1637,8 @@ def test_workspace_docks_canvas_edit_and_i18n() -> None:
 
     settings = QSettings("RadarScope", "Console")
     saved_keys = ("cfar_mode", "clutter_suppress", "filter_mode", "assoc_mode",
-                  "confirm_hits", "confirm_window", "sim_mode", "driver", "lang")
+                  "confirm_hits", "confirm_window", "sim_mode", "driver", "lang",
+                  "land_mask", "ais_lat", "ais_lon", "map_provider", "map_user_pinned")
     prev = {k: settings.value(k) for k in saved_keys}
     _app = QApplication.instance() or QApplication([])
     w = MainWindow()
@@ -1666,7 +1667,27 @@ def test_workspace_docks_canvas_edit_and_i18n() -> None:
         assert w._cfar_mode == "auto" and w.clutter_map.enabled
         assert w.tracker.filter_mode == "imm3d" and w.tracker.confirm_hits == 3
         assert abs(w.range_spin.value() - 150.0) < 1e-3
+        assert w.rhiscope.z_max >= 50.0, f"drone 量程下 RHI 高度轴未联动放大: {w.rhiscope.z_max}"
+        assert w.tabs.height() >= 180, f"右侧航迹页签被上方波形图挤压过扁: {w.tabs.height()}"
         assert not w.rhiscope.isHidden() and not w.dock_zones.isHidden() and not w.scene_banner.isHidden()
+
+        # 验证航海模拟默认零延迟矢量海图（非海外城市街道）且切回其他场景自动关闭底图，以及浮动 Dock 标题栏与归位保护
+        w._apply_scenario("marine")
+        _app.processEvents()
+        assert w.map_layer is not None and w.map_layer.enabled and w.map_layer.synthetic_sea
+        assert abs(w._ais_ref[0] - 30.085) < 0.05 and abs(w._ais_ref[1] - 122.42) < 0.05
+        w._apply_scenario("drone")
+        _app.processEvents()
+        assert w.map_layer is not None and not w.map_layer.enabled, "从航海切到无人机应自动关闭海图底图"
+        assert not w.land_mask.enabled
+
+        # 浮动 Dock 自动恢复标题栏且归位动作能正常收回右侧停靠区
+        w.dock_scope.setFloating(True)
+        _app.processEvents()
+        assert w.dock_scope.titleBarWidget() is None, "浮动 Dock 必须恢复原生标题栏以便拖回"
+        w._redock_all_panels()
+        _app.processEvents()
+        assert not w.dock_scope.isFloating(), "一键归位应收回浮动 Dock"
 
         # 显式验证 drone 专有场景实时合帧（含 RHI 高度投影 + 150m r_axis 重标定）不会抛出异常
         from radarscope.drivers.simulator import SimulatorDriver
@@ -1682,19 +1703,30 @@ def test_workspace_docks_canvas_edit_and_i18n() -> None:
         merged_d = w.sim_station.merge_into_frame(fr_d, w.caps, 0.05)
         assert float(merged_d.r_axis[-1]) > 100.0 and len(merged_d.targets) == 2 and any(t.z > 5.0 for t in merged_d.targets)
 
+        # 电子战独立场景：开启/面板切回 none 时自动关闭电子战控制台，切至其他场景不串台
+        w._apply_scenario("ew")
+        _app.processEvents()
+        assert w.sim_station.scenario == "ew" and w.sim_station.jam_mode != "none" and not w.dock_ew.isHidden()
         w._set_jam_mode("isrj")
         _app.processEvents()
         assert not w.dock_ew.isHidden()
         assert w.ew_widget.minimumSizeHint().width() <= 450, (
             f"电子战控制台最小宽度过大导致右侧裁切: {w.ew_widget.minimumSizeHint().width()}"
         )
+        w.ew_widget.jamModeSelected.emit("none")
+        _app.processEvents()
+        assert w.dock_ew.isHidden() and w.sim_station.jam_mode == "none" and w.sim_station.scenario == "none"
 
         # 验证 20km 相控阵 + 箔条云干扰不再发生门限过小导致的 54 目标碎裂爆表
+        w._disconnect("")
+        _app.processEvents()
         from radarscope.drivers.sim_aesa import AesaSimDriver
         aesa = AesaSimDriver()
         aesa.open()
         w._apply_caps(aesa.capabilities())
         w._set_jam_mode("chaff")
+        w._disconnect("")
+        _app.processEvents()
         for _ in range(10):
             fr_a = None
             dl = time.monotonic() + 0.5

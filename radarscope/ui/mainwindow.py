@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (
     QAction, QActionGroup, QApplication, QComboBox, QDialog, QDockWidget,
     QDoubleSpinBox, QFormLayout, QFrame, QHBoxLayout,
     QLabel, QDialogButtonBox, QMainWindow, QMenu, QMessageBox, QPushButton,
-    QShortcut, QSizePolicy, QTabWidget,
+    QScrollArea, QShortcut, QSizePolicy, QSplitter, QTabWidget,
     QToolBar, QVBoxLayout, QWidget,
 )
 
@@ -139,6 +139,7 @@ class MainWindow(ConnectionController, ExportController,
         self.nmea_nav = NmeaOwnShip()
         self._ais_ref = (39.9, 116.4)
         self._map_provider = "auto"
+        self._map_user_pinned = bool(self.settings.value("map_user_pinned", False, type=bool))
         self._mbtiles_path = ""
         self._nmea_enabled = False
         self._nmea_port = 10111
@@ -151,9 +152,11 @@ class MainWindow(ConnectionController, ExportController,
         self.clutter_map.enabled = bool(self.settings.value("clutter_suppress", False, type=bool))
         self.land_mask = pipeline.LandMask()
         self.land_mask.enabled = bool(self.settings.value("land_mask", False, type=bool))
+        self._land_mask_key: tuple | None = None
         # 联网地图（懒创建，只在开启时建）
         self.map_layer: MapLayer | None = None
         self._map_t = 0.0
+        self._map_prune_t = 0.0
         # 真运动：本舰累计位移与上一帧时间
         self._own_x = 0.0
         self._own_y = 0.0
@@ -200,17 +203,39 @@ class MainWindow(ConnectionController, ExportController,
         right.setMinimumWidth(460)
         rv = QVBoxLayout(right)
         rv.setContentsMargins(6, 6, 6, 6)
-        rv.setSpacing(8)
-        rv.addWidget(self.ascope)
-        rv.addWidget(self.rdscope)
-        rv.addWidget(self.rhiscope)
-        rv.addWidget(self.waterfall)
+        rv.setSpacing(0)
+
+        scopes_host = QWidget()
+        sv = QVBoxLayout(scopes_host)
+        sv.setContentsMargins(0, 0, 0, 0)
+        sv.setSpacing(6)
+        sv.addWidget(self.ascope, 1)
+        sv.addWidget(self.rdscope, 1)
+        sv.addWidget(self.rhiscope, 1)
+        sv.addWidget(self.waterfall, 1)
+
+        scopes_scroll = QScrollArea()
+        scopes_scroll.setWidgetResizable(True)
+        scopes_scroll.setFrameShape(QFrame.NoFrame)
+        scopes_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scopes_scroll.setWidget(scopes_host)
+        scopes_scroll.setMinimumHeight(140)
+
         self.tabs = QTabWidget()
+        self.tabs.setMinimumHeight(190)
         self.tabs.addTab(self.table, "航迹")
         self.tabs.addTab(self.sensors_panel, "传感器")
         self.tabs.addTab(self.log, "事件")
         self.tabs.addTab(self.history, "历史")
-        rv.addWidget(self.tabs, 1)
+
+        self._right_splitter = QSplitter(Qt.Vertical)
+        self._right_splitter.setChildrenCollapsible(False)
+        self._right_splitter.addWidget(scopes_scroll)
+        self._right_splitter.addWidget(self.tabs)
+        self._right_splitter.setStretchFactor(0, 3)
+        self._right_splitter.setStretchFactor(1, 2)
+        self._right_splitter.setSizes([340, 260])
+        rv.addWidget(self._right_splitter, 1)
 
         ppi_card = QFrame()
         ppi_card.setObjectName("panelCard")
@@ -254,6 +279,7 @@ class MainWindow(ConnectionController, ExportController,
         self.ew_widget = SimStationWidget(self.sim_station, 6.0, show_done=False, parent=self)
         self.ew_widget.changed.connect(self._on_sim_station_changed)
         self.ew_widget.scenarioSelected.connect(lambda sc: self._apply_scenario(sc))
+        self.ew_widget.jamModeSelected.connect(self._on_ew_panel_jam_selected)
         self.ew_widget.exitToNormalRequested.connect(self._exit_scenario_to_classic)
         self.dock_ew = QDockWidget("电子战与场景控制台", self)
         self.dock_ew.setObjectName("dock_ew")
@@ -296,6 +322,9 @@ class MainWindow(ConnectionController, ExportController,
         self.dock_near.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock_near)
         self.dock_near.hide()
+
+        for dk in (self.dock_scope, self.dock_ew, self.dock_zones, self.dock_near):
+            dk.topLevelChanged.connect(lambda _f, d=dk: self._on_dock_top_level_changed(d))
 
         tb = QToolBar()
         tb.setMovable(False)
@@ -415,17 +444,19 @@ class MainWindow(ConnectionController, ExportController,
         scene_btn_menu.addAction("日常雷达监控（关闭全部场景与干扰）", self._exit_scenario_to_classic)
         scene_btn_menu.addSeparator()
         for sc_k, sc_t, sc_r in (
-            ("marine", "航海轮船避碰（2 km 海图 + AIS + GO-CFAR）", 2000.0),
+            ("marine", "航海轮船避碰（2 km 矢量海图 + AIS + GO-CFAR）", 2000.0),
             ("automotive", "车载 77G 前向交通（80 m 凝视 + OS-CFAR）", 80.0),
             ("drone", "低空无人机 3D 防护（150 m RHI + IMM3D + 防区）", 150.0),
             ("crossing", "多目标交叉关联（GNN 匹配 + 2σ 椭圆）", 0.0),
             ("approach", "高速逼近 / 防撞告警演练", 0.0),
             ("patrol", "动态巡逻仿真（随机生成目标）", 0.0),
+            ("ew", "电子战对抗演练（展开 EW 控制台与烧穿对比）", 20000.0),
         ):
             scene_btn_menu.addAction(sc_t, lambda _c=False, k=sc_k, r=sc_r: self._apply_scenario(k, r))
         scene_btn_menu.addSeparator()
-        m_btn_ew = scene_btn_menu.addMenu("电子战干扰对比（展开 EW 控制台）")
+        m_btn_ew = scene_btn_menu.addMenu("快速直选电子战干扰样式")
         for jk, jt in (
+            ("none", "关闭干扰（退出电子战）"),
             ("barrage", "宽带噪声压制"),
             ("spot", "瞄准扇区压制"),
             ("drfm", "DRFM 多假目标"),
@@ -611,6 +642,7 @@ class MainWindow(ConnectionController, ExportController,
             ("patrol", "随机出现与巡逻（动态生成/离开）", 0.0),
             ("approach", "高速逼近 / 防撞告警演练", 0.0),
             ("crossing", "多目标交叉会遇（航迹关联测试）", 0.0),
+            ("ew", "电子战对抗演练场景（20 km · 展开 EW 控制台）", 20000.0),
         ):
             act = QAction(title, self)
             act.setCheckable(True)
@@ -623,12 +655,12 @@ class MainWindow(ConnectionController, ExportController,
             m_scene.addAction(act)
             self._scene_actions[key] = act
         m_scene.addSeparator()
-        m_ew = m_scene.addMenu("军方 / 教学电子战干扰样式")
+        m_ew = m_scene.addMenu("电子战干扰样式（自动切换电子战场景）")
         ew_grp = QActionGroup(self)
         ew_grp.setExclusive(True)
         self._ew_actions: dict[str, QAction] = {}
         for key, title in (
-            ("none", "关闭干扰（正常信号）"),
+            ("none", "关闭干扰（退出电子战）"),
             ("barrage", "宽带噪声压制（演练烧穿距离）"),
             ("spot", "瞄准扇区压制（指定方位干扰）"),
             ("drfm", "DRFM 多假目标欺骗"),
@@ -690,11 +722,14 @@ class MainWindow(ConnectionController, ExportController,
         ):
             m_layout.addAction(pname, lambda _c=False, k=pkey: self._apply_workspace_preset(k))
         m_layout.addSeparator()
+        m_layout.addAction("全部浮动面板归位右侧", self._redock_all_panels)
         m_layout.addAction("重置默认布局", lambda: self._apply_workspace_preset("full"))
 
         m_docks = m_view.addMenu("停靠面板")
         for dk in (self.dock_scope, self.dock_ew, self.dock_zones, self.dock_near):
             m_docks.addAction(dk.toggleViewAction())
+        m_docks.addSeparator()
+        m_docks.addAction("全部面板归位右侧", self._redock_all_panels)
         m_view.addSeparator()
         for text, w in (("A 显", self.ascope), ("瀑布图", self.waterfall),
                         ("距离-多普勒", self.rdscope), ("3D 俯仰 RHI", self.rhiscope),
@@ -848,7 +883,17 @@ class MainWindow(ConnectionController, ExportController,
         if not self.sim_station.active():
             self.dock_ew.hide()
             self.dock_zones.hide()
+        # 防止之前意外把主波形/航迹台拖成居中悬空浮动框导致无法操作或重启仍卡在中间
+        for dk in (self.dock_scope, self.dock_ew, self.dock_zones, self.dock_near):
+            if dk.isFloating():
+                dk.setTitleBarWidget(None)
+        if self.dock_scope.isFloating() and not self.sim_station.active():
+            self._redock_all_panels()
+        else:
             self._sync_dock_chrome()
+        sp_state = self.settings.value("rightSplitterState")
+        if sp_state is not None and hasattr(self, "_right_splitter"):
+            self._right_splitter.restoreState(sp_state)
         # 防止恢复后的窗口高度/宽度超出桌面可用工作区，避免底部状态栏被任务栏挡住或挤压
         scr = QGuiApplication.primaryScreen()
         if scr is not None and not self.isMaximized():
@@ -901,6 +946,9 @@ class MainWindow(ConnectionController, ExportController,
     def _save(self) -> None:
         self.settings.setValue("geometry", self.saveGeometry())
         self.settings.setValue("windowState", self.saveState())
+        if hasattr(self, "_right_splitter"):
+            self.settings.setValue("rightSplitterState", self._right_splitter.saveState())
+        self.settings.setValue("map_user_pinned", bool(self._map_user_pinned))
         self.settings.setValue("palette", self.pal_combo.currentData())
         self.settings.setValue("driver", self.drv_combo.currentData())
         self.settings.setValue("endpoint", self.endpoint_combo.currentText())
@@ -962,9 +1010,29 @@ class MainWindow(ConnectionController, ExportController,
         self._update_status_telemetry()
         self.log.push("ok", f"跟踪引擎已切换：{filter_mode} · {assoc_mode.upper()} · 起批 {confirm_hits}/{confirm_window}")
 
+    def _on_dock_top_level_changed(self, dock: QDockWidget) -> None:
+        """任一面板被拖出浮动时立即恢复原生标题栏，确保随时可拖回停靠或双击归位。"""
+        if dock.isFloating():
+            dock.setTitleBarWidget(None)
+        elif dock is self.dock_scope:
+            self._sync_dock_chrome()
+
+    def _redock_all_panels(self) -> None:
+        """强制把所有（含意外拖出的）停靠面板归位到右侧停靠区，并恢复标准页签叠放。"""
+        for dk in (self.dock_scope, self.dock_ew, self.dock_zones, self.dock_near):
+            dk.setFloating(False)
+            self.addDockWidget(Qt.RightDockWidgetArea, dk)
+        self.tabifyDockWidget(self.dock_scope, self.dock_ew)
+        self.tabifyDockWidget(self.dock_scope, self.dock_zones)
+        self.dock_scope.show()
+        self.dock_scope.raise_()
+        if hasattr(self, "resizeDocks"):
+            self.resizeDocks([self.dock_scope], [480], Qt.Horizontal)
+        self._sync_dock_chrome()
+
     def _apply_workspace_preset(self, preset: str) -> None:
         """一键切换停靠面板与工作区布局预设，兼顾极简监视/电子战教学/多站排障。"""
-        self.dock_scope.show()
+        self._redock_all_panels()
         self.dock_ew.show()
         self.dock_zones.show()
         self.tabifyDockWidget(self.dock_scope, self.dock_ew)
@@ -1005,6 +1073,7 @@ class MainWindow(ConnectionController, ExportController,
         self._sync_tracker_scale(self.caps.range_max)
         self.ppi.set_capabilities(self.caps)
         self.waterfall.set_range(self.caps.range_max)
+        self.rhiscope.set_range(self.caps.range_max)
         if self.dock_near.isVisible():
             self._toggle_near(True)
 
@@ -1174,13 +1243,20 @@ class MainWindow(ConnectionController, ExportController,
 
         if self.land_mask.enabled and f.has_scan:
             if self.map_layer is not None and self.map_layer.enabled and self.map_layer.image is not None:
-                self.land_mask.update_from_map_rgb(
-                    self.map_layer.to_rgb_array(),
-                    self.map_layer.mpp,
-                    self.map_layer.anchor_px,
-                    f.az_axis, f.r_axis,
-                    float(self.heading_spin.value()),
+                lm_key = (
+                    int(getattr(self.map_layer, "revision", 0)),
+                    round(float(self.caps.range_max), 1),
+                    round(float(self.heading_spin.value()), 0),
                 )
+                if lm_key != self._land_mask_key:
+                    self._land_mask_key = lm_key
+                    self.land_mask.update_from_map_rgb(
+                        self.map_layer.to_rgb_array(),
+                        self.map_layer.mpp,
+                        self.map_layer.anchor_px,
+                        f.az_axis, f.r_axis,
+                        float(self.heading_spin.value()),
+                    )
             f = self.land_mask.apply(f)
 
         if self.clutter_map.enabled and f.has_scan:
@@ -1259,11 +1335,13 @@ class MainWindow(ConnectionController, ExportController,
                 self._own_y += vy * dt
                 self.ppi.set_origin(self._own_x, self._own_y)
 
-        # 地图：1 秒检查一次级别/中心是否要换，避免每帧都算
+        # 地图：1 秒检查一次级别/中心是否要换，60 秒才做一次磁盘缓存清理，避免每帧卡顿
         if (self.map_layer is not None and self.map_layer.enabled
                 and now - self._map_t > 1.0):
             self._map_t = now
-            self.map_layer.store.prune()
+            if now - self._map_prune_t > 60.0 and not getattr(self.map_layer, "synthetic_sea", False):
+                self._map_prune_t = now
+                self.map_layer.store.prune()
             self.map_layer.update_for(self._ais_ref[0], self._ais_ref[1],
                                       float(self.range_spin.value()),
                                       max(200, self.ppi.width()))
@@ -1455,7 +1533,7 @@ class MainWindow(ConnectionController, ExportController,
                 self.pal_combo.setCurrentIndex(i)
 
         enable_dark_titlebar(int(self.winId()), dark)
-        if self.map_layer is not None:
+        if self.map_layer is not None and not getattr(self.map_layer, "synthetic_sea", False):
             self.map_layer.set_provider(resolve_provider(self._map_provider, "dark" if dark else "light"))
         self._refresh_alarm_bar()
         self.log.push("info", f"主题：{THEMES[self._theme]['name']}")

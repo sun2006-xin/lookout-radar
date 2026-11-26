@@ -22,11 +22,15 @@ class SceneAndMapController:
     """场景 / 电子战 / 海图 / 定位控制器 mixin，运行时依附于 MainWindow 实例。"""
 
     def _sync_dock_chrome(self) -> None:
-        """只有常规波形台时隐藏多余的 Dock 标题栏；展开特定场景面板时恢复标签切换。"""
+        """只有常规波形台且未浮动时隐藏多余的 Dock 标题栏；浮动或展开场景面板时始终保留标题栏以便拖放归位。"""
         dock_scope = getattr(self, "dock_scope", None)
         dock_ew = getattr(self, "dock_ew", None)
         dock_zones = getattr(self, "dock_zones", None)
         if dock_scope is None:
+            return
+        if dock_scope.isFloating():
+            if dock_scope.titleBarWidget() is not None:
+                dock_scope.setTitleBarWidget(None)
             return
         extra_visible = bool(
             (dock_ew is not None and not dock_ew.isHidden())
@@ -51,8 +55,9 @@ class SceneAndMapController:
         sc = self.sim_station.scenario
         jm = self.sim_station.jam_mode
         if not banner_text:
-            if jm != "none":
-                banner_text = f"电子战对抗演练 ({jm.upper()}) · 已展开电子战控制台 · 可对比 CA / OS / GO-CFAR 与烧穿曲线"
+            if sc == "ew" or jm != "none":
+                jm_tag = jm.upper() if jm != "none" else "STANDBY"
+                banner_text = f"电子战对抗场景 ({jm_tag}) · 已展开电子战控制台 · 可对比 CA / OS / GO-CFAR 与烧穿曲线"
             elif sc != "none":
                 prof = recommended_profile(sc) or {}
                 banner_text = str(prof.get("banner") or f"当前场景：{sc}")
@@ -62,18 +67,19 @@ class SceneAndMapController:
 
     def _exit_scenario_to_classic(self) -> None:
         """一键退出专项场景/电子战，还原为日常纯净雷达显控界面。"""
-        if self.sim_station.jam_mode != "none":
-            self._set_jam_mode("none")
-        if self.sim_station.scenario != "none" or self.sim_station.objects:
-            self._apply_scenario("none")
-        else:
-            if hasattr(self, "dock_ew"):
-                self.dock_ew.hide()
-            if hasattr(self, "dock_zones"):
-                self.dock_zones.hide()
-            self._sync_dock_chrome()
-            self._update_scene_banner("")
-            self._sync_scene_ui()
+        self.sim_station.jam_mode = "none"
+        self.sim_station.fc_sim = False
+        self.sim_station._jam_t = 0.0
+        self._apply_scenario("none")
+        if hasattr(self, "_redock_all_panels"):
+            self._redock_all_panels()
+        if hasattr(self, "dock_ew"):
+            self.dock_ew.hide()
+        if hasattr(self, "dock_zones"):
+            self.dock_zones.hide()
+        self._sync_dock_chrome()
+        self._update_scene_banner("")
+        self._sync_scene_ui()
 
     def _ensure_sim_running(self, reason: str = "") -> bool:
         """若当前未连接且位于模拟源（或用户触发仿真场景），自动连接以消除「点了没画面」断层。"""
@@ -102,8 +108,9 @@ class SceneAndMapController:
             self.btn_scene.blockSignals(True)
             self.btn_scene.setChecked(on)
             self.btn_scene.blockSignals(False)
-            if jm != "none":
-                self.btn_scene.setText(f"干扰:{jm.upper()}")
+            if sc == "ew" or jm != "none":
+                tag = jm.upper() if jm != "none" else "EW"
+                self.btn_scene.setText(f"场景:电子战({tag})")
             elif sc != "none":
                 self.btn_scene.setText(f"场景:{sc}")
             elif self.sim_station.objects:
@@ -160,7 +167,46 @@ class SceneAndMapController:
 
     def _apply_scenario(self, key: str, suggested_range: float = 0.0) -> None:
         prof = recommended_profile(key)
+        want_drv = prof.get("sim_driver") if prof else None
         want_mode = prof.get("sim_mode") if prof else None
+
+        # 切换到非电子战场景时，彻底关闭上一场景残留的电子战干扰与控制台，各场景互斥干净
+        if key != "ew":
+            self.sim_station.jam_mode = "none"
+            self.sim_station.fc_sim = False
+            self.sim_station._jam_t = 0.0
+
+        if self.src_combo.currentData() == "sim":
+            cur_drv = self.drv_combo.currentData()
+            if want_drv and cur_drv != want_drv:
+                di = self.drv_combo.findData(want_drv)
+                if di >= 0:
+                    if str(self.mode_combo.currentData()) == "rhi_3d":
+                        mi = self.mode_combo.findData("rotating")
+                        if mi >= 0:
+                            self.mode_combo.blockSignals(True)
+                            self.mode_combo.setCurrentIndex(mi)
+                            self.mode_combo.blockSignals(False)
+                    self._ew_auto_switched_aesa = (want_drv == "sim_aesa")
+                    was_run = self.reader is not None
+                    if was_run:
+                        self._disconnect("")
+                    self.drv_combo.setCurrentIndex(di)
+                    if was_run:
+                        self._want_connect = True
+                        self._connect(silent=True)
+            elif not want_drv and getattr(self, "_ew_auto_switched_aesa", False):
+                self._ew_auto_switched_aesa = False
+                di = self.drv_combo.findData("sim")
+                if di >= 0 and cur_drv != "sim":
+                    was_run = self.reader is not None
+                    if was_run:
+                        self._disconnect("")
+                    self.drv_combo.setCurrentIndex(di)
+                    if was_run:
+                        self._want_connect = True
+                        self._connect(silent=True)
+
         if want_mode and self.src_combo.currentData() == "sim" and (
             self.drv_combo.currentData() != "sim" or str(self.mode_combo.currentData()) != want_mode
         ):
@@ -178,12 +224,16 @@ class SceneAndMapController:
         rng_hint = float(suggested_range or (prof["range_m"] if prof else 0.0))
         if rng_hint > 0.0 and not is_real_dev and abs(float(self.range_spin.value()) - rng_hint) > 1.0:
             self.range_spin.setValue(rng_hint)
+        elif key == "none" and not is_real_dev and float(self.range_spin.value()) > 100.0:
+            self.range_spin.setValue(float(getattr(self.caps, "range_max", 8.0) or 8.0))
         elif rng_hint > 0.0 and is_real_dev and key != "none":
             self.log.push(
                 "info",
                 f"当前连接真实硬件（量程 {self.range_spin.value():.1f}m），保持硬件物理尺度并在视场内叠加仿真",
             )
         self.sim_station.set_scenario(key, float(self.range_spin.value()))
+        if key == "ew" and self.sim_station.jam_mode == "none":
+            self.sim_station.jam_mode = str((prof or {}).get("default_jam") or "chaff")
 
         # 场景预设 <-> 检测算法 / 杂波抑制 / 跟踪滤波 / 专用面板 自动协同切换
         if prof is not None:
@@ -218,10 +268,27 @@ class SceneAndMapController:
                 self._set_ppi_flag("show_cov", bool(prof["show_cov"]))
             if "show_zones" in prof and prof["show_zones"] is not None and hasattr(self, "_set_ppi_flag"):
                 self._set_ppi_flag("show_zones", bool(prof["show_zones"]))
-            if "enable_map" in prof and (prof["enable_map"] or key == "none"):
+
+            # 航海模式若无真机定位与离线海图，优先切到海区航道与零延迟矢量海图（避免卡顿且不叠海外城镇街道）
+            prov_override = None
+            if (
+                bool(prof.get("enable_map"))
+                and not self._mbtiles_path
+                and not self._nmea_enabled
+                and not self.ais.running
+                and not getattr(self, "_map_user_pinned", False)
+            ):
+                if "marine_lat" in prof and "marine_lon" in prof:
+                    self._ais_ref = (float(prof["marine_lat"]), float(prof["marine_lon"]))
+                prov_override = str(prof.get("map_provider") or "marine_chart")
+
+            if "enable_map" in prof:
+                want_map = bool(prof["enable_map"])
                 cur_map = bool(self.map_layer is not None and self.map_layer.enabled)
-                if cur_map != bool(prof["enable_map"]):
-                    self._toggle_map(bool(prof["enable_map"]))
+                if want_map and (not cur_map or prov_override):
+                    self._toggle_map(True, provider_override=prov_override)
+                elif not want_map and cur_map:
+                    self._toggle_map(False)
             if "land_mask" in prof:
                 self._toggle_land_mask(bool(prof["land_mask"]))
 
@@ -289,29 +356,56 @@ class SceneAndMapController:
         self.log.push("ok", f"已标定传感器 S{idx + 1} 朝向 → {new_bearing:.1f}°")
 
     def _set_jam_mode(self, mode: str) -> None:
-        self.sim_station.jam_mode = mode
-        self.sim_station._jam_t = 0.0
-        if hasattr(self, "dock_ew"):
-            if mode != "none":
+        if mode != "none":
+            # 电子战统一作为独立专项场景显示：若此前处于航海/无人机等其他场景，先清理其专属地图/RHI 等外围状态
+            if self.sim_station.scenario != "ew":
+                cur_map = bool(self.map_layer is not None and self.map_layer.enabled)
+                if cur_map:
+                    self._toggle_map(False)
+                if self.land_mask.enabled:
+                    self._toggle_land_mask(False)
+                if self.drv_combo.currentData() == "sim" and str(self.mode_combo.currentData()) == "rhi_3d":
+                    self._set_sim_mode("rotating")
+                if hasattr(self, "dock_zones"):
+                    self.dock_zones.hide()
+                self.sim_station.set_scenario("ew", float(self.range_spin.value()))
+                self._sync_tracker_scale(self.caps.range_max)
+                self.tracker.configure(confirm_hits=2, confirm_window=4)
+            self.sim_station.jam_mode = mode
+            self.sim_station._jam_t = 0.0
+            if hasattr(self, "dock_ew"):
                 self.dock_ew.show()
                 self.dock_ew.raise_()
-            elif self.sim_station.scenario == "none":
-                self.dock_ew.hide()
-                if hasattr(self, "dock_scope"):
-                    self.dock_scope.show()
-                    self.dock_scope.raise_()
-            self._sync_dock_chrome()
-        self._sync_scene_ui()
-        if mode != "none":
+                self._sync_dock_chrome()
+            self._sync_scene_ui()
             self._ensure_sim_running(f"干扰:{mode.upper()}")
             m = compute_ew_metrics(
                 mode, self.sim_station.jam_jsr, float(self.range_spin.value()),
                 self.sim_station.jam_az_deg, self.sim_station.jam_bw_deg,
                 self.sim_station.eccm_agility,
             )
-            self.log.push("warn", f"电子战干扰已开启：{mode}（JSR {m['jsr_db']:+.1f} dB · 烧穿 {m['burn_through_m']:.1f} m）")
+            self.log.push("warn", f"已进入电子战场景（{mode} · JSR {m['jsr_db']:+.1f} dB · 烧穿 {m['burn_through_m']:.1f} m）")
         else:
-            self.log.push("info", "已关闭电子战干扰样式")
+            self.sim_station.jam_mode = "none"
+            self.sim_station.fc_sim = False
+            self.sim_station._jam_t = 0.0
+            if self.sim_station.scenario == "ew":
+                self.sim_station.scenario = "none"
+            if hasattr(self, "dock_ew"):
+                self.dock_ew.hide()
+            if hasattr(self, "dock_scope"):
+                self.dock_scope.show()
+                self.dock_scope.raise_()
+            self._sync_dock_chrome()
+            self._sync_scene_ui()
+            self.log.push("info", "已关闭电子战干扰并收起电子战控制台")
+
+    def _on_ew_panel_jam_selected(self, jm: str) -> None:
+        """电子战控制台内切换干扰样式：选回关闭干扰时自动收起 EW 台并还原日常视图。"""
+        if jm == "none":
+            self._set_jam_mode("none")
+        else:
+            self._set_jam_mode(jm)
 
     def _on_sim_station_changed(self) -> None:
         if (self.sim_station.scenario == "none"
@@ -326,7 +420,7 @@ class SceneAndMapController:
                 self.dock_scope.show()
                 self.dock_scope.raise_()
             self._sync_dock_chrome()
-        elif self.sim_station.jam_mode != "none" and hasattr(self, "dock_ew"):
+        elif (self.sim_station.scenario == "ew" or self.sim_station.jam_mode != "none") and hasattr(self, "dock_ew"):
             self.dock_ew.show()
             self._sync_dock_chrome()
         self._sync_scene_ui()
@@ -367,7 +461,7 @@ class SceneAndMapController:
             self._update_status_telemetry()
         self.log.push("info", "陆地静止杂波掩膜已开启" if on else "陆地静止杂波掩膜已关闭")
 
-    def _toggle_map(self, on: bool) -> None:
+    def _toggle_map(self, on: bool, provider_override: str | None = None) -> None:
         """联网/离线海图底图：按当前量程自动选瓦片级别，拿本船/中心坐标当原点。"""
         act = getattr(self, "act_map", None)
         if act is not None and act.isChecked() != bool(on):
@@ -378,16 +472,17 @@ class SceneAndMapController:
             if self.map_layer is None:
                 self.map_layer = MapLayer(paths.data_dir() / "tiles", self)
                 self.map_layer.ready.connect(self.ppi.update)
-            prov = resolve_provider(self._map_provider, self._theme)
+            prov = resolve_provider(provider_override or self._map_provider, self._theme)
             self.map_layer.set_provider(prov)
             if self._mbtiles_path:
                 self.map_layer.set_mbtiles(self._mbtiles_path)
             self.map_layer.enabled = True
             self.ppi.map_layer = self.map_layer
+            self._land_mask_key = None
             lat, lon = self._ais_ref
             self.map_layer.request(lat, lon, float(self.range_spin.value()),
                                    max(200, self.ppi.width()))
-            hint = f"底图已开启（中心 {lat:.5f}, {lon:.5f} · 图源 {self.map_layer.store.attribution}）"
+            hint = f"底图已开启（中心 {lat:.5f}, {lon:.5f} · 图源 {self.map_layer.attribution}）"
             if float(self.range_spin.value()) < 30.0:
                 hint += "；提示：街道/海图需 30m 以上量程才显细节，离线时自动保持透明"
             self.log.push("ok", hint)
@@ -419,6 +514,7 @@ class SceneAndMapController:
         opts = dlg.e6_options()
         self._ais_ref = (lat, lon)
         self._map_provider = prov
+        self._map_user_pinned = (prov != "marine_chart")
         self._mbtiles_path = opts["mbtiles_path"]
         self._nmea_port = int(opts["nmea_port"])
         self._nmea_enabled = bool(opts["nmea_enabled"])
@@ -426,6 +522,7 @@ class SceneAndMapController:
         self.settings.setValue("ais_lat", lat)
         self.settings.setValue("ais_lon", lon)
         self.settings.setValue("map_provider", prov)
+        self.settings.setValue("map_user_pinned", self._map_user_pinned)
         self.settings.setValue("mbtiles_path", self._mbtiles_path)
         self.settings.setValue("nmea_port", self._nmea_port)
         self.settings.setValue("nmea_enabled", self._nmea_enabled)

@@ -158,6 +158,7 @@ class MapLocationDialog(QDialog):
         form = QFormLayout()
         self.cb_provider = QComboBox()
         self.cb_provider.addItem("自动跟随界面主题（浅色/深色）", "auto")
+        self.cb_provider.addItem("海上矢量海图（零延迟纯海域，无城市街道）", "marine_chart")
         for key, meta in PROVIDERS.items():
             self.cb_provider.addItem(meta.get("label", key), key)
         pi = self.cb_provider.findData(provider)
@@ -176,10 +177,14 @@ class MapLocationDialog(QDialog):
         geo_row = QHBoxLayout()
         self.btn_auto = QPushButton("自动获取当前位置 (IP)")
         self.btn_auto.clicked.connect(self._start_auto)
-        self.lbl_status = QLabel("可手动输入或点击自动获取；会同步为 AIS 本机坐标")
+        self.btn_sea_preset = QPushButton("海区航道 (舟山外海)")
+        self.btn_sea_preset.setToolTip("填入东海舟山外海航道演示坐标 (30.085, 122.420)")
+        self.btn_sea_preset.clicked.connect(self._use_sea_preset)
+        self.lbl_status = QLabel("可手动输入、切至海区航道或点击 IP 自动获取")
         self.lbl_status.setWordWrap(True)
         self.lbl_status.setStyleSheet("color:#6B7280;font-size:12px;")
         geo_row.addWidget(self.btn_auto)
+        geo_row.addWidget(self.btn_sea_preset)
         geo_row.addWidget(self.lbl_status, 1)
 
         self.chk_enable = QCheckBox("确定后立即开启并刷新联网/离线地图底图")
@@ -254,12 +259,21 @@ class MapLocationDialog(QDialog):
         self._worker.finished_err.connect(self._on_geo_err)
         self._worker.start()
 
+    def _use_sea_preset(self) -> None:
+        self.ed_lat.setText("30.085000")
+        self.ed_lon.setText("122.420000")
+        si = self.cb_provider.findData("marine_chart")
+        if si >= 0:
+            self.cb_provider.setCurrentIndex(si)
+        self.lbl_status.setStyleSheet("color:#0F766E;font-size:12px;")
+        self.lbl_status.setText("已切换至舟山外海航道演示坐标与零延迟矢量海图")
+
     def _on_geo_ok(self, lat: float, lon: float, desc: str) -> None:
         self.btn_auto.setEnabled(True)
         self.ed_lat.setText(f"{lat:.6f}")
         self.ed_lon.setText(f"{lon:.6f}")
         self.lbl_status.setStyleSheet("color:#0F766E;font-size:12px;")
-        self.lbl_status.setText(f"已获取：{desc}（{lat:.4f}, {lon:.4f}）")
+        self.lbl_status.setText(f"已获取：{desc}（{lat:.4f}, {lon:.4f}；如使用代理/VPN 请核对是否需手动改本地经纬度）")
 
     def _on_geo_err(self, msg: str) -> None:
         self.btn_auto.setEnabled(True)

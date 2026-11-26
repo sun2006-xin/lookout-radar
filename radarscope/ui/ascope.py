@@ -18,8 +18,8 @@ from .theme import PALETTES, fmt_range, mono_font, nice_step
 class AScopeWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumHeight(130)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setMinimumHeight(96)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._caps = Capabilities()
         self._prof = np.zeros(1, dtype=np.float32)
         self._r = np.zeros(1, dtype=np.float32)

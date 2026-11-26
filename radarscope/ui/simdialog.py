@@ -18,6 +18,7 @@ class SimStationWidget(QWidget):
     COLS = ["名称", "X (m)", "Y (m)", "Vx", "Vy", "强度"]
     changed = pyqtSignal()
     scenarioSelected = pyqtSignal(str)
+    jamModeSelected = pyqtSignal(str)
     exitToNormalRequested = pyqtSignal()
     doneRequested = pyqtSignal()
 
@@ -306,9 +307,11 @@ class SimStationWidget(QWidget):
         )
 
     def _on_ew(self) -> None:
-        self.station.jam_mode = str(self.cb_jam.currentData() or "none")
+        jm = str(self.cb_jam.currentData() or "none")
+        self.station.jam_mode = jm
         self.station._jam_t = 0.0
         self._update_ew_label()
+        self.jamModeSelected.emit(jm)
         self.changed.emit()
 
     def _on_scene(self) -> None:

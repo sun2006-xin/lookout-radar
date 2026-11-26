@@ -51,8 +51,8 @@ DEFAULT_PROVIDER = "arcgis_street"
 
 
 def resolve_provider(choice: str, theme: str = "light") -> str:
-    """将用户图源选择（含 auto 自动跟随主题）解析为真实图源键名。"""
-    if choice in PROVIDERS:
+    """将用户图源选择（含 auto 自动跟随主题 / marine_chart 矢量海图）解析为真实图源键名。"""
+    if choice == "marine_chart" or choice in PROVIDERS:
         return choice
     return "arcgis_street" if theme == "light" else "carto_dark"
 
