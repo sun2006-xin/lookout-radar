@@ -20,6 +20,7 @@ from PyQt5.QtWidgets import (
 )
 
 from ..core.storage import Store
+from .theme import mono_font
 
 LEVEL_TEXT = {"crit": "紧急", "warn": "警告", "info": "提示"}
 LEVEL_COLOR = {"crit": QColor(255, 92, 76), "warn": QColor(232, 163, 58),
@@ -46,7 +47,7 @@ class ActivityChart(QWidget):
         dark = bg.lightness() < 128
         p.fillRect(self.rect(), QColor(10, 13, 11) if dark else QColor("#F8FAFC"))
         rc = self.rect().adjusted(36, 12, -12, -20)
-        p.setFont(QFont("Consolas", 8))
+        p.setFont(mono_font(8))
         p.setPen(QPen(QColor(90, 108, 98) if dark else QColor("#64748B")))
         p.drawText(rc.left() - 30, rc.top() + 8, "点数")
         if not self._data:

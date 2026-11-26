@@ -14,7 +14,7 @@ from PyQt5.QtGui import QColor, QFont, QImage, QPainter, QPen
 from PyQt5.QtWidgets import QSizePolicy, QWidget
 
 from ..core.model import RadarFrame
-from .theme import PALETTES, color_table
+from .theme import PALETTES, color_table, mono_font
 
 
 class RDScopeWidget(QWidget):
@@ -49,7 +49,7 @@ class RDScopeWidget(QWidget):
         pal = PALETTES[self._palette_name]
         p = QPainter(self)
         p.fillRect(self.rect(), QColor(*pal["bg"]))
-        p.setFont(QFont("Consolas", 8))
+        p.setFont(mono_font(8))
         p.setPen(QPen(QColor(*pal["text"])))
         p.drawText(QPointF(8, 12), "RD 图 / RANGE-DOPPLER")
 

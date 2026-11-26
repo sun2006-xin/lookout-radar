@@ -13,7 +13,7 @@ from PyQt5.QtGui import QColor, QFont, QImage, QPainter, QPen
 from PyQt5.QtWidgets import QSizePolicy, QWidget
 
 from ..core.model import Capabilities, RadarFrame, Target
-from .theme import DEFAULT_PALETTE, PALETTES, color_table, fmt_range, nice_step
+from .theme import DEFAULT_PALETTE, PALETTES, color_table, fmt_range, mono_font, nice_step
 
 
 class RHIScopeWidget(QWidget):
@@ -75,7 +75,7 @@ class RHIScopeWidget(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         p.fillRect(self.rect(), QColor(*pal["bg"]))
-        p.setFont(QFont("Consolas", 8))
+        p.setFont(mono_font(8))
         p.setPen(QPen(QColor(*pal["text"])))
         p.drawText(QPointF(8, 12), "3D 俯仰 RHI / DISTANCE-HEIGHT")
 

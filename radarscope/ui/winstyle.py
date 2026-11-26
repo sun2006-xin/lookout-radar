@@ -173,4 +173,12 @@ def apply_modern_style(app) -> None:
             super().drawPrimitive(element, option, painter, widget)
 
     app.setStyle(_ModernControlStyle(base))
+    from PyQt5.QtGui import QFont
+
+    f = QFont()
+    f.setFamilies(["Microsoft YaHei UI", "Segoe UI", "PingFang SC"])
+    f.setPointSize(9)
+    f.setWeight(QFont.Normal)
+    f.setStyleStrategy(QFont.PreferAntialias)
+    app.setFont(f)
     setattr(app, "_lookout_modern_style", True)

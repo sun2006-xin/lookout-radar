@@ -21,7 +21,7 @@ from PyQt5.QtWidgets import QMenu, QSizePolicy, QWidget
 
 from ..core.model import Capabilities, RadarFrame, Target
 from ..core.viewmath import fmt_bearing, fmt_distance, point_to_polar
-from .theme import DEFAULT_PALETTE, PALETTES, color_table
+from .theme import DEFAULT_PALETTE, PALETTES, color_table, mono_font
 
 
 def _fmt_rng(m: float, rmax: float) -> str:
@@ -397,7 +397,7 @@ class PPIWidget(QWidget):
         colors = {"crit": QColor(240, 70, 55, 180), "warn": QColor(232, 163, 58, 160),
                   "info": QColor(120, 190, 150, 140)}
         p.setBrush(Qt.NoBrush)
-        p.setFont(QFont("Consolas", 8))
+        p.setFont(mono_font(8))
         for z in self._zones:
             x, y, r, level = z[0], z[1], z[2], z[3]
             rid = z[4] if len(z) > 4 else ""
@@ -449,7 +449,7 @@ class PPIWidget(QWidget):
             p.setPen(QPen(QColor(txt_rgb[0], txt_rgb[1], txt_rgb[2], 140), 1, Qt.DotLine))
             p.drawEllipse(QPointF(cx, cy), ring, ring)
 
-        p.setFont(QFont("Consolas", 9))
+        p.setFont(mono_font(9))
         txt = f"EBL {az:05.1f}°  VRM {rng:.2f} m"
         tw = p.fontMetrics().horizontalAdvance(txt)
         p.setPen(QPen(col))
@@ -465,7 +465,7 @@ class PPIWidget(QWidget):
         if not self._coverage:
             return
 
-        f = QFont("Consolas", 8)
+        f = mono_font(8)
         p.setFont(f)
         fm = p.fontMetrics()
         dim = QColor(*pal["grid_dim"])
@@ -521,7 +521,7 @@ class PPIWidget(QWidget):
     def _draw_grid(self, p: QPainter, cx, cy, R, pal) -> None:
         g = QColor(*pal["grid"])
         gd = QColor(*pal["grid_dim"])
-        p.setFont(QFont("Consolas", 9))
+        p.setFont(mono_font(9))
 
         # 距离环
         for i in range(1, 5):
@@ -567,7 +567,7 @@ class PPIWidget(QWidget):
         rmax = max(1e-6, self._caps.range_max)
         rmin = self._caps.range_min
         span = max(1e-6, rmax - rmin)
-        p.setFont(QFont("Consolas", 8))
+        p.setFont(mono_font(8))
 
         ew = self._ew_meta
         if isinstance(ew, dict) and ew.get("jam_mode") not in (None, "none"):
@@ -641,7 +641,7 @@ class PPIWidget(QWidget):
         caps = self._caps
         tc = QColor(*pal["target"])
         lc = QColor(*pal["lock"])
-        f = QFont("Consolas", 9)
+        f = mono_font(9)
         p.setFont(f)
         fm = p.fontMetrics()
         span = max(1e-6, caps.range_max - caps.range_min)
@@ -999,7 +999,7 @@ class PPIWidget(QWidget):
             return
         rmax = max(1e-6, self._caps.range_max)
         col = QColor(110, 190, 255, 235)
-        p.setFont(QFont("Consolas", 8))
+        p.setFont(mono_font(8))
         for item in self._ais:
             x, y, name, cog = item[0], item[1], item[2], item[3]
             r = hypot(x, y)
@@ -1085,7 +1085,7 @@ class PPIWidget(QWidget):
         else:
             note = attr
         if note:
-            p.setFont(QFont("Consolas", 7))
+            p.setFont(mono_font(7))
             p.setPen(QPen(QColor(*pal["muted"]) if "muted" in pal else QColor(140, 150, 165, 200)))
             p.drawText(QPointF(cx - R * 0.72, cy + R * 0.99), note)
 
@@ -1106,7 +1106,7 @@ class PPIWidget(QWidget):
         p.drawEllipse(QPointF(x, y), 12, 12)
 
         txt = f"{fmt_distance(rng)}  {fmt_bearing(az)}"
-        p.setFont(QFont("Consolas", 9))
+        p.setFont(mono_font(9))
         fm = p.fontMetrics()
         tw = fm.horizontalAdvance(txt)
         bx = min(max(4.0, x + 14), self.width() - tw - 12)

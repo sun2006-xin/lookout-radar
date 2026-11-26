@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import QSizePolicy, QWidget
 
 from ..core.model import Capabilities, RadarFrame
 from ..core.pipeline import range_profile
-from .theme import PALETTES, fmt_range, nice_step
+from .theme import PALETTES, fmt_range, mono_font, nice_step
 
 
 class AScopeWidget(QWidget):
@@ -64,7 +64,7 @@ class AScopeWidget(QWidget):
         gd = QColor(*pal["grid_dim"])
         txt = QColor(*pal["text"])
 
-        p.setFont(QFont("Consolas", 8))
+        p.setFont(mono_font(8))
         p.setPen(QPen(txt))
         p.drawText(QPointF(8, 12), "A 显 / RANGE PROFILE")
 

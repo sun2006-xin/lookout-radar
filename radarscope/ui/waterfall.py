@@ -12,7 +12,7 @@ from PyQt5.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PyQt5.QtWidgets import QSizePolicy, QWidget
 
 from ..core.model import RadarFrame, Target
-from .theme import PALETTES, fmt_range, nice_step
+from .theme import PALETTES, fmt_range, mono_font, nice_step
 
 # 高对比度航迹配色：浅底（daylight）与深底（ice 等）都清晰可辨
 _TRACK_COLORS = (
@@ -73,7 +73,7 @@ class WaterfallWidget(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         p.fillRect(self.rect(), QColor(*pal["bg"]))
-        p.setFont(QFont("Consolas", 8))
+        p.setFont(mono_font(8))
         p.setPen(QPen(QColor(*pal["text"])))
         p.drawText(QPointF(8, 12), "瀑布图 / TRACK RANGE-TIME")
 

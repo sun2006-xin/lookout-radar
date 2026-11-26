@@ -14,10 +14,21 @@ import re
 
 import numpy as np
 
-#: 界面字体：优先 Segoe UI（Win10+），中文回落雅黑
-FONT_UI = '"Segoe UI", "Microsoft YaHei UI", "PingFang SC", sans-serif'
+#: 界面字体：中文 Windows 优先 Microsoft YaHei UI（避免假粗体回退与基线抖动）
+FONT_UI = '"Microsoft YaHei UI", "Segoe UI", "PingFang SC", "Noto Sans CJK SC", sans-serif'
 #: 等宽字体：用于数值读数，保证数字不跳动
-FONT_MONO = '"Cascadia Mono", "Consolas", "JetBrains Mono", monospace'
+FONT_MONO = '"Cascadia Mono", "Consolas", "Microsoft YaHei UI", monospace'
+
+
+def mono_font(pt: int = 8, bold: bool = False):
+    """返回等宽+清晰中文回退字体，避免 QFont('Consolas') 回退到锯齿宋体。"""
+    from PyQt5.QtGui import QFont
+
+    f = QFont()
+    f.setFamilies(["Consolas", "Cascadia Mono", "Microsoft YaHei UI", "PingFang SC"])
+    f.setPointSize(int(pt))
+    f.setWeight(QFont.Bold if bold else QFont.Normal)
+    return f
 
 PALETTES = {
     "daylight": {
@@ -367,7 +378,7 @@ QToolBar { background: @surface@; border: none; spacing: 6px; padding: 6px 10px;
 QToolBar::separator { background: @border@; width: 1px; margin: 5px 6px; }
 QMenuBar { background: @surface@; color: @muted@; border: none; padding: 3px 8px;
     border-bottom: 1px solid @border@; font-size: 12px; }
-QMenuBar::item { background: transparent; padding: 5px 12px; border-radius: 6px; font-weight: 500; }
+QMenuBar::item { background: transparent; padding: 5px 12px; border-radius: 6px; font-weight: normal; }
 QMenuBar::item:selected { background: @hover@; color: @text@; }
 QMenu { background: @surface@; color: @text@; border: 1px solid @border_hi@;
     padding: 6px; border-radius: 10px; }
@@ -375,11 +386,14 @@ QMenu::item { padding: 6px 26px 6px 18px; border-radius: 6px; }
 QMenu::item:selected { background: @accent_soft@; color: @accent@; }
 QMenu::separator { height: 1px; background: @border@; margin: 5px 10px; }
 QMenu::indicator { width: 12px; height: 12px; }
-QLabel { color: @muted@; font-size: 12px; background: transparent; }
+QLabel { color: @muted@; font-size: 12px; background: transparent; font-weight: normal; }
+QLabel#hintLabel { color: @muted@; font-size: 11px; font-weight: normal; }
+QLabel#ewMetricBadge { background: @accent_soft@; color: @accent@;
+    border: 1px solid @border_hi@; border-radius: 7px; padding: 6px 10px; font-size: 12px; }
 QGroupBox { background: @surface@; border: 1px solid @border@; border-radius: 10px;
-    margin-top: 10px; padding: 14px 10px 10px 10px; font-weight: 600; color: @text@; }
+    margin-top: 10px; padding: 14px 12px 10px 12px; font-weight: normal; color: @text@; }
 QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left;
-    padding: 0 6px; left: 10px; color: @accent@; }
+    padding: 0 6px; left: 10px; color: @accent@; font-weight: bold; }
 QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit, QPlainTextEdit {
     background: @input@; border: 1px solid @border_hi@; border-radius: 7px;
     padding: 3px 10px; color: @text@; font-size: 12px; min-height: 20px;
@@ -419,14 +433,14 @@ QComboBox QAbstractItemView { background: @surface@; color: @text@;
     border: 1px solid @border_hi@; border-radius: 8px; padding: 4px; outline: none; }
 QPushButton { background: @surface@; border: 1px solid @border_hi@;
     border-radius: 7px; padding: 4px 13px; min-height: 20px; color: @text@;
-    font-size: 12px; font-weight: 500; }
+    font-size: 12px; font-weight: normal; }
 QPushButton:hover { background: @hover@; border-color: @accent@; }
 QPushButton:pressed { background: @grid@; }
 QPushButton:checked { background: @checked_bg@; border-color: @accent@;
-    color: @checked_text@; font-weight: 600; }
+    color: @checked_text@; font-weight: normal; }
 QPushButton:disabled { color: @muted@; border-color: @border@; background: @surface2@; }
 QPushButton#primaryBtn { background: @accent@; border: 1px solid @accent@;
-    color: #FFFFFF; font-weight: 600; padding: 5px 18px; }
+    color: #FFFFFF; font-weight: bold; padding: 4px 18px; }
 QPushButton#primaryBtn:hover { background: @accent_hover@; border-color: @accent_hover@; }
 QPushButton#primaryBtn:checked { background: #DC2626; border-color: #DC2626; color: #FFFFFF; }
 QStatusBar { background: @surface@; color: @muted@; font-size: 12px;
@@ -434,7 +448,7 @@ QStatusBar { background: @surface@; color: @muted@; font-size: 12px;
 QStatusBar::item { border: none; }
 QHeaderView::section { background: @surface2@; color: @muted@; border: none;
     border-bottom: 1px solid @border@; padding: 6px 8px; font-size: 11px;
-    font-weight: 600; }
+    font-weight: normal; }
 QTableWidget { background: @surface@; alternate-background-color: @surface2@;
     gridline-color: @grid@; border: 1px solid @border@; border-radius: 10px;
     font-size: 12px; color: @text@; selection-background-color: @accent_soft@;
@@ -450,12 +464,12 @@ QTextEdit { background: @surface@; color: @text@;
 QTabWidget::pane { border: 1px solid @border@; background: @surface@;
     border-radius: 10px; top: -1px; }
 QTabBar::tab { background: transparent; color: @muted@; padding: 7px 16px;
-    border: none; border-bottom: 2px solid transparent; font-size: 12px; font-weight: 500; }
-QTabBar::tab:selected { color: @accent@; border-bottom: 2px solid @accent@; font-weight: 600; }
+    border: none; border-bottom: 2px solid transparent; font-size: 12px; font-weight: normal; }
+QTabBar::tab:selected { color: @accent@; border-bottom: 2px solid @accent@; font-weight: normal; }
 QTabBar::tab:hover:!selected { color: @text@; background: @hover@; border-radius: 6px; }
 QDockWidget { color: @muted@; }
 QDockWidget::title { background: @surface2@; padding: 6px 10px;
-    border-top: 1px solid @border@; font-size: 12px; font-weight: 600; }
+    border-top: 1px solid @border@; font-size: 12px; font-weight: normal; }
 QCheckBox { color: @text@; font-size: 12px; spacing: 6px; }
 QCheckBox::indicator { width: 15px; height: 15px; border-radius: 4px;
     border: 1px solid @border_hi@; background: @input@; }
