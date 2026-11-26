@@ -102,13 +102,13 @@ class AScopeWidget(QWidget):
         poly += [QPointF(float(x), float(y)) for x, y in zip(xs, ys)]
         poly.append(QPointF(rc.right(), rc.bottom()))
 
-        c = pal["stops"][-1][1]
+        c = pal["stops"][2][1]
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(c[0], c[1], c[2], 48))
+        p.setBrush(QColor(c[0], c[1], c[2], 68))
         p.drawPolygon(QPolygonF(poly))
 
         p.setBrush(Qt.NoBrush)
-        p.setPen(QPen(QColor(*pal["stops"][2][1]), 1.4))
+        p.setPen(QPen(QColor(*pal["stops"][3][1]), 1.8))
         path = QPainterPath()
         path.moveTo(float(xs[0]), float(ys[0]))
         for x, y in zip(xs[1:], ys[1:]):

@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 
 from PyQt5.QtCore import QSettings, Qt, QThread, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QGuiApplication, QKeySequence
+from PyQt5.QtGui import QColor, QGuiApplication, QIcon, QKeySequence, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QAction, QActionGroup, QApplication, QComboBox, QDialog, QDockWidget,
     QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QInputDialog,
@@ -59,7 +59,22 @@ from .winstyle import enable_dark_titlebar, install_dialog_titlebar, make_app_ic
 LOG = logging.getLogger("radarscope")
 
 
-#: 深色主题下的告警条配色
+def _swatch_icon(bg: QColor, accent: QColor) -> QIcon:
+    """生成 14×14 双色小圆标，用于主题/雷达配色下拉框与菜单直观预览。"""
+    pm = QPixmap(14, 14)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing, True)
+    p.setPen(QColor(148, 163, 184, 140))
+    p.setBrush(bg)
+    p.drawRoundedRect(1, 1, 12, 12, 3, 3)
+    p.setPen(Qt.NoPen)
+    p.setBrush(accent)
+    p.drawRoundedRect(7, 2, 5, 10, 2, 2)
+    p.end()
+    return QIcon(pm)
+
+
 class MainWindow(ConnectionController, ExportController,
                  AlarmBarController, QMainWindow):
     def __init__(self) -> None:
@@ -286,8 +301,9 @@ class MainWindow(ConnectionController, ExportController,
 
         self.pal_combo = QComboBox()
         for key, pal in PALETTES.items():
-            self.pal_combo.addItem(pal["label"], key)
-        idx = self.pal_combo.findData(self.settings.value("palette", DEFAULT_PALETTE))
+            self.pal_combo.addItem(_swatch_icon(QColor(*pal["bg"]), QColor(*pal["stops"][2][1])),
+                                   pal["label"], key)
+        idx = self.pal_combo.findData(self.settings.value("palette", theme_palette(self._theme)))
         if idx >= 0:
             self.pal_combo.setCurrentIndex(idx)
         self.pal_combo.currentIndexChanged.connect(self._on_palette_changed)
@@ -382,7 +398,8 @@ class MainWindow(ConnectionController, ExportController,
 
         self.theme_combo = QComboBox()
         for key, th in THEMES.items():
-            self.theme_combo.addItem(th["name"], key)
+            self.theme_combo.addItem(_swatch_icon(QColor(th["bg"]), QColor(th["accent"])),
+                                     th["name"], key)
         ti = self.theme_combo.findData(self._theme)
         if ti >= 0:
             self.theme_combo.setCurrentIndex(ti)
@@ -574,6 +591,20 @@ class MainWindow(ConnectionController, ExportController,
             th_grp.addAction(act)
             m_theme.addAction(act)
             self._theme_actions[key] = act
+        m_pal = m_view.addMenu("雷达配色（8 套色板）")
+        pal_grp = QActionGroup(self)
+        pal_grp.setExclusive(True)
+        self._palette_actions: dict[str, QAction] = {}
+        cur_pal = self.pal_combo.currentData()
+        for key, pal in PALETTES.items():
+            act = QAction(_swatch_icon(QColor(*pal["bg"]), QColor(*pal["stops"][2][1])),
+                          pal["label"], self)
+            act.setCheckable(True)
+            act.setChecked(key == cur_pal)
+            act.triggered.connect(lambda _c=False, k=key: self._select_palette(k))
+            pal_grp.addAction(act)
+            m_pal.addAction(act)
+            self._palette_actions[key] = act
 
         m_set = self.menuBar().addMenu("设置(&S)")
         self._m_set = m_set
@@ -619,13 +650,7 @@ class MainWindow(ConnectionController, ExportController,
 
         self.log.push("info", "RadarScope 启动")
         self._rebuild_driver_combo()
-        # 启动时就让色板与主题配对：浅主题配浅色板，深主题配深色板
-        cur = self.pal_combo.currentData()
-        if not is_dark_theme(self._theme) and cur not in LIGHT_PALETTE_KEYS:
-            i = self.pal_combo.findData(theme_palette(self._theme))
-            if i >= 0:
-                self.pal_combo.setCurrentIndex(i)
-        elif is_dark_theme(self._theme) and cur in LIGHT_PALETTE_KEYS:
+        if self.pal_combo.currentData() not in PALETTES:
             i = self.pal_combo.findData(theme_palette(self._theme))
             if i >= 0:
                 self.pal_combo.setCurrentIndex(i)
@@ -752,8 +777,18 @@ class MainWindow(ConnectionController, ExportController,
         has_new, msg = check_latest_release(timeout_s=3.0)
         QMessageBox.information(self, f"版本检查（当前 {__version__}）", msg)
 
+    def _select_palette(self, key: str) -> None:
+        i = self.pal_combo.findData(key)
+        if i >= 0:
+            self.pal_combo.setCurrentIndex(i)
+
     def _on_palette_changed(self) -> None:
         key = self.pal_combo.currentData()
+        if key not in PALETTES:
+            return
+        self.settings.setValue("palette", key)
+        if hasattr(self, "_palette_actions") and key in self._palette_actions:
+            self._palette_actions[key].setChecked(True)
         self.ppi.set_palette(key)
         self.ppi2.set_palette(key)
         self.ascope.set_palette(key)
@@ -1085,11 +1120,12 @@ class MainWindow(ConnectionController, ExportController,
             app.setStyleSheet(build_stylesheet(self._theme, self._font_scale))
         self.settings.setValue("theme", self._theme)
 
-        # 用户切换主题时联动该主题的专属雷达配色；启动恢复仅兜底修正浅深冲突
+        # 用户主动切换界面主题（sync_palette=True）时联动该主题的专属雷达配色；
+        # 普通启动恢复（sync_palette=False）尊重用户单独挑选并保存的雷达色板，只在无效值时兜底。
         cur = self.pal_combo.currentData()
         dark = is_dark_theme(self._theme)
         want = theme_palette(self._theme)
-        if sync_palette or (not dark and cur not in LIGHT_PALETTE_KEYS) or (dark and cur in LIGHT_PALETTE_KEYS):
+        if sync_palette or cur not in PALETTES:
             i = self.pal_combo.findData(want)
             if i >= 0:
                 self.pal_combo.setCurrentIndex(i)

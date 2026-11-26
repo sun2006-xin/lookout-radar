@@ -1245,6 +1245,7 @@ def test_multi_themes_and_palettes() -> None:
 
     assert len(THEMES) == 7, f"预期 7 套主题，实际 {len(THEMES)}"
     assert len(PALETTES) == 8, f"预期 8 套色板，实际 {len(PALETTES)}"
+    assert len({tuple(p["bg"]) for p in PALETTES.values()}) == 8, "8 套雷达色板背景色应各不相同"
     assert not is_dark_theme("light") and not is_dark_theme("nordic")
     for dk in ("dark", "graphite", "marine_night", "tactical", "amber_ops"):
         assert is_dark_theme(dk), f"{dk} 应判定为深色主题"
@@ -1261,13 +1262,35 @@ def test_multi_themes_and_palettes() -> None:
 
     _app = QApplication.instance() or QApplication([])
     w = MainWindow()
-    w._apply_theme("marine_night", sync_palette=True)
-    assert w.pal_combo.currentData() == "cyan"
-    assert w._theme_actions["marine_night"].isChecked()
-    w._apply_theme("nordic", sync_palette=True)
-    assert w.pal_combo.currentData() == "ocean_teal"
-    assert w._theme_actions["nordic"].isChecked()
-    w.close()
+    orig_theme = w._theme
+    orig_pal = w.pal_combo.currentData()
+    try:
+        w._apply_theme("marine_night", sync_palette=True)
+        assert w.pal_combo.currentData() == "cyan"
+        assert w._theme_actions["marine_night"].isChecked()
+        assert w._palette_actions["cyan"].isChecked()
+
+        w._apply_theme("nordic", sync_palette=True)
+        assert w.pal_combo.currentData() == "ocean_teal"
+        assert w._theme_actions["nordic"].isChecked()
+        assert w._palette_actions["ocean_teal"].isChecked()
+
+        # 手动选深色雷达色板并在非联动主题下应用时，不应被强行覆盖
+        w._select_palette("green")
+        assert w.pal_combo.currentData() == "green"
+        assert w.settings.value("palette") == "green"
+        assert w._palette_actions["green"].isChecked()
+        assert w.ppi._palette_name == "green"
+        assert w.ascope._palette_name == "green"
+        assert w.waterfall._palette_name == "green"
+        assert w.rdscope._palette_name == "green"
+        w._apply_theme("light", sync_palette=False)
+        assert w.pal_combo.currentData() == "green", "非联动主题切换不应覆盖用户手选雷达色板"
+    finally:
+        w._apply_theme(orig_theme, sync_palette=False)
+        if orig_pal in PALETTES:
+            w._select_palette(orig_pal)
+        w.close()
     ok("多套现代 UI 主题与雷达色板切换")
 
 

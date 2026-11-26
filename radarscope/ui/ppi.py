@@ -146,7 +146,7 @@ class PPIWidget(QWidget):
         STC 在显示端也是这么干的。
         """
         tbl = color_table(name)
-        for i in range(26):
+        for i in range(18):
             tbl[i] = 0x00000000
         return tbl
 
@@ -427,7 +427,8 @@ class PPIWidget(QWidget):
         if not self.show_ebl or self._ebl is None:
             return
         az, rng = self._ebl
-        col = QColor(150, 200, 255, 190)
+        txt_rgb = pal["text"]
+        col = QColor(txt_rgb[0], txt_rgb[1], txt_rgb[2], 210)
         p.setBrush(Qt.NoBrush)
         p.setPen(QPen(col, 1, Qt.DashLine))
         p.drawLine(QPointF(cx, cy), self._pt(cx, cy, R, radians(az)))
@@ -435,7 +436,7 @@ class PPIWidget(QWidget):
         rmax = max(1e-6, self._caps.range_max)
         if rng > 0:
             ring = max(2.0, min(rng, rmax) / rmax * R)
-            p.setPen(QPen(QColor(150, 200, 255, 130), 1, Qt.DotLine))
+            p.setPen(QPen(QColor(txt_rgb[0], txt_rgb[1], txt_rgb[2], 140), 1, Qt.DotLine))
             p.drawEllipse(QPointF(cx, cy), ring, ring)
 
         p.setFont(QFont("Consolas", 9))
