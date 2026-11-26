@@ -70,7 +70,10 @@ class MainWindow(ConnectionController, ExportController,
         self.store = Store(self.data_dir / "radarscope.db")
 
         # 插件先加载，驱动注册表里才会有插件带来的雷达
-        self.plugins = PluginManager(paths.plugins_dir())
+        self.plugins = PluginManager(
+            paths.plugins_dir(),
+            trust_path=self.data_dir / "trusted_plugins.json",
+        )
         self.plugins.load_all()
 
         self.driver = None
@@ -83,6 +86,7 @@ class MainWindow(ConnectionController, ExportController,
         self.archive: FrameArchive | None = None
 
         self._thresh = 0.30
+        self._cfar_mode = str(self.settings.value("cfar_mode", "auto"))
         self._last_ts = 0.0
         self._last_frame_mono = 0.0
         self._locked_id = -1
@@ -328,8 +332,8 @@ class MainWindow(ConnectionController, ExportController,
         self.btn_zone = QPushButton("画警戒区")
         self.btn_zone.setCheckable(True)
         self.btn_zone.setToolTip("开启后在雷达图上按住左键拖出一个圆，松手即生成警戒区；"
-                                 "右键删除最近添加的一个")
-        self.btn_zone.toggled.connect(self.ppi.set_zone_mode)
+                                 "右键点圆可删除")
+        self.btn_zone.toggled.connect(self._on_zone_mode_toggled)
         tb.addWidget(self.btn_zone)
 
         self.btn_true = QPushButton("真运动")
@@ -360,16 +364,42 @@ class MainWindow(ConnectionController, ExportController,
             lambda _i: self._apply_theme(self.theme_combo.currentData())
         )
 
+        self.cfar_combo = QComboBox()
+        for key, label in (
+            ("auto", "自适应 (GO-CFAR)"),
+            ("os", "抗干扰 (OS-CFAR)"),
+            ("go", "抑杂波边缘 (GO-CFAR)"),
+            ("ca", "固定门限 (CA-CFAR)"),
+        ):
+            self.cfar_combo.addItem(label, key)
+        ci = self.cfar_combo.findData(self._cfar_mode)
+        if ci >= 0:
+            self.cfar_combo.setCurrentIndex(ci)
+        self.cfar_combo.currentIndexChanged.connect(
+            lambda _i: self._on_cfar_changed()
+        )
+
+        self.lang_combo = QComboBox()
+        self.lang_combo.addItem("简体中文", "zh")
+        self.lang_combo.addItem("English", "en")
+        lang = str(self.settings.value("lang", "zh"))
+        li = self.lang_combo.findData(lang)
+        if li >= 0:
+            self.lang_combo.setCurrentIndex(li)
+        self.lang_combo.currentIndexChanged.connect(lambda _i: self._on_lang_changed())
+
         # 收敛工具栏：常用的留在外面，其余收进「设置」弹窗。
         panel = QWidget()
         form = QFormLayout(panel)
         form.setContentsMargins(14, 12, 14, 12)
         form.setSpacing(9)
         form.addRow("采集模式", self.mode_combo)
+        form.addRow("检测算法", self.cfar_combo)
         form.addRow("检测门限", self.thr_spin)
         form.addRow("显示增益", self.gain_spin)
         form.addRow("界面主题", self.theme_combo)
         form.addRow("雷达配色", self.pal_combo)
+        form.addRow("界面语言", self.lang_combo)
         form.addRow("航向", self.heading_spin)
         form.addRow("航速", self.speed_spin)
         opts = QWidget()
@@ -398,12 +428,14 @@ class MainWindow(ConnectionController, ExportController,
 
         # 菜单：文件 / 工具 / 视图 / 设置 / 帮助（同一类系统级入口放同一排）
         m_file = self.menuBar().addMenu("文件(&F)")
+        self._m_file = m_file
         m_file.addAction("导出事件日志…", self._export_log)
         m_file.addAction("导出当前画面…", self._export_screenshot)
         m_file.addAction("打开数据目录", self._open_data_dir)
         m_file.addSeparator()
         m_file.addAction("退出", self.close)
         m_tool = self.menuBar().addMenu("工具(&T)")
+        self._m_tool = m_tool
         m_tool.addAction("告警规则…", self._open_rules)
         m_tool.addAction("传感器配置…", self._open_sensor_config)
         m_tool.addAction("朝向标定…", self._open_calibration)
@@ -415,6 +447,7 @@ class MainWindow(ConnectionController, ExportController,
         # 视图：面板显隐。用户不该被固定布局绑死——投屏要大字、
         # 调试要全信息，两种场景需要不同的界面。
         m_view = self.menuBar().addMenu("视图(&V)")
+        self._m_view = m_view
         for text, w in (("A 显", self.ascope), ("瀑布图", self.waterfall),
                         ("距离-多普勒", self.rdscope), ("传感器页签", self.sensors_panel)):
             act = QAction(text, self)
@@ -423,15 +456,21 @@ class MainWindow(ConnectionController, ExportController,
             act.toggled.connect(w.setVisible)
             m_view.addAction(act)
         m_view.addSeparator()
-        for text, attr in (("尾迹", "show_trails"), ("告警禁入区", "show_zones"),
-                           ("电子方位线 EBL/VRM", "show_ebl")):
+        self._view_actions: dict[str, QAction] = {}
+        for text, attr, default in (
+            ("尾迹", "show_trails", True),
+            ("告警禁入区", "show_zones", False),
+            ("电子方位线 EBL/VRM", "show_ebl", True),
+        ):
+            val = self.settings.value(attr, default, type=bool)
             act = QAction(text, self)
             act.setCheckable(True)
-            act.setChecked(True)
-            setattr(self.ppi, attr, True)
-            act.toggled.connect(lambda on, a=attr: (setattr(self.ppi, a, on),
-                                                    self.ppi.update()))
+            act.setChecked(val)
+            setattr(self.ppi, attr, val)
+            act.toggled.connect(lambda on, a=attr: self._set_ppi_flag(a, on))
             m_view.addAction(act)
+            self._view_actions[attr] = act
+        m_view.addAction("清除自绘警戒区", self._clear_user_zones)
         m_view.addAction("清除 EBL", lambda: self.ppi.set_ebl(None))
         m_view.addAction("清除测距读数", self.ppi.clear_probe)
 
@@ -439,35 +478,33 @@ class MainWindow(ConnectionController, ExportController,
         act_near.setCheckable(True)
         act_near.toggled.connect(self._toggle_near)
         m_view.addAction(act_near)
-        m_theme = m_view.addMenu("主题")
-        grp = QActionGroup(self)
-        grp.setExclusive(True)
-        self._theme_actions: dict[str, QAction] = {}
-        for key, th in THEMES.items():
-            a = QAction(th["name"], self)
-            a.setCheckable(True)
-            a.setChecked(key == self._theme)
-            a.triggered.connect(lambda _c, k=key: self._apply_theme(k))
-            grp.addAction(a)
-            m_theme.addAction(a)
-            self._theme_actions[key] = a
 
         act_map = QAction("联网地图底图", self)
         act_map.setCheckable(True)
         act_map.toggled.connect(self._toggle_map)
         m_view.addAction(act_map)
+        ais_on = self.settings.value("show_ais", True, type=bool)
         act_ais = QAction("显示 AIS 目标", self)
         act_ais.setCheckable(True)
-        act_ais.setChecked(True)
-        act_ais.toggled.connect(lambda on: (setattr(self.ppi, "show_ais", on),
-                                            self.ppi.update()))
+        act_ais.setChecked(ais_on)
+        self.ppi.show_ais = ais_on
+        act_ais.toggled.connect(lambda on: self._set_ppi_flag("show_ais", on))
         m_view.addAction(act_ais)
+        self._view_actions["show_ais"] = act_ais
 
-        self.menuBar().addAction("设置(&S)", self._open_settings)
+        m_set = self.menuBar().addMenu("设置(&S)")
+        self._m_set = m_set
+        m_set.addAction("显示与主题设置…", self._open_settings)
+        m_set.addSeparator()
+        m_set.addAction("连接设置…", self._open_link_dialog)
+        m_set.addAction("告警规则…", self._open_rules)
+        m_set.addAction("传感器配置…", self._open_sensor_config)
         m_help = self.menuBar().addMenu("帮助(&H)")
+        self._m_help = m_help
         m_help.addAction("操作说明", self._show_help)
         m_help.addAction("快捷键", self._show_shortcuts)
         m_help.addAction("运行自检…", self._run_selftest)
+        m_help.addAction("检查更新…", self._check_updates)
 
         # 快捷键：高频动作不该去点按钮
         QShortcut(QKeySequence("Space"), self, self._toggle_pause)
@@ -548,6 +585,21 @@ class MainWindow(ConnectionController, ExportController,
     # ================================================================== #
     # 端点
     # ================================================================== #
+    def _set_ppi_flag(self, attr: str, on: bool) -> None:
+        setattr(self.ppi, attr, bool(on))
+        self.settings.setValue(attr, bool(on))
+        act = getattr(self, "_view_actions", {}).get(attr)
+        if act is not None and act.isChecked() != bool(on):
+            act.blockSignals(True)
+            act.setChecked(bool(on))
+            act.blockSignals(False)
+        self.ppi.update()
+
+    def _on_zone_mode_toggled(self, on: bool) -> None:
+        self.ppi.set_zone_mode(on)
+        if on and not self.ppi.show_zones:
+            self._set_ppi_flag("show_zones", True)
+
     def _on_range_changed(self, v: float) -> None:
         self.caps.range_max = float(v)
         self.ppi.set_capabilities(self.caps)
@@ -556,6 +608,39 @@ class MainWindow(ConnectionController, ExportController,
     def _on_threshold_changed(self, v: float) -> None:
         self._thresh = float(v)
         self.ascope.set_threshold(self._thresh)
+
+    def _on_cfar_changed(self) -> None:
+        self._cfar_mode = str(self.cfar_combo.currentData() or "auto")
+        self.settings.setValue("cfar_mode", self._cfar_mode)
+        self.log.push("info", f"检测算法：{self.cfar_combo.currentText()}")
+
+    def _on_lang_changed(self) -> None:
+        from ..core.i18n import set_lang, tr
+
+        lang = set_lang(str(self.lang_combo.currentData() or "zh"))
+        self.settings.setValue("lang", lang)
+        for m, key in (
+            (self._m_file, "文件(&F)"), (self._m_tool, "工具(&T)"),
+            (self._m_view, "视图(&V)"), (self._m_set, "设置(&S)"),
+            (self._m_help, "帮助(&H)"),
+        ):
+            m.setTitle(tr(key))
+        for btn, key in (
+            (self.btn_link, "连接设置"), (self.btn_lock, "点目标锁定"),
+            (self.btn_fwd, "转发"), (self.btn_clip, "录像"),
+            (self.btn_mute, "静音"), (self.btn_zone, "画警戒区"),
+            (self.btn_true, "真运动"),
+        ):
+            btn.setText(tr(key))
+        for idx, key in enumerate(("航迹", "传感器", "事件", "历史")):
+            self.tabs.setTabText(idx, tr(key))
+        self._settings_dlg.setWindowTitle(tr("设置"))
+
+    def _check_updates(self) -> None:
+        from ..version import __version__, check_latest_release
+
+        has_new, msg = check_latest_release(timeout_s=3.0)
+        QMessageBox.information(self, f"版本检查（当前 {__version__}）", msg)
 
     def _on_palette_changed(self) -> None:
         key = self.pal_combo.currentData()
@@ -615,11 +700,16 @@ class MainWindow(ConnectionController, ExportController,
     def _on_frame(self, frame) -> None:
         if self._paused:
             return                       # 暂停时画面冻住，方便截图或细看
-        try:
-            f = pipeline.normalize(frame, self.caps, threshold=self._thresh)
-        except Exception as exc:
-            self._log_level("warn", f"数据解析异常（已跳过该帧）：{exc}")
-            return
+        if frame.meta.get("_normalized"):
+            f = frame
+        else:
+            try:
+                f = pipeline.normalize(
+                    frame, self.caps, threshold=self._thresh, cfar_mode=self._cfar_mode
+                )
+            except Exception as exc:
+                self._log_level("warn", f"数据解析异常（已跳过该帧）：{exc}")
+                return
 
         now = frame.timestamp or time.monotonic()
         dt = (now - self._last_ts) if self._last_ts else 0.1

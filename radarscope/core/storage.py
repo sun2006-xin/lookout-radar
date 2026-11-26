@@ -210,12 +210,13 @@ class Store:
         self.flush()
 
     def record_event(self, level: str, kind: str, message: str,
-                     rule_id: str = "", active: bool = True, tid: int = -1) -> None:
+                     rule_id: str = "", active: bool = True, tid: int = -1,
+                     ts: float | None = None) -> None:
         sid = self.session_id
         if sid is None:
             return
         self._pending_events.append(
-            (sid, time.time(), level, kind, rule_id, message, int(active), tid))
+            (sid, ts if ts is not None else time.time(), level, kind, rule_id, message, int(active), tid))
         self.flush()
 
     def flush(self, force: bool = False) -> None:
@@ -345,6 +346,24 @@ class Store:
                 "SELECT MAX(tid), MIN(ts), MAX(ts) FROM tracks WHERE sid=?", (sid,)).fetchone()
         return {"tracks_rows": n_trk, "events": n_evt,
                 "max_tid": row[0] or 0, "first_ts": row[1], "last_ts": row[2]}
+
+    def tracks_window(self, sid: int, t0: float, t1: float) -> list[tuple]:
+        """按时间窗口查询航迹（走 ix_tracks(sid, ts) 索引，用于时间轴回放 C3）。"""
+        with self._lock:
+            return self._db.execute(
+                "SELECT ts, tid, x, y, vx, vy, rng, az, snr, threat, cls"
+                " FROM tracks WHERE sid=? AND ts>=? AND ts<=? ORDER BY ts ASC",
+                (sid, float(t0), float(t1)),
+            ).fetchall()
+
+    def events_until(self, sid: int, ts: float, limit: int = 100) -> list[tuple]:
+        """查询截至指定时刻的历史告警事件（走 ix_events(sid, ts) 索引）。"""
+        with self._lock:
+            return self._db.execute(
+                "SELECT ts, level, kind, rule_id, message, active, tid"
+                " FROM events WHERE sid=? AND ts<=? ORDER BY ts DESC LIMIT ?",
+                (sid, float(ts), int(limit)),
+            ).fetchall()
 
     def close(self) -> None:
         with self._lock:

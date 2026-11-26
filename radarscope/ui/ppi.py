@@ -83,8 +83,9 @@ class PPIWidget(QWidget):
         #: 告警禁入区 (cx, cy, r, level)，与 alarm 规则里的 zone 同源
         #: (cx, cy, r, level, rule_id)
         self._zones: list[tuple] = []
+        self._poly_zones: list[tuple] = []
         self._zone_selected: str = ""
-        self.show_zones = True
+        self.show_zones = False
         #: 电子方位线 (方位°, 距离m)：经典雷达的 EBL/VRM
         self._ebl: tuple[float, float] | None = None
         self.show_ebl = True
@@ -309,13 +310,12 @@ class PPIWidget(QWidget):
         p.end()
 
     # ------------------------------------------------------------------ #
-    def set_alarm_zones(self, zones: list[tuple[float, float, float, str]]) -> None:
-        """告警规则里的禁入区，画到屏上。
-
-        规则表里设了"圆心 (0,3) 半径 1.5"却看不见它 —— 那个区到底圈住了什么，
-        用眼睛判断不了。把规则画出来，才算把"配置"和"画面"接上了。
-        """
+    def set_alarm_zones(self, zones: list[tuple[float, float, float, str]],
+                        poly_zones: list[tuple] | None = None) -> None:
+        """告警规则里的圆形与多边形禁入区，画到屏上。"""
         self._zones = list(zones or [])
+        if poly_zones is not None:
+            self._poly_zones = list(poly_zones)
         self.update()
 
     def set_ebl(self, az_deg: float | None, rng: float = 0.0) -> None:
@@ -367,7 +367,7 @@ class PPIWidget(QWidget):
                 p.drawPolyline(recent)
 
     def _draw_zones(self, p: QPainter, cx, cy, R, pal) -> None:
-        if not self.show_zones or not self._zones:
+        if not self.show_zones or (not self._zones and not self._poly_zones):
             return
         rmax = max(1e-6, self._caps.range_max)
         colors = {"crit": QColor(240, 70, 55, 180), "warn": QColor(232, 163, 58, 160),
@@ -392,6 +392,13 @@ class PPIWidget(QWidget):
             p.setPen(QPen(col, 1))
             p.drawLine(QPointF(ctr.x() - 3, ctr.y()), QPointF(ctr.x() + 3, ctr.y()))
             p.drawLine(QPointF(ctr.x(), ctr.y() - 3), QPointF(ctr.x(), ctr.y() + 3))
+        for pts, level, _rid in self._poly_zones:
+            if len(pts) < 3:
+                continue
+            poly = QPolygonF([self._pt(cx, cy, hypot(x, y) / rmax * R, atan2(x, y)) for x, y in pts])
+            col = colors.get(level, colors["warn"])
+            p.setPen(QPen(col, 1.4, Qt.DashLine))
+            p.drawPolygon(poly)
 
     def _draw_ebl(self, p: QPainter, cx, cy, R, pal) -> None:
         """EBL（电子方位线）+ VRM（可变距离圈）。
@@ -614,7 +621,9 @@ class PPIWidget(QWidget):
                 p.drawLine(QPointF(x + (5 if tx > x else -5), y),
                            QPointF(tx + (0 if tx > x else tw), ty - 3))
 
-            p.setPen(QPen(QColor(0, 0, 0, 170)))
+            shadow = QColor(*pal["bg"])
+            shadow.setAlpha(200)
+            p.setPen(QPen(shadow))
             p.drawText(QPointF(tx + 1, ty + 1), lab)
             p.setPen(QPen(col))
             p.drawText(QPointF(tx, ty), lab)
@@ -895,7 +904,12 @@ class PPIWidget(QWidget):
         fm = p.fontMetrics()
         tw = fm.horizontalAdvance(txt)
         bx = min(max(4.0, x + 14), self.width() - tw - 12)
-        by = y - 12
-        p.fillRect(QRectF(bx - 3, by - 11, tw + 8, 15), QColor(0, 0, 0, 170))
+        by = max(18.0, y - 12)
+        badge = QRectF(bx - 5, by - 12, tw + 10, 17)
+        bg = QColor(*pal["bg"])
+        bg.setAlpha(235)
+        p.setBrush(bg)
+        p.setPen(QPen(QColor(*pal["grid"]), 1))
+        p.drawRoundedRect(badge, 4, 4)
         p.setPen(QPen(col))
         p.drawText(QPointF(bx, by), txt)

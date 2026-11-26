@@ -8,10 +8,11 @@ on:
 
 jobs:
   check:
-    runs-on: windows-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ windows-latest, ubuntu-latest, macos-latest ]
         python-version: [ "3.11", "3.12" ]
 
     steps:
@@ -22,16 +23,20 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: 安装系统依赖（Linux 无头 Qt）
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgl1 libegl1 libxkbcommon-x11-0
+
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-      # 判据和本地完全一致：CI 跑的就是 tools/check.py，
-      # 避免出现"本地过了 CI 挂"
-      - name: 编译 + 单元测试 + 链路自检
+      - name: 编译 + 单元测试 + 链路自检 + 录制夹具回归
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: python tools/check.py
 
       - name: 性能基准（只记录，不作为门禁）
-        if: matrix.python-version == '3.12'
+        if: matrix.os == 'windows-latest' && matrix.python-version == '3.12'
         run: python tools/bench.py

@@ -7,10 +7,10 @@ hiddenimports += collect_submodules('bleak')
 
 
 a = Analysis(
-    ['main.py'],
+    ['../main.py'],
     pathex=[],
     binaries=[],
-    datas=[('assets', 'assets')],
+    datas=[('D:/workbudy/2026-11-25-19-11-27/radarscope/assets', 'assets')],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
@@ -37,7 +37,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['assets/app.ico'],
+    icon=['D:/workbudy/2026-11-25-19-11-27/radarscope/assets/app.ico'],
 )
 coll = COLLECT(
     exe,

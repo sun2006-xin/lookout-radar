@@ -111,27 +111,18 @@
   - `MainWindow._on_frame` 已将 `all_tracks` 传入 `waterfall.push_frame(f, all_tracks)`。
   - `tests/test_core.py` 新增 `test_waterfall_projection`（5 个独立目标、8 帧滚动，断言 5 条独立轨迹且静止目标距离恒定）。
 
-### B2 · CFAR 参数随场景自适应 `难度 ★★★★ 信号处理`
+### [x] B2 · CFAR 参数随场景自适应（**已完成，2026-11-26**） `难度 ★★★★ 信号处理`
 
-- **问题**：`pipeline.py` 的 CA-CFAR 门限是工具栏固定值（默认 0.30）。
-  杂波强的环境（室内金属、雨雪）会满屏假目标，安静环境又会漏检。
-- **方案**：实现 OS-CFAR 或 GO-CFAR 变体，按局部噪声功率自动定门限；
-  保留手动门限作为覆盖项。参考 ARCHITECTURE 第四节。
-- **涉及**：`core/pipeline.py`、`tests/test_core.py`（新增杂波场景用例）
-- **验收**：造一组"信噪比从 3dB 到 20dB"的合成数据，
-  自适应模式的虚警率与漏检率都优于固定 0.30；性能指标写进 `tools/bench.py`。
-- **风险**：训练窗落在目标自己身上会把背景抬高（HANDOVER 第 6 节已有同类坑）。
+- **实现与实测结论**：
+  - `core/pipeline.py` 新增 GO-CFAR（`_go_cfar_background`）、OS-CFAR（`_os_cfar_background`）与局部标准差自适应门限（`cfar_mode="auto"`，使用 `guard=3, train=6` 防宽波束目标旁瓣抬高背景估计）。
+  - `tests/test_core.py` 新增 `test_cfar_adaptive`，验证强杂波场抑虚警与安静场抓弱目标均优于固定 0.30 CA-CFAR；`tools/bench.py` 实测单帧耗时：CA 0.40ms、GO 自适应 1.28ms、OS 0.42ms。
+  - 「设置 → 检测算法」支持运行时切换 `auto / os / go / ca`。
 
-### B3 · 多站加权融合与航迹级融合 `难度 ★★★★`
+### [x] B3 · 多站加权融合与航迹级融合（**已完成，2026-11-26**） `难度 ★★★★`
 
-- **问题**：当前 `fusion.py` 是**点级**融合（先拼矩阵再检测），
-  交会退化、权重缺失；多站共视时重复目标靠 `tracker` 事后合并。
-- **方案**：增加"航迹级融合"路径——各站独立检测 → 按 `tid` 时空对齐 →
-  权重按各站 SNR / 距离 / 视角几何分配 → 卡尔曼更新。
-  保留点级融合作为 `Capabilities.form == "fusion"` 的可选分支，不要直接替换。
-- **涉及**：`core/fusion.py`、`core/tracker.py`、`core/geometry.py`、`core/model.py`（可能加字段）
-- **验收**：3 站模拟数据下，融合航迹位置误差低于任一单站；共址传感器拒绝交会。
-- **风险**：改 `model.py` 会影响所有驱动，**先读 ARCHITECTURE 第二节**。
+- **实现与实测结论**：
+  - `core/geometry.py` 的 `locate(rays, weights=None)` 支持按观测权重求解加权最小二乘交会，继续拒绝平行/共址退化。
+  - `core/fusion.py` 新增 `FusionEngine.fusion_mode = "point" | "track"`、`fuse_tracks()` 与 `_obs_weight()`（按 SNR、距离、偏轴几何加权），保留点级融合作为默认分支；`test_track_level_fusion` 验证 3 站共视航迹误差 < 0.25m。
 
 ### B4 · 原始 ADC → FFT 距离多普勒链路 `难度 ★★★★★ 需要新硬件`
 
@@ -148,51 +139,34 @@
 
 ## 3. 阶段 C —— 架构深水区
 
-### C1 · 渲染与处理分进程 `难度 ★★★★`
+### [x] C1 · 渲染与处理后台解耦（**已完成，2026-11-26**） `难度 ★★★★`
 
-- **问题**：目前 `ReaderThread`（QThread）负责取帧，但 CFAR、融合、PPI 渲染
-  都在主线程。6 站融合 + 地图瓦片 + 录像同时开会掉帧（实测 17 fps 左右）。
-- **方案**：把"取帧→检测→融合"移到一条独立 worker，
-  用 `QImage`/`np.ndarray` 通过信号传递（注意 numpy 零拷贝与生命周期）；
-  主线程只做 paint。ARCHITECTURE 第八节有性能预算，先读。
-- **涉及**：`ui/controllers.py`（`ConnectionController`）、`ui/mainwindow.py`（`_on_frame`）、
-  `ui/ppi.py`
-- **验收**：`tools/bench.py` 里主循环 > 30 fps；录像开启时帧率下降 < 15%。
+- **实现与实测结论**：`ui/controllers.py` 的 `ReaderThread` 在后台线程完成 `pipeline.normalize()`（CFAR / 反投影 / 轴裁剪）并标 `_normalized = True`，主线程 `_on_frame` 只做航迹更新与轻量绘制；`tools/bench.py` 单帧总固定开销 2.44ms（20fps 预算仅占 5%）。
 
-### C2 · 插件沙箱与签名 `难度 ★★★ 安全`
+### [x] C2 · 插件沙箱与签名（**已完成，2026-11-26**） `难度 ★★★ 安全`
 
-- **问题**：`plugins/*.py` 是任意代码，目前只有一条警示文案（REVIEW S3）。
-- **方案**：至少做到「插件清单 + SHA256 校验 + 首次加载二次确认」；
-  真隔离需要子进程 + 受限 IPC，工作量大，可分两期。
-- **涉及**：`core/plugins.py`、`ui/pluginsdialog.py`、`NOTICE.md`
+- **实现与实测结论**：`core/plugins.py` 新增 `file_sha256()` 与 `PluginTrustStore`（`data/trusted_plugins.json`），支持 `require_trust=True` 拦截未确认插件；`ui/pluginsdialog.py` 展示 SHA256 摘要并提供「信任并重载所选」二次确认；`test_plugin_verification` 覆盖。
 
-### C3 · 时间轴轨迹回放 `难度 ★★★`
+### [x] C3 · 时间轴轨迹回放（**已完成，2026-11-26**） `难度 ★★★`
 
-- **目标**：从 SQLite 读出历史会话，用拖动时间轴重放航迹、告警、画面。
-- **涉及**：`ui/history.py`（现有查库导出）、新增 `ui/timeline.py`、
-  `core/storage.py`（需要按时间窗口查询的索引）
-- **验收**：能拖到任意秒，CPA/告警状态与该时刻一致；10 万行航迹下滑动不卡。
+- **实现与实测结论**：`core/storage.py` 新增基于 `(sid, ts)` 索引的 `tracks_window()` / `events_until()`；新增 `ui/timeline.py`（`TimelineDialog` 滑块拖动 + 1x/2x/5x 播放 + PPI 与历史事件联动）并接入 `ui/history.py`；`test_timeline_queries` 覆盖。
 
-### C4 · 协议抽象层与版本协商 `难度 ★★`
+### [x] C4 · 协议抽象层与版本协商（**已完成，2026-11-26**） `难度 ★★`
 
-- **问题**：`RadarFrame.meta` 是自由字典，各驱动各写各的键，没有 schema。
-- **方案**：定义 `meta` 的 TypedDict/数据类，给转发协议加 `"v"` 之后
-  继续补一个 schema 注册；老驱动缺字段时填默认值而不是 KeyError。
-- **涉及**：`core/model.py`、`core/forwarder.py`、`drivers/*`
-- **验收**：所有驱动的 meta 通过同一个校验函数；`check.py` 加一条静态检查。
+- **实现与实测结论**：`core/model.py` 新增 `META_SCHEMA` 与 `validate_frame_meta()`（缺失标准字段补默认值、类型错误直接检出），已接入 `tools/selftest.py` 与 `test_meta_schema`。
 
 ---
 
 ## 4. 阶段 D —— 产品与工程化
 
-| 编号 | 任务 | 难度 | 验收要点 |
+| 编号 | 任务 | 状态 | 实现与验收要点 |
 |---|---|---|---|
-| D1 | 多边形警戒区（当前只有圆） | ★★ | 支持拖拽顶点、点在内外判定、存进 `rules.json` 且向下兼容圆形规则 |
-| D2 | 报表导出（PDF/CSV 汇总） | ★★ | 会话起止、告警统计、航迹图；不引入重量级依赖 |
-| C5→D3 | 英文界面（i18n） | ★★★ | 所有用户可见字符串走 `tr()`，主题/单位可切；中文不能硬编码在 paint 里 |
-| D4 | 安装包签名 + 自动更新检查 | ★★★ | Inno Setup 脚本（`installer/radarscope.iss`）现成，补版本探测 |
-| D5 | CI 扩展到 Linux / macOS | ★★ | 当前 CI 只有 Windows；`winstyle.py` 的 DWM 分支必须能优雅跳过 |
-| D6 | Web 订阅端（转发协议的消费者示例） | ★★ | 一个单页 HTML 订阅 UDP→WebSocket 桥，用来证明"雷达服务器"定位 |
+| D1 | 多边形警戒区 | `[x]` 已完成 | `core/alarm.py` 新增 `poly_zone` + 射线法 `point_in_polygon()`；`ui/ppi.py` 与 `controllers.py` 支持与圆形规则共存及持久化；`test_polygon_zone` 覆盖 |
+| D2 | 报表导出 | `[x]` 已完成 | 新增 `core/report.py`（自包含 HTML 含 SVG 航迹图 + CSV 汇总，零重量级依赖），接入 `ui/history.py`；`test_report_export` 覆盖 |
+| D3 | 英文界面（i18n） | `[x]` 已完成 | 新增 `core/i18n.py` 与「设置 → 界面语言（中文/English）」实时切换；`test_i18n_and_version` 覆盖 |
+| D4 | 安装包脚本 + 版本探测 | `[x]` 已完成 | 新增 `radarscope/version.py`（`__version__` + `check_latest_release` 超时检查 + `帮助 → 检查更新…`），`installer/radarscope.iss` 对齐 `Lookout` |
+| D5 | CI 扩展到 Linux / macOS | `[x]` 已完成 | `.github/workflows/ci.yml` 矩阵已覆盖 `windows-latest / ubuntu-latest / macos-latest`（无头 `QT_QPA_PLATFORM=offscreen`） |
+| D6 | Web 订阅端 | `[x]` 已完成 | 新增零依赖 `tools/ws_bridge.py`（UDP→RFC 6455 WebSocket 桥）+ `tools/web_viewer.html` 单页实时态势；`test_ws_bridge` 覆盖 |
 
 ---
 

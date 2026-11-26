@@ -13,17 +13,14 @@
 
 | 文件 | 具体职责 | 改动注意 |
 |---|---|---|
-| `main.py` | 程序入口：日志初始化、全局异常兜底、`--selftest` 分支、创建 QApplication 与 MainWindow、套用上次主题 | `--selftest` **不创建窗口**，靠退出码表达成败；自检逻辑已抽到 `core/selftest.py` |
-| `selftest.py` | 独立的无界面自检脚本（链路验证） | 与 `main.py --selftest` 有重叠，新代码优先用 `core/selftest.py` |
-| `requirements.txt` | 运行时依赖（PyQt5 / numpy / pyserial；`bleak` 可选） | 新依赖必须确认能进 PyInstaller 包体 |
-| `requirements-dev.txt` | 仅文档/开发工具：Pillow（动图）、PyInstaller | **不要**和运行依赖混在一起 |
+| `main.py` | 程序入口：日志初始化、全局异常兜底、`--selftest` 分支、设置应用 Logo 图标、创建 MainWindow、套用上次主题 | `--selftest` **不创建窗口**，靠退出码表达成败；自检逻辑已抽到 `core/selftest.py` |
+| `requirements.txt` | 运行时依赖（PyQt5 / numpy / pyserial / bleak） | 新依赖必须确认能进 PyInstaller 包体 |
 | `README.md` | 项目门面：Logo、动图、特性表、快速开始、设备表、转发协议、插件、文档索引 | 已知限制与路线图要跟代码同步 |
 | `LICENSE` | 纯 MIT 文本 | 别再夹第三方说明，否则 GitHub 识别成 "Other" |
 | `NOTICE.md` | 第三方归属：OSM / CARTO 瓦片使用条件 | 用地图功能就必须保留归属（界面左下角也显示） |
-| `.gitignore` | 排除 `dist/ build/ data/ .venv/ tiles/ __pycache__/ *.db` | 别把 129MB 产物提交上去 |
+| `.gitignore` | 排除 `dist/ build/ data/ .venv/ tiles/ __pycache__/ *.db *.spec`（保留 `installer/Lookout.spec`） | 别把 129MB 产物提交上去 |
 | `.gitattributes` | 把 `firmware/**` 标 `linguist-vendored`，避免 `.ino` 把仓库语言统计成 C++ | 纯 GitHub 展示用 |
-| `Lookout.spec` | PyInstaller 生成的构建配置（`2-打包EXE.bat` 会重写） | 手改容易和命令行参数打架 |
-| `.github/workflows/ci.yml` | Windows + Python 3.11/3.12 跑 `tools/check.py` | 见 ROADMAP D5（扩 Linux/macOS） |
+| `.github/workflows/ci.yml` | Windows / Linux / macOS + Python 3.11/3.12 跑 `tools/check.py` | Linux/macOS 走无头 `QT_QPA_PLATFORM=offscreen` |
 
 ### 目录
 
@@ -37,7 +34,7 @@
 | `tools/` | 开发/文档工具（下面单列） |
 | `tests/` | `test_core.py`（21 组测试）+ `fixtures/`（5 份 `.bin`/`.rad` 回归夹具与 `manifest.json`） |
 | `docs/` | 全部文档（下面单列） |
-| `installer/` | Inno Setup 安装包脚本 `radarscope.iss`（尚未编译签名，见 ROADMAP D4） |
+| `installer/` | `radarscope.iss` 安装包脚本与 `Lookout.spec` 构建配置 |
 | `firmware/` | `hc_sr04_servo.ino`，HC-SR04 + 舵机扫描的 Arduino 示例 |
 
 **`data/` 内容**（打包版在 `%LOCALAPPDATA%\Lookout\data`）：
@@ -148,12 +145,16 @@
 
 | 文件 | 具体职责 |
 |---|---|
-| `check.py` | **提交前必跑**：编译 + 21 组测试 + 链路自检 + 录制夹具回归，判据与 CI 一致 |
+| `check.py` | **提交前必跑**：编译 + 32 组测试 + 链路自检 + 录制夹具回归，判据与 CI 一致 |
+| `selftest.py` | 独立的无界面链路自检（含 `validate_frame_meta` 校验） |
 | `capture_check.py` | 离线校验 `.bin`/`.rad` 录制夹具（帧数/峰值/目标数/CRC 拒绝数），默认批量跑 `tests/fixtures/manifest.json` |
-| `bench.py` | 性能基准（改线程模型 C1 前先留基线） |
+| `ws_bridge.py` | 零依赖 UDP→WebSocket 桥接与静态页服务器（配合 `web_viewer.html` 做 Web 订阅端） |
+| `web_viewer.html` | 单页浏览器实时 PPI 订阅示例（ROADMAP D6） |
+| `requirements-dev.txt` | 开发/文档工具依赖（Pillow、PyInstaller） |
+| `bench.py` | 性能基准（覆盖 CA / GO 自适应 / OS CFAR、融合、PPI 与 SQLite） |
 | `make_icon.py` | 离屏画 `assets/logo.png` + `assets/app.ico`（手写多尺寸 ICO 头 + PNG 负载） |
-| `make_shortcut.py` | 按 **MS-SHLLINK** 手写 `桌面\瞭望 Lookout.lnk`（COM 被安全策略拦，不依赖 COM） |
-| `make_demo.py` | 离屏渲染 20 帧 PPI → `assets/demo.gif`（需要 Pillow，见 `requirements-dev.txt`） |
+| `make_shortcut.py` | 生成 `桌面\瞭望 Lookout.lnk`（优先 WScript.Shell，COM 被拦时回退 MS-SHLLINK） |
+| `make_demo.py` | 离屏渲染 20 帧 PPI → `assets/demo.gif`（需要 Pillow，见 `tools/requirements-dev.txt`） |
 
 > 三个 `make_*.py` 都用 `QT_QPA_PLATFORM=offscreen`，**不弹窗口**；
 > 截图/动图必须设 `QT_QPA_FONTDIR=C:\Windows\Fonts`，否则渲染出来完全没有文字。
@@ -162,7 +163,7 @@
 
 ## `tests/` —— 测试即规格
 
-`tests/test_core.py` 共 **20 组**，不依赖 pytest，直接 `python tests/test_core.py`。
+`tests/test_core.py` 共 **32 组**，不依赖 pytest，直接 `python tests/test_core.py`。
 **不打桩、不 mock**：直接跑真实算法与真实 SQLite。
 
 | 组 | 盯的是什么 |

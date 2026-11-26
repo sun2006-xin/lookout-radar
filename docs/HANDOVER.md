@@ -225,6 +225,8 @@ class MyRadarDriver(RadarDriver):
 | QImage 存不到内存流 | `QImage.save(BytesIO)` 没有这个重载 | 用 `QBuffer` 或临时文件 |
 | 拆 mixin 后 NameError | 方法搬走了，模块级常量/类没跟着搬 | 常量与 `ReaderThread` 一起放进 controllers.py 并显式 import |
 | 手写 `.lnk` 快捷方式双击打不开 | `WScript.Shell` 读 `TargetPath` 为空（缺少完整 IDList） | `make_shortcut.py` 优先用 `WScript.Shell` 生成，COM 被拦时再回退二进制 |
+| 自适应 CFAR 强杂波下虚警飙升 | 用 GO-CFAR 最大半窗均值代替全环均值算 $\mathbb{E}[X^2] - \mu^2$，低估方差 | 用全环积分图算局部标准差 $\sigma$，并用保护窗 `guard=3, train=6` |
+| 浅色主题下 PPI 点击测距出现黑灰方块 | `_draw_probe()` 硬编码了 `QColor(0,0,0,170)` 背景配 `pal["text"]` 深色字 | 背景改用 `QColor(*pal["bg"], 235)` + `pal["grid"]` 边框 |
 | 地图整片被盖住看不见 | 光栅 0 号色不透明，把底图糊住了 | `_ctable_for()` 把低电平（<26）设成全透明 |
 | 地图级别永远是最粗的 | 从低级往高级找，第一个满足条件的总是 z=3 | 从 z=18 往下找，取第一个能装下的 |
 | 换浅色主题后雷达图一片灰白 | 深色色板挂在白底上 | `_apply_theme()` 里按主题自动配对色板（daylight/ice） |

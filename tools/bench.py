@@ -87,7 +87,9 @@ def bench_pipeline() -> list[tuple[str, float]]:
                        az_axis=f_src.az_axis, r_axis=f_src.r_axis)
 
     out = [
-        ("CFAR 检测（121×144 栅格）", timeit(lambda: pipeline.detect_targets(frame, 0.30), 40)),
+        ("CFAR 检测（CA, 121×144）", timeit(lambda: pipeline.detect_targets(frame, 0.30, cfar_mode="ca"), 40)),
+        ("CFAR 检测（GO 自适应）", timeit(lambda: pipeline.detect_targets(frame, 0.30, cfar_mode="auto"), 40)),
+        ("CFAR 检测（OS 有序统计）", timeit(lambda: pipeline.detect_targets(frame, 0.30, cfar_mode="os"), 40)),
         ("矩阵反投影（目标→矩阵）", timeit(lambda: pipeline.synthesize_scan(
             caps, [Target(x=1.0, y=3.0), Target(x=-2.0, y=5.0)]), 40)),
         ("距离剖面", timeit(lambda: pipeline.range_profile(frame), 40)),

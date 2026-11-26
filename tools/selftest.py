@@ -5,13 +5,20 @@
 """
 from __future__ import annotations
 
+import sys
 import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import numpy as np
 
 import radarscope.drivers  # noqa: F401
 from radarscope.core import pipeline
 from radarscope.core.driver import available_drivers
+from radarscope.core.model import validate_frame_meta
 from radarscope.core.tracker import Tracker
 
 
@@ -34,6 +41,8 @@ def run(mode: str = "staring", frames: int = 60) -> None:
             time.sleep(0.002)
         if frame is None:
             continue
+        errs = validate_frame_meta(frame)
+        assert not errs, f"{mode} meta schema 违规: {errs}"
         f = pipeline.normalize(frame, caps)
         dt = (frame.timestamp - last_ts) if last_ts else 0.1
         last_ts = frame.timestamp

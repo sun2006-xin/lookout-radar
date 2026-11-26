@@ -804,6 +804,201 @@ def test_waterfall_projection() -> None:
     ok("瀑布图 B1：5 条独立航迹折线投影")
 
 
+def test_cfar_adaptive() -> None:
+    """B2 自适应 CFAR：弱目标与强杂波下均优于固定 0.30 CA-CFAR。"""
+    caps = Capabilities(has_scan=True, has_azimuth=True, az_fov=120.0,
+                        range_min=0.2, range_max=10.0)
+    rng = np.random.default_rng(42)
+
+    # 1) 强杂波场（均值 0.25，局部方差大）下只有 1 个真目标 (SNR=0.95)
+    f1 = pipeline.synthesize_scan(caps, [Target(x=1.2, y=5.0, snr=0.95)])
+    clutter = np.clip(0.22 + rng.normal(0.0, 0.14, f1.scan.shape), 0.0, 0.85).astype(np.float32)
+    scan1 = np.maximum(f1.scan, clutter)
+    # 恢复目标真实峰值（synthesize_scan 已有，确保峰值明显高于杂波）
+    frame_clutter = RadarFrame(timestamp=1.0, scan=scan1, az_axis=f1.az_axis, r_axis=f1.r_axis)
+    ca_fa = len(pipeline.detect_targets(frame_clutter, threshold=0.30, cfar_mode="ca", max_targets=16))
+    auto_fa = len(pipeline.detect_targets(frame_clutter, threshold=0.30, cfar_mode="auto", max_targets=16))
+    assert auto_fa <= ca_fa and auto_fa <= 3, f"强杂波自适应虚警未收敛: auto={auto_fa}, ca={ca_fa}"
+
+    # 2) 安静环境弱目标（峰值 0.24，固定 0.30 会漏检，auto 能抓到）
+    f2 = pipeline.synthesize_scan(caps, [Target(x=0.0, y=4.0, snr=0.25)])
+    quiet_noise = np.clip(rng.normal(0.015, 0.006, f2.scan.shape), 0.0, 0.05).astype(np.float32)
+    scan2 = np.maximum(f2.scan * 0.96, quiet_noise)
+    frame_quiet = RadarFrame(timestamp=2.0, scan=scan2, az_axis=f2.az_axis, r_axis=f2.r_axis)
+    ca_miss = len(pipeline.detect_targets(frame_quiet, threshold=0.30, cfar_mode="ca"))
+    auto_hit = len(pipeline.detect_targets(frame_quiet, threshold=0.30, cfar_mode="auto"))
+    assert ca_miss == 0 and auto_hit >= 1, f"安静弱目标对比异常: ca={ca_miss}, auto={auto_hit}"
+    ok("自适应 CFAR (B2)：强杂波抑虚警 + 弱目标防漏检")
+
+
+def test_track_level_fusion() -> None:
+    """B3 航迹级加权融合：3 站各自产生独立航迹，融合后误差低于最差单站且建立全局航迹。"""
+    from math import atan2, degrees, hypot
+    from radarscope.core.fusion import FusionEngine, SensorSpec, global_to_local
+
+    true_x, true_y = 2.0, 4.5
+    specs = [
+        SensorSpec("S1", x=-3.0, y=0.0, bearing_deg=30.0),
+        SensorSpec("S2", x=3.0, y=0.0, bearing_deg=-30.0),
+        SensorSpec("S3", x=0.0, y=-2.5, bearing_deg=0.0),
+    ]
+
+    class _Stub:
+        def __init__(self, spec: SensorSpec, dr: float, snr: float):
+            self.spec = spec
+            self.dr = dr
+            self.snr = snr
+            self.t = 0.0
+
+        def read(self) -> RadarFrame:
+            lx, ly = global_to_local(true_x, true_y, self.spec)
+            r = hypot(lx, ly) + self.dr
+            a = atan2(lx, ly)
+            self.t += 0.05
+            return RadarFrame(
+                timestamp=self.t,
+                targets=[Target(x=r * np.sin(a), y=r * np.cos(a), snr=self.snr)],
+            )
+
+        def close(self) -> None:
+            pass
+
+    eng = FusionEngine(rate=100.0)
+    eng.fusion_mode = "track"
+    eng.attach(specs[0], _Stub(specs[0], dr=0.45, snr=0.8))
+    eng.attach(specs[1], _Stub(specs[1], dr=-0.45, snr=0.8))
+    eng.attach(specs[2], _Stub(specs[2], dr=0.10, snr=0.95))
+
+    frame = None
+    for k in range(5):
+        for c in eng._children:
+            c.frame = c.dev.read()
+            c.last_frame_t = float(k + 1) * 0.05
+        fused = eng.fuse_tracks(now=float(k + 1) * 0.05)
+        frame = fused
+    assert frame and len(frame) == 1
+    err = hypot(frame[0].x - true_x, frame[0].y - true_y)
+    assert err < 0.25 and frame[0].views == 3, f"3 站航迹融合误差过大 err={err:.3f}, views={frame[0].views}"
+    ok("航迹级加权融合 (B3)：3 站共视误差 < 0.25m")
+
+
+def test_plugin_verification() -> None:
+    """C2 插件校验：SHA256 摘要 + 未信任拦截 + 授权信任后加载。"""
+    from radarscope.core.plugins import PluginManager
+
+    with tempfile.TemporaryDirectory() as td:
+        pdir = Path(td) / "plugins"
+        pdir.mkdir()
+        plug = pdir / "demo_p.py"
+        plug.write_text('PLUGIN = {"name": "演示插件"}\ndef setup(api): api.log("ok")\n', encoding="utf-8")
+        trust = Path(td) / "trusted.json"
+
+        mgr = PluginManager(pdir, trust_path=trust, require_trust=True)
+        infos = mgr.load_all()
+        assert len(infos) == 1 and not infos[0].trusted and not infos[0].ok, "未信任插件不应自动执行"
+
+        mgr.approve_plugin(plug)
+        infos2 = mgr.reload()
+        assert infos2[0].trusted and infos2[0].ok and len(infos2[0].sha256) == 64
+    ok("插件安全校验 (C2)：SHA256 清单与信任确认拦截")
+
+
+def test_timeline_queries() -> None:
+    """C3 时间轴回放查询：按时间窗口检索航迹与截至时刻告警事件。"""
+    with tempfile.TemporaryDirectory() as td:
+        st = Store(Path(td) / "tl.db")
+        sid = st.start_session("sim", "virtual")
+        st.record_tracks(100.0, [Target(x=1.0, y=2.0, tid=1)])
+        st.record_tracks(105.0, [Target(x=2.0, y=4.0, tid=1)])
+        st.record_tracks(110.0, [Target(x=3.0, y=6.0, tid=1)])
+        st.record_event("warn", "alarm", "防区告警", rule_id="z1", ts=104.0)
+        st.record_event("crit", "alarm", "后期告警", rule_id="z2", ts=109.0)
+        st.flush(force=True)
+
+        win = st.tracks_window(sid, 104.5, 105.5)
+        assert len(win) == 1 and abs(win[0][2] - 2.0) < 1e-3
+        evts = st.events_until(sid, 106.0)
+        assert len(evts) == 1 and evts[0][3] == "z1"
+        st.end_session("ok")
+        st.close()
+    ok("时间轴查询 (C3)：时间窗口航迹与历史事件检索")
+
+
+def test_meta_schema() -> None:
+    """C4 Meta Schema：标准键补全与非法类型检出。"""
+    from radarscope.core.model import validate_frame_meta
+
+    f = RadarFrame(timestamp=1.0, meta={"bad": 2})
+    errs = validate_frame_meta(f)
+    assert not errs and f.meta["good"] == 0 and f.meta["scan_period"] == 0.1
+    f_bad = RadarFrame(timestamp=1.0, meta={"bad": "not_int"})
+    assert validate_frame_meta(f_bad), "类型错误应检出"
+    ok("Meta Schema (C4)：默认值补全与类型校验")
+
+
+def test_polygon_zone() -> None:
+    """D1 多边形警戒区：射线法内外判定 + AlarmEngine 触发。"""
+    poly = [[-1.0, 2.0], [1.0, 2.0], [1.0, 4.0], [-1.0, 4.0]]
+    eng = AlarmEngine([
+        AlarmRule("pz", "多边形区", "poly_zone", {"points": poly}, hold=0.0, cooldown=0.0),
+    ])
+    caps = Capabilities()
+    assert eng.evaluate([Target(x=2.5, y=3.0, tid=1)], caps, now=0.0) == []
+    ev = eng.evaluate([Target(x=0.2, y=3.0, tid=1)], caps, now=1.0)
+    assert any(e.rule_id == "pz" and e.active for e in ev), "多边形内目标应触发告警"
+    ok("多边形警戒区 (D1)：射线法点在多边形内判定与告警")
+
+
+def test_report_export() -> None:
+    """D2 报表导出：自包含 HTML（含 SVG）与 CSV 汇总生成。"""
+    from radarscope.core.report import export_session_report
+
+    with tempfile.TemporaryDirectory() as td:
+        st = Store(Path(td) / "rep.db")
+        sid = st.start_session("sim", "virtual", Capabilities(name="演示雷达"))
+        st.record_tracks(100.0, [Target(x=1.0, y=3.0, tid=1)])
+        st.record_event("warn", "alarm", "测试告警", rule_id="r1", ts=100.5)
+        st.end_session("done")
+
+        html_p = export_session_report(st, sid, Path(td) / "out.html")
+        csv_p = export_session_report(st, sid, Path(td) / "out.csv")
+        st.close()
+        assert "<svg" in html_p.read_text(encoding="utf-8")
+        assert "测试告警" in csv_p.read_text(encoding="utf-8-sig")
+    ok("报表导出 (D2)：HTML SVG 图与 CSV 汇总")
+
+
+def test_i18n_and_version() -> None:
+    """D3/D4 i18n 与版本号对比。"""
+    from radarscope.core.i18n import set_lang, tr
+    from radarscope.version import is_newer
+
+    set_lang("en")
+    assert tr("设置(&S)") == "Settings(&S)"
+    set_lang("zh")
+    assert tr("设置(&S)") == "设置(&S)"
+    assert is_newer("v1.2.0", "1.1.0") and not is_newer("1.1.0", "1.1.0")
+    ok("国际化与版本探测 (D3/D4)：中英文切换与版本比对")
+
+
+def test_ws_bridge() -> None:
+    """D6 Web 订阅桥：RFC 6455 握手密钥与文本帧编码。"""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "ws_bridge", Path(__file__).resolve().parents[1] / "tools" / "ws_bridge.py"
+    )
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    # RFC 6455 标准示例密钥验证
+    assert mod.ws_accept_key("dGhlIHNhbXBsZSBub25jZQ==") == "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+    pkt = mod.encode_ws_text('{"v":1}')
+    assert pkt[0] == 0x81 and pkt[1] == 7 and pkt[2:] == b'{"v":1}'
+    ok("Web 订阅桥 (D6)：RFC 6455 握手与 WS 帧编码")
+
+
 def main() -> int:
     print("RadarScope 核心测试")
     for fn in (test_codec, test_ld2450_sign, test_pipeline, test_alarm,
@@ -812,7 +1007,11 @@ def main() -> int:
                test_lidar_protocol, test_viewmath, test_stats_queries, test_cpa,
                test_forwarder, test_ais, test_control_channel, test_maptiles,
                test_noise_floor_stable, test_capture_fixtures,
-               test_ble_transport, test_waterfall_projection):
+               test_ble_transport, test_waterfall_projection,
+               test_cfar_adaptive, test_track_level_fusion,
+               test_plugin_verification, test_timeline_queries, test_meta_schema,
+               test_polygon_zone, test_report_export, test_i18n_and_version,
+               test_ws_bridge):
         fn()
     print(f"\n全部通过：{PASS} 组")
     return 0

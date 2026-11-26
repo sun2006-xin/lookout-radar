@@ -28,6 +28,8 @@ import numpy as np
 
 from .model import Capabilities, RadarFrame, Target
 from .geometry import locate, ray_of
+from . import pipeline
+from .tracker import Tracker
 
 
 @dataclass(slots=True)
@@ -94,7 +96,8 @@ def global_to_local(x: float, y: float, spec: SensorSpec) -> tuple[float, float]
 
 class _Child:
     __slots__ = ("spec", "dev", "lut_key", "lut_idx", "lut_ok", "frame",
-                 "last_frame_t", "frames", "errors", "last_err", "fps_t", "fps_n", "fps")
+                 "last_frame_t", "frames", "errors", "last_err", "fps_t", "fps_n", "fps",
+                 "tracker", "prev_ts")
 
     def __init__(self, spec: SensorSpec, dev):
         self.spec = spec
@@ -110,6 +113,8 @@ class _Child:
         self.fps_t = time.monotonic()
         self.fps_n = 0
         self.fps = 0.0
+        self.tracker = Tracker()
+        self.prev_ts = 0.0
 
 
 class FusionEngine:
@@ -130,6 +135,8 @@ class FusionEngine:
         self.stale_s = stale_s
 
         # ---- 目标级融合参数 ----
+        #: 融合方式："point" 点级矩阵拼接 + 交会；"track" 各站独立检测跟踪后航迹级加权融合
+        self.fusion_mode: str = "point"
         #: 是否在重叠区用方位线交会定位（真融合），关掉就退化成"各测各的取平均"
         self.triangulate = True
         #: 同一个目标被不同站观测到，判定为同一批的距离门限
@@ -137,6 +144,8 @@ class FusionEngine:
         #: 两站间距小于这个值时不做交会（基线太短会病态，解出来的点没意义）
         self.min_baseline = 0.3
         self.stats: dict[str, int] = {"clusters": 0, "tri": 0, "single": 0}
+        self._global_tracker = Tracker()
+        self._global_prev_t = 0.0
 
         self._grid_az = np.linspace(-pi, pi, n_az, endpoint=False).astype(np.float32)
         self._grid_r = np.linspace(range_min, range_max, n_rng).astype(np.float32)
@@ -267,7 +276,10 @@ class FusionEngine:
                 # 坐标里已经混进了距离误差，角度才是方位线真正的信息
                 obs.append((c.spec, t, degrees(atan2(t.x, t.y)), gx, gy))
 
-        fused_targets = self._fuse_targets(obs)
+        if self.fusion_mode == "track":
+            fused_targets = self.fuse_tracks(now)
+        else:
+            fused_targets = self._fuse_targets(obs)
 
         return RadarFrame(
             timestamp=now,
@@ -280,6 +292,7 @@ class FusionEngine:
                 "sensors": self.sensor_status(),
                 "coverage": self.coverage(),
                 "fusion": True,
+                "fusion_mode": self.fusion_mode,
                 "fusion_stats": dict(self.stats),
             },
         )
@@ -302,15 +315,43 @@ class FusionEngine:
         np.maximum(c[:, :-1], b[:, 1:], out=c[:, :-1])
         return c
 
-    # ------------------------------------------------------------------ #
-    def _fuse_targets(self, obs) -> list[Target]:
-        """目标级融合：先聚类（哪些观测其实是同一个目标），再定位置。
+    @staticmethod
+    def _obs_weight(spec: SensorSpec, t: Target, ang_deg: float) -> float:
+        """按信噪比、距离（近更准）与视角（正前更准）计算单站观测权重。"""
+        snr_w = (0.25 + max(0.0, float(t.snr))) ** 2
+        rng_w = 1.0 / max(0.5, float(t.rng))
+        fov_half = max(15.0, float(spec.fov_deg) * 0.5)
+        off_ratio = min(1.0, abs(((ang_deg + 180.0) % 360.0) - 180.0) / fov_half)
+        geom_w = max(0.25, 1.0 - 0.65 * off_ratio * off_ratio)
+        return snr_w * rng_w * geom_w
 
-        为什么值得多写这四十行：
-        单纯"各测各的、最后取平均"的精度受单台测距误差限制；
-        而两台的**方位线**可以在距离有误差的情况下仍然交会出更准的位置——
-        方位角误差小，距离误差大，这是雷达的普遍特点，交会正好扬长避短。
-        """
+    def fuse_tracks(self, now: float | None = None) -> list[Target]:
+        """航迹级加权融合（ROADMAP B3）：各站独立检测与跟踪 -> 时空对齐 -> 加权交会/更新。"""
+        t_now = time.monotonic() if now is None else now
+        obs: list[tuple[SensorSpec, Target, float, float, float]] = []
+        for c in self._children:
+            if not c.spec.enabled or c.frame is None:
+                continue
+            if t_now - c.last_frame_t > self.stale_s:
+                continue
+            f = c.frame
+            dets = list(f.targets)
+            if not dets and f.has_scan:
+                dets = pipeline.detect_targets(f, threshold=0.25, max_targets=12, cfar_mode="auto")
+            dt = (t_now - c.prev_ts) if c.prev_ts else 0.05
+            c.prev_ts = t_now
+            tracks = c.tracker.update(dets, max(0.01, min(1.0, dt)))
+            for tr in tracks:
+                gx, gy = local_to_global(tr.x, tr.y, c.spec)
+                obs.append((c.spec, tr, degrees(atan2(tr.x, tr.y)), gx, gy))
+
+        fused = self._fuse_targets(obs)
+        g_dt = (t_now - self._global_prev_t) if self._global_prev_t else 0.05
+        self._global_prev_t = t_now
+        return self._global_tracker.update(fused, max(0.01, min(1.0, g_dt)))
+
+    def _fuse_targets(self, obs) -> list[Target]:
+        """目标/航迹级融合：按空间门限聚类后，按 SNR/距离/视角几何加权融合或交会。"""
         clusters: list[list[tuple]] = []
         for spec, t, ang, gx, gy in obs:
             for cl in clusters:
@@ -328,9 +369,11 @@ class FusionEngine:
         self.stats = {"clusters": len(clusters), "tri": 0, "single": 0}
         out: list[Target] = []
         for cl in clusters:
-            x, y = self._centroid(cl)
+            weights = [self._obs_weight(m[0], m[1], m[2]) for m in cl]
+            w_sum = max(1e-9, sum(weights))
+            x, y = self._centroid(cl, weights)
             if len(cl) >= 2 and self.triangulate:
-                pos = self._triangulate(cl)
+                pos = self._triangulate(cl, weights)
                 if pos is not None:
                     x, y = pos
                     self.stats["tri"] += 1
@@ -342,8 +385,8 @@ class FusionEngine:
             n = len(cl)
             out.append(Target(
                 x=x, y=y,
-                vx=sum(m[1].vx for m in cl) / n,
-                vy=sum(m[1].vy for m in cl) / n,
+                vx=sum(w * m[1].vx for w, m in zip(weights, cl)) / w_sum,
+                vy=sum(w * m[1].vy for w, m in zip(weights, cl)) / w_sum,
                 snr=max(m[1].snr for m in cl),
                 threat=max(m[1].threat for m in cl),
                 cls=_majority([m[1].cls for m in cl]),
@@ -353,11 +396,15 @@ class FusionEngine:
         return out
 
     @staticmethod
-    def _centroid(cl) -> tuple[float, float]:
-        n = len(cl)
-        return sum(m[3] for m in cl) / n, sum(m[4] for m in cl) / n
+    def _centroid(cl, weights: list[float] | None = None) -> tuple[float, float]:
+        if weights is None:
+            n = len(cl)
+            return sum(m[3] for m in cl) / n, sum(m[4] for m in cl) / n
+        w_sum = max(1e-9, sum(weights))
+        return (sum(w * m[3] for w, m in zip(weights, cl)) / w_sum,
+                sum(w * m[4] for w, m in zip(weights, cl)) / w_sum)
 
-    def _triangulate(self, cl) -> tuple[float, float] | None:
+    def _triangulate(self, cl, weights: list[float] | None = None) -> tuple[float, float] | None:
         # 基线检查：两台装在一起时两条射线共起点，最小二乘会解回起点，
         # 那不是"更准"，是彻底错。这种情况必须判无效并退回坐标变换。
         for i in range(len(cl)):
@@ -365,7 +412,7 @@ class FusionEngine:
                 a, b = cl[i][0], cl[j][0]
                 if hypot(a.x - b.x, a.y - b.y) < self.min_baseline:
                     return None
-        return locate([ray_of(m[0], m[2]) for m in cl])
+        return locate([ray_of(m[0], m[2]) for m in cl], weights=weights)
 
     # ------------------------------------------------------------------ #
     def sensor_status(self) -> list[dict]:

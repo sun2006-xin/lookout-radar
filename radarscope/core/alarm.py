@@ -75,6 +75,7 @@ DEFAULT_RULES = [
 
 PARAM_HINTS = {
     "zone": '{"cx": 0.0, "cy": 3.0, "r": 1.5}     圆心(米) 与半径(米)',
+    "poly_zone": '{"points": [[-1,2],[1,2],[1,4],[-1,4]]} 多边形顶点(米)',
     "range_lt": '{"m": 0.8}                        距离小于该值触发',
     "range_gt": '{"m": 10.0}                       距离大于该值触发',
     "speed_ge": '{"mps": 2.0}                      速度大于该值触发',
@@ -82,6 +83,22 @@ PARAM_HINTS = {
     "lost": "{}                                     所有目标丢失时触发",
     "offline": '{"s": 3.0}                         超过该秒数没有数据触发',
 }
+
+
+def point_in_polygon(px: float, py: float, points: list[list[float] | tuple[float, float]]) -> bool:
+    """射线法判断点是否在多边形内（至少 3 个顶点，向下兼容圆形规则）。"""
+    n = len(points)
+    if n < 3:
+        return False
+    inside = False
+    j = n - 1
+    for i in range(n):
+        xi, yi = float(points[i][0]), float(points[i][1])
+        xj, yj = float(points[j][0]), float(points[j][1])
+        if ((yi > py) != (yj > py)) and (px < (xj - xi) * (py - yi) / ((yj - yi) or 1e-12) + xi):
+            inside = not inside
+        j = i
+    return inside
 
 
 def merge_rules(*groups: Iterable[AlarmRule]) -> list[AlarmRule]:
@@ -212,6 +229,13 @@ class AlarmEngine:
             if best is None:
                 return False, 0.0, -1, ""
             return True, best[0], best[1], f"T{best[1]} 进入防区（距圆心 {best[0]:.2f} m，半径 {r:.1f} m）"
+
+        if rule.kind == "poly_zone":
+            pts = p.get("points") or []
+            for t in alive:
+                if point_in_polygon(t.x, t.y, pts):
+                    return True, t.rng, t.tid, f"T{t.tid} 进入多边形防区（距离 {t.rng:.2f} m）"
+            return False, 0.0, -1, ""
 
         if rule.kind == "lost":
             return len(tracks) == 0, float(len(tracks)), -1, "所有目标已丢失"

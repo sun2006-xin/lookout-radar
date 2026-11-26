@@ -21,22 +21,22 @@ RULES = [
     AlarmRule(
         "park_rear", "倒车过近", "zone",
         {"cx": 0.0, "cy": -1.2, "r": 1.5},
-        level="crit", hold=0.2, cooldown=4.0, hysteresis=0.2,
+        level="crit", hold=0.2, cooldown=4.0, hysteresis=0.2, enabled=False,
     ),
     AlarmRule(
         "park_front", "前向接近", "zone",
         {"cx": 0.0, "cy": 2.4, "r": 2.0},
-        level="warn", hold=0.5, cooldown=8.0, hysteresis=0.25,
+        level="warn", hold=0.5, cooldown=8.0, hysteresis=0.25, enabled=False,
     ),
     AlarmRule(
         "park_side_left", "左侧贴边", "zone",
         {"cx": -1.0, "cy": 0.6, "r": 0.7},
-        level="crit", hold=0.3, cooldown=5.0, hysteresis=0.2,
+        level="crit", hold=0.3, cooldown=5.0, hysteresis=0.2, enabled=False,
     ),
     AlarmRule(
         "park_side_right", "右侧贴边", "zone",
         {"cx": 1.0, "cy": 0.6, "r": 0.7},
-        level="crit", hold=0.3, cooldown=5.0, hysteresis=0.2,
+        level="crit", hold=0.3, cooldown=5.0, hysteresis=0.2, enabled=False,
     ),
 ]
 

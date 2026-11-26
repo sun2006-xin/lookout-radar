@@ -18,34 +18,82 @@ from .model import Capabilities, RadarFrame, Target
 # --------------------------------------------------------------------------- #
 # 检测：强度矩阵 -> 目标列表
 # --------------------------------------------------------------------------- #
-def _cfar_background(x: np.ndarray, guard: int = 2, train: int = 5) -> np.ndarray:
-    """二维 CA-CFAR 背景估计：训练区取环形，中间留保护单元。
-
-    为什么必须留保护单元：一个点目标在方位上会被波束展宽到好几个格，
-    如果直接拿 3x3 邻域求均值，目标自己的能量会进背景，把检测门限抬上去，
-    结果就是"看着有回波却报不出目标"。真实雷达的 CFAR 板也是这么做的。
-
-    用积分图实现，计算量与窗口大小无关。
-    """
+def _integral_box_sums(x: np.ndarray, r: int) -> tuple[np.ndarray, np.ndarray]:
+    """基于积分图的任意半径窗口求和与计数（O(1) 复杂度）。"""
     h, w = x.shape
     ii = np.zeros((h + 1, w + 1), dtype=np.float64)
     ii[1:, 1:] = x.cumsum(0, dtype=np.float64).cumsum(1)
+    y0 = np.clip(np.arange(h) - r, 0, h)
+    y1 = np.clip(np.arange(h) + r + 1, 0, h)
+    x0 = np.clip(np.arange(w) - r, 0, w)
+    x1 = np.clip(np.arange(w) + r + 1, 0, w)
+    s = (ii[y1[:, None], x1[None, :]] - ii[y0[:, None], x1[None, :]]
+         - ii[y1[:, None], x0[None, :]] + ii[y0[:, None], x0[None, :]])
+    cnt = (y1 - y0)[:, None] * (x1 - x0)[None, :]
+    return s, cnt.astype(np.float64)
 
-    def box(r: int) -> tuple[np.ndarray, np.ndarray]:
-        y0 = np.clip(np.arange(h) - r, 0, h)
-        y1 = np.clip(np.arange(h) + r + 1, 0, h)
-        x0 = np.clip(np.arange(w) - r, 0, w)
-        x1 = np.clip(np.arange(w) + r + 1, 0, w)
-        s = (ii[y1[:, None], x1[None, :]] - ii[y0[:, None], x1[None, :]]
-             - ii[y1[:, None], x0[None, :]] + ii[y0[:, None], x0[None, :]])
-        cnt = (y1 - y0)[:, None] * (x1 - x0)[None, :]
-        return s, cnt.astype(np.float64)
 
-    s_out, c_out = box(train)
-    s_in, c_in = box(guard)
+def _cfar_background(x: np.ndarray, guard: int = 2, train: int = 5) -> np.ndarray:
+    """二维 CA-CFAR 背景估计：训练区取环形，中间留保护单元。"""
+    s_out, c_out = _integral_box_sums(x, train)
+    s_in, c_in = _integral_box_sums(x, guard)
     n = c_out - c_in
     bg = np.where(n > 0, (s_out - s_in) / np.maximum(n, 1.0), s_out / np.maximum(c_out, 1.0))
     return bg.astype(np.float32)
+
+
+def _go_cfar_background(x: np.ndarray, guard: int = 2, train: int = 5) -> np.ndarray:
+    """二维 GO-CFAR（选大单元平均）：在距离前后半窗取较大背景，抑制杂波边缘虚警。"""
+    h, w = x.shape
+    ii = np.zeros((h + 1, w + 1), dtype=np.float64)
+    ii[1:, 1:] = x.cumsum(0, dtype=np.float64).cumsum(1)
+    y0 = np.clip(np.arange(h) - train, 0, h)
+    y1 = np.clip(np.arange(h) + train + 1, 0, h)
+    # 前半窗 [j - train, j - guard) 与后半窗 [j + guard + 1, j + train + 1)
+    j = np.arange(w)
+    xl0, xl1 = np.clip(j - train, 0, w), np.clip(j - guard, 0, w)
+    xr0, xr1 = np.clip(j + guard + 1, 0, w), np.clip(j + train + 1, 0, w)
+
+    sl = (ii[y1[:, None], xl1[None, :]] - ii[y0[:, None], xl1[None, :]]
+          - ii[y1[:, None], xl0[None, :]] + ii[y0[:, None], xl0[None, :]])
+    cl = np.maximum(1.0, (y1 - y0)[:, None] * np.maximum(0, xl1 - xl0)[None, :])
+    sr = (ii[y1[:, None], xr1[None, :]] - ii[y0[:, None], xr1[None, :]]
+          - ii[y1[:, None], xr0[None, :]] + ii[y0[:, None], xr0[None, :]])
+    cr = np.maximum(1.0, (y1 - y0)[:, None] * np.maximum(0, xr1 - xr0)[None, :])
+
+    has_l = (xl1 > xl0)[None, :]
+    has_r = (xr1 > xr0)[None, :]
+    ml = np.where(has_l, sl / cl, 0.0)
+    mr = np.where(has_r, sr / cr, 0.0)
+    bg = np.where(has_l & has_r, np.maximum(ml, mr), np.where(has_l, ml, mr))
+    return bg.astype(np.float32)
+
+
+def _os_cfar_background(x: np.ndarray, guard: int = 2, train: int = 5,
+                        quantile: float = 0.75) -> np.ndarray:
+    """OS-CFAR（有序统计）：沿距离训练窗取分位数，多目标靠得近时不互相抬高背景。"""
+    h, w = x.shape
+    pad = np.pad(x, ((0, 0), (train, train)), mode="edge")
+    offsets = [k for k in range(-train, train + 1) if abs(k) > guard]
+    if not offsets:
+        return _cfar_background(x, guard, train)
+    stack = np.stack([pad[:, train + off:train + off + w] for off in offsets], axis=0)
+    kth = max(0, min(len(offsets) - 1, int(round(quantile * (len(offsets) - 1)))))
+    return np.partition(stack, kth, axis=0)[kth].astype(np.float32)
+
+
+def _local_noise_std(x: np.ndarray, guard: int = 2, train: int = 5) -> np.ndarray:
+    """训练环内的局部噪声标准差，用于按场景信噪比自适应缩放门限。"""
+    xf = x.astype(np.float64)
+    s1_out, c_out = _integral_box_sums(xf, train)
+    s1_in, c_in = _integral_box_sums(xf, guard)
+    s2_out, _ = _integral_box_sums(xf * xf, train)
+    s2_in, _ = _integral_box_sums(xf * xf, guard)
+    n = np.maximum(1.0, c_out - c_in)
+    e1 = (s1_out - s1_in) / n
+    e2 = (s2_out - s2_in) / n
+    var = np.maximum(0.0, e2 - e1 * e1)
+    return np.sqrt(var).astype(np.float32)
 
 
 def detect_targets(
@@ -56,23 +104,37 @@ def detect_targets(
     guard_az: int = 4,
     guard_rng: int = 3,
     az_indices: tuple[int, int] | None = None,
+    cfar_mode: str = "ca",
 ) -> list[Target]:
-    """在强度矩阵上做峰值检测。
+    """在强度矩阵上做峰值检测（支持 CA / GO / OS / auto 自适应 CFAR）。
 
-    threshold 是"高出局部背景多少"才算目标，不是绝对门限——
-    这样近处强反射不会把远处弱目标压掉。
-
-    az_indices 给旋转扫描雷达用：只在刚刷新的扇区里找目标。
-    否则扫描拖尾（上一圈残留的高能量）会被当成一堆假目标。
+    cfar_mode:
+        "ca"   -- 经典单元平均 + 固定门限（默认兼容旧接口）
+        "go"   -- 选大平均（GO-CFAR），抑杂波边缘虚警
+        "os"   -- 有序统计（OS-CFAR），抗邻近强目标掩蔽
+        "auto" -- GO-CFAR + 局部噪声标准差自适应门限（安静更敏、杂波更稳）
     """
     if not frame.has_scan:
         return []
 
     scan = frame.scan.astype(np.float32, copy=False)
-    bg = _cfar_background(scan)
-    score = scan - bg
+    mode = (cfar_mode or "ca").lower()
+    if mode == "os":
+        bg = _os_cfar_background(scan)
+    elif mode in ("go", "auto"):
+        bg = _go_cfar_background(scan)
+    else:
+        bg = _cfar_background(scan)
 
-    mask = (score > threshold) & (scan > floor)
+    score = scan - bg
+    if mode == "auto":
+        # 用 guard=3, train=6 避免宽波束目标自身旁瓣抬高局部标准差
+        sigma = _local_noise_std(scan, guard=3, train=6)
+        eff_thr = np.clip(0.06 + 3.8 * sigma, 0.09, 0.85)
+        eff_floor = np.clip(bg + 3.0 * sigma, 0.08, 0.85)
+        mask = (score > eff_thr) & (scan > eff_floor)
+    else:
+        mask = (score > threshold) & (scan > floor)
     if frame.r_axis is not None:
         mask &= frame.r_axis[None, :] >= 0.0
     if az_indices is not None:
@@ -164,7 +226,12 @@ def synthesize_scan(
 # --------------------------------------------------------------------------- #
 # 入口：一次调用补全所有缺失
 # --------------------------------------------------------------------------- #
-def normalize(frame: RadarFrame, caps: Capabilities, threshold: float = 0.30) -> RadarFrame:
+def normalize(
+    frame: RadarFrame,
+    caps: Capabilities,
+    threshold: float = 0.30,
+    cfar_mode: str = "ca",
+) -> RadarFrame:
     """把驱动交上来的帧整理成"两种原料都齐"的状态。"""
     if frame.has_scan:
         # 裁掉无效量程，避免界面按 6m 画却只有 3m 数据
@@ -182,6 +249,7 @@ def normalize(frame: RadarFrame, caps: Capabilities, threshold: float = 0.30) ->
                 threshold=threshold,
                 max_targets=max(1, caps.max_targets or 8),
                 az_indices=fresh if isinstance(fresh, tuple) else None,
+                cfar_mode=cfar_mode,
             )
         return frame
 

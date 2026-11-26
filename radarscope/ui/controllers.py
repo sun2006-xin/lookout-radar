@@ -109,12 +109,19 @@ FORM_NAMES = {
 
 
 class ReaderThread(QThread):
+    """后台采集与信号处理工作线程（ROADMAP C1）：取帧 + CFAR 检测/反投影全部在后台完成，
+    主线程只负责轻量的 UI 绘制与状态更新，避免多站融合下主线程卡顿。"""
+
     frameReady = pyqtSignal(object)
     failed = pyqtSignal(str)
 
-    def __init__(self, driver, parent=None):
+    def __init__(self, driver, parent=None, caps=None,
+                 thresh_getter=None, cfar_getter=None):
         super().__init__(parent)
         self.driver = driver
+        self._caps = caps
+        self._thresh_getter = thresh_getter or (lambda: 0.30)
+        self._cfar_getter = cfar_getter or (lambda: "auto")
         self._alive = True
 
     def stop(self) -> None:
@@ -129,6 +136,18 @@ class ReaderThread(QThread):
                 self.failed.emit(f"{type(exc).__name__}: {exc}")
                 return
             if frame is not None:
+                if self._caps is not None:
+                    try:
+                        frame = pipeline.normalize(
+                            frame,
+                            self._caps,
+                            threshold=float(self._thresh_getter()),
+                            cfar_mode=str(self._cfar_getter()),
+                        )
+                        frame.meta["_normalized"] = True
+                    except Exception as exc:
+                        LOG.warning("后台流水线处理异常（跳过帧）：%s", exc)
+                        continue
                 self.frameReady.emit(frame)
 
 
@@ -277,7 +296,12 @@ class ConnectionController:
         self._frames = 0
         self._fps_t = time.monotonic()
 
-        self.reader = ReaderThread(self.driver, self)
+        self.reader = ReaderThread(
+            self.driver, self,
+            caps=self.caps,
+            thresh_getter=lambda: self._thresh,
+            cfar_getter=lambda: getattr(self, "_cfar_mode", "auto"),
+        )
         self.reader.frameReady.connect(self._on_frame)
         self.reader.failed.connect(self._on_failed)
         self.reader.start()
@@ -578,7 +602,31 @@ class AlarmBarController:
             QMessageBox.warning(self, "保存失败", str(exc))
             return
         self._load_rules()
+        if hasattr(self, "_set_ppi_flag"):
+            self._set_ppi_flag("show_zones", True)
         self.log.push("ok", f"已添加警戒区 ({x:.1f}, {y:.1f}) r={r:.1f}m")
+
+    def _clear_user_zones(self) -> None:
+        """清空所有界面自绘的警戒区（zone_user_*），保留其他规则。"""
+        import json
+
+        p = self._user_rules_path()
+        if not p.exists():
+            self.log.push("info", "没有自绘警戒区可清除")
+            return
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        rules = data.get("rules", [])
+        kept = [r for r in rules if not str(r.get("id", "")).startswith("zone_user_")]
+        if len(kept) == len(rules):
+            self.log.push("info", "没有自绘警戒区可清除")
+            return
+        data["rules"] = kept
+        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._load_rules()
+        self.log.push("ok", f"已清除 {len(rules) - len(kept)} 个自绘警戒区")
 
     def _delete_zone(self, rule_id: str) -> None:
         """删除用户点中的那个警戒区。"""
@@ -646,19 +694,25 @@ class AlarmBarController:
         画出来才算把配置和画面接上。
         """
         zs: list[tuple] = []
+        polys: list[tuple] = []
         for r in getattr(self.alarm, "rules", []):
-            if r.kind != "zone" or not getattr(r, "enabled", True):
+            if not getattr(r, "enabled", True):
                 continue
             p = r.params or {}
-            try:
-                zs.append((float(p.get("cx", 0.0)), float(p.get("cy", 0.0)),
-                           float(p.get("r", 1.0)), str(r.level), str(r.id)))
-            except (TypeError, ValueError):
-                continue
+            if r.kind == "zone":
+                try:
+                    zs.append((float(p.get("cx", 0.0)), float(p.get("cy", 0.0)),
+                               float(p.get("r", 1.0)), str(r.level), str(r.id)))
+                except (TypeError, ValueError):
+                    continue
+            elif r.kind == "poly_zone":
+                pts = [(float(pt[0]), float(pt[1])) for pt in (p.get("points") or []) if len(pt) >= 2]
+                if len(pts) >= 3:
+                    polys.append((pts, str(r.level), str(r.id)))
         # _load_rules() 在界面构造之前就会跑一次，那时还没有 ppi
         ppi = getattr(self, "ppi", None)
         if ppi is not None:
-            ppi.set_alarm_zones(zs)
+            ppi.set_alarm_zones(zs, polys)
 
     def _open_rules(self) -> None:
         dlg = RulesDialog(self.alarm, self)

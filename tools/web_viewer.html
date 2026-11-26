@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<title>瞭望 Lookout · Web 实时订阅端</title>
+<style>
+  body { margin: 0; font-family: system-ui, sans-serif; background: #0B1215; color: #E2E8F0; display: flex; flex-direction: column; align-items: center; padding: 18px; }
+  .bar { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; font-size: 13px; }
+  canvas { border: 1px solid #1E293B; border-radius: 10px; background: #0F172A; }
+  input { background: #1E293B; color: #E2E8F0; border: 1px solid #334155; border-radius: 6px; padding: 5px 8px; }
+  button { background: #2563EB; color: #fff; border: none; border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+</style>
+</head>
+<body>
+  <div class="bar">
+    <span>WebSocket:</span>
+    <input id="wsUrl" value="ws://127.0.0.1:9101" size="24"/>
+    <button onclick="connect()">连接</button>
+    <span id="status">未连接</span>
+  </div>
+  <canvas id="ppi" width="520" height="520"></canvas>
+<script>
+let ws = null;
+const cv = document.getElementById("ppi"), ctx = cv.getContext("2d");
+function draw(frame) {
+  const w = cv.width, h = cv.height, cx = w/2, cy = h/2, R = w*0.44;
+  const rmax = (frame && frame.range_max) || 10;
+  ctx.clearRect(0, 0, w, h);
+  ctx.strokeStyle = "#1E3A2F";
+  for (let k = 1; k <= 4; k++) { ctx.beginPath(); ctx.arc(cx, cy, R*k/4, 0, Math.PI*2); ctx.stroke(); }
+  ctx.beginPath(); ctx.moveTo(cx-R, cy); ctx.lineTo(cx+R, cy); ctx.moveTo(cx, cy-R); ctx.lineTo(cx, cy+R); ctx.stroke();
+  for (const t of (frame && frame.targets) || []) {
+    const px = cx + (t.x / rmax) * R, py = cy - (t.y / rmax) * R;
+    ctx.fillStyle = "#38BDF8"; ctx.beginPath(); ctx.arc(px, py, 5, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = "#E2E8F0"; ctx.font = "12px Consolas"; ctx.fillText(`T${t.tid} ${Math.hypot(t.x,t.y).toFixed(1)}m`, px+7, py-5);
+  }
+}
+function connect() {
+  if (ws) ws.close();
+  ws = new WebSocket(document.getElementById("wsUrl").value);
+  ws.onopen = () => document.getElementById("status").textContent = "已连接";
+  ws.onclose = () => document.getElementById("status").textContent = "已断开";
+  ws.onmessage = (ev) => { try { draw(JSON.parse(ev.data)); } catch {} };
+}
+draw(null);
+</script>
+</body>
+</html>

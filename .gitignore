@@ -9,6 +9,8 @@ venv/
 build/
 dist/
 dist_prev/
+*.spec
+!installer/Lookout.spec
 *.spec.bak
 
 # ---- 运行数据（不该进仓库）----

@@ -11,10 +11,10 @@
 ; 为什么用 Inno 而不是自己写 zip：安装包要处理开始菜单、卸载登记、
 ; 升级覆盖、中文界面，这些自己写一遍只会有 bug。
 
-#define AppName "RadarScope"
-#define AppVer "0.9"
-#define AppExe "RadarScope.exe"
-#define SrcDir "..\dist\RadarScope"
+#define AppName "Lookout"
+#define AppVer "1.1.0"
+#define AppExe "Lookout.exe"
+#define SrcDir "..\dist\Lookout"
 
 [Setup]
 AppId={{8E3A1C2F-4B7D-4E5A-9C11-3F2A6D8B0E41}

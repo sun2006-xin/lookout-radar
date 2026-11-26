@@ -28,7 +28,9 @@
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import json
 import sys
 import time
 import traceback
@@ -51,10 +53,53 @@ class PluginInfo:
     drivers: list[str] = field(default_factory=list)
     rules: int = 0
     loaded_at: float = 0.0
+    sha256: str = ""
+    trusted: bool = True
 
     @property
     def status(self) -> str:
+        if not self.trusted:
+            return "未签名/待确认"
         return "正常" if self.ok else "加载失败"
+
+
+def file_sha256(path: Path) -> str:
+    """计算插件文件 SHA256 摘要，用于防篡改与信任确认。"""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+class PluginTrustStore:
+    """插件 SHA256 信任清单（data/trusted_plugins.json）。"""
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+        self._hashes: dict[str, str] = {}
+        self.load()
+
+    def load(self) -> None:
+        if not self.path.exists():
+            self._hashes = {}
+            return
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            self._hashes = {str(k): str(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
+        except Exception:
+            self._hashes = {}
+
+    def save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(self._hashes, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def is_trusted(self, name: str, digest: str) -> bool:
+        return bool(digest) and self._hashes.get(name) == digest
+
+    def approve(self, name: str, digest: str) -> None:
+        self._hashes[name] = digest
+        self.save()
+
+    def revoke(self, name: str) -> None:
+        self._hashes.pop(name, None)
+        self.save()
 
 
 class PluginAPI:
@@ -89,8 +134,15 @@ class PluginAPI:
 
 
 class PluginManager:
-    def __init__(self, plugin_dir: str | Path) -> None:
+    def __init__(
+        self,
+        plugin_dir: str | Path,
+        trust_path: str | Path | None = None,
+        require_trust: bool = False,
+    ) -> None:
         self.plugin_dir = Path(plugin_dir)
+        self.trust_store = PluginTrustStore(trust_path) if trust_path else None
+        self.require_trust = require_trust
         self.plugins: list[PluginInfo] = []
         self._apis: list[PluginAPI] = []
         self._seq = 0
@@ -113,7 +165,17 @@ class PluginManager:
     def _load_one(self, path: Path, modname: str) -> PluginInfo:
         self._seq += 1
         uniq = f"_rs_plugin_{modname}_{self._seq}"
-        info = PluginInfo(name=modname, path=str(path), loaded_at=time.time())
+        digest = file_sha256(path)
+        trusted = True if self.trust_store is None else self.trust_store.is_trusted(path.name, digest)
+        info = PluginInfo(
+            name=modname, path=str(path), loaded_at=time.time(),
+            sha256=digest, trusted=trusted,
+        )
+        if self.require_trust and not trusted:
+            info.ok = False
+            info.error = "未在信任清单中（SHA256 待确认）"
+            info.description = f"SHA256: {digest[:16]}… — 请在插件管理中确认信任后加载"
+            return info
         try:
             spec = importlib.util.spec_from_file_location(uniq, path)
             if spec is None or spec.loader is None:
@@ -156,7 +218,16 @@ class PluginManager:
     def reload(self) -> list[PluginInfo]:
         """重载。注意：驱动注册表是运行时可写的，同名 id 会被覆盖，
         所以重载是安全的；但插件在别处留下的副作用（比如开了线程）不会被回收。"""
+        self._apis.clear()
         return self.load_all()
+
+    def approve_plugin(self, path: str | Path) -> str:
+        """将插件当前内容的 SHA256 写入信任清单并返回摘要。"""
+        p = Path(path)
+        digest = file_sha256(p)
+        if self.trust_store is not None:
+            self.trust_store.approve(p.name, digest)
+        return digest
 
     # ------------------------------------------------------------------ #
     def plugin_rules(self) -> list[AlarmRule]:

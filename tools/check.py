@@ -50,7 +50,7 @@ def main() -> int:
     ok, _, _ = run("2/4 单元测试", [py, str(ROOT / "tests" / "test_core.py")])
     results.append(("单元测试", ok))
 
-    ok, _, _ = run("3/4 链路自检", [py, str(ROOT / "selftest.py")])
+    ok, _, _ = run("3/4 链路自检", [py, str(ROOT / "tools" / "selftest.py")])
     results.append(("链路自检", ok))
 
     ok, _, _ = run("4/4 录制夹具回归", [py, str(ROOT / "tools" / "capture_check.py")])

@@ -46,8 +46,16 @@ class HistoryPanel(QWidget):
         btn_play = QPushButton("回放该会话")
         btn_play.setToolTip("用「回放」驱动重放当时的画面（需要录制时开了「录制帧」）")
         btn_play.clicked.connect(self._replay_current)
+        btn_timeline = QPushButton("时间轴回放…")
+        btn_timeline.setToolTip("拖动时间轴重放 SQLite 里记录的历史航迹与告警状态")
+        btn_timeline.clicked.connect(self._open_timeline)
+        btn_report = QPushButton("导出报表…")
+        btn_report.setToolTip("生成会话汇总报表（HTML 含航迹图 / CSV）")
+        btn_report.clicked.connect(self._export_report)
         top.addWidget(btn_ref)
         top.addWidget(btn_exp)
+        top.addWidget(btn_report)
+        top.addWidget(btn_timeline)
         top.addWidget(btn_play)
 
         self.table = QTableWidget(0, len(self.COLS))
@@ -136,6 +144,32 @@ class HistoryPanel(QWidget):
                 "所以单独存成 .rad 文件。")
             return
         self.replayRequested.emit(path)
+
+    def _open_timeline(self) -> None:
+        row = self.table.currentRow()
+        if row < 0 or row >= len(self._sessions):
+            QMessageBox.information(self, "时间轴回放", "先在列表里选中一次会话")
+            return
+        from .timeline import TimelineDialog
+
+        s = self._sessions[row]
+        TimelineDialog(self.store, s.id, s.caps, self).exec_()
+
+    def _export_report(self) -> None:
+        row = self.table.currentRow()
+        if row < 0 or row >= len(self._sessions):
+            QMessageBox.information(self, "导出报表", "先在列表里选中一次会话")
+            return
+        from ..core.report import export_session_report
+
+        s = self._sessions[row]
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出会话报表", f"report-session-{s.id}.html",
+            "HTML 报表 (*.html);;CSV 汇总 (*.csv)")
+        if not path:
+            return
+        out = export_session_report(self.store, s.id, path)
+        QMessageBox.information(self, "导出完成", f"报表已生成：\n{out}")
 
     def showEvent(self, ev) -> None:
         self.refresh()

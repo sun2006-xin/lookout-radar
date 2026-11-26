@@ -147,3 +147,37 @@ class Capabilities:
         if self.has_threat:
             parts.append("威胁分级")
         return " · ".join(parts) or "无可显示数据"
+
+
+#: 协议抽象层 Meta Schema（ROADMAP C4）：
+#: 键名 -> (允许的类型, 默认值)。缺少可选标准键时可填默认，类型错误时报错。
+META_SCHEMA: dict[str, tuple[type | tuple[type, ...], Any]] = {
+    "scan_period": ((int, float), 0.1),
+    "mode": (str, "staring"),
+    "state": (str, ""),
+    "fresh_az": ((tuple, list), None),
+    "sensors": (list, None),
+    "coverage": (list, None),
+    "fusion": (bool, False),
+    "fusion_mode": (str, "point"),
+    "good": (int, 0),
+    "bad": (int, 0),
+    "speed_rpm": ((int, float), 0.0),
+    "replay": (bool, False),
+}
+
+
+def validate_frame_meta(frame: RadarFrame, fill_defaults: bool = True) -> list[str]:
+    """校验 RadarFrame.meta 是否符合统一 schema；可选补全标准默认值。"""
+    if frame.meta is None:
+        frame.meta = {}
+    errors: list[str] = []
+    for key, (expected, default) in META_SCHEMA.items():
+        if key not in frame.meta:
+            if fill_defaults and default is not None:
+                frame.meta[key] = default
+            continue
+        val = frame.meta[key]
+        if val is not None and not isinstance(val, expected):
+            errors.append(f"meta[{key!r}] 期望 {expected}，实际 {type(val).__name__}")
+    return errors
