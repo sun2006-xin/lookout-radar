@@ -36,13 +36,14 @@
 
 | 分类 | 能力 |
 |---|---|
-| **显示** | PPI 环视、A 显距离剖面、距离-时间瀑布、距离-多普勒图、余晖拖尾、尾迹、双量程近距窗 |
+| **显示** | PPI 环视、A 显距离剖面、航迹距离-时间瀑布图、距离-多普勒图、余晖拖尾、尾迹、双量程近距窗 |
 | **测量** | 点击测距、EBL 电子方位线 + VRM 距离圈、北向/艏向切换、真运动/相对运动 |
-| **告警** | 距离/速度/区域/目标数/接近率规则、画布上直接画警戒区、分级提示、静音、CPA 最近会遇 |
-| **多站** | 6×60° 全向拼接、扇区共视、最小二乘交会、盲区标定、朝向标定向导 |
-| **接入** | 串口（自动识别 CH340/CP210x）、TCP/UDP、蓝牙 BLE、文件回放，含连接测试 |
-| **扩展** | AIS（NMEA 解析）、联网地图底图（OSM/CARTO）、UDP 数据转发、插件系统 |
-| **工程** | SQLite 会话/航迹/事件、统计分析、事件检索、录像、CSV/PNG 导出、无窗口自检 |
+| **告警** | 距离/速度/圆形与多边形防区/目标数/接近率规则、画布绘制与右键编辑移动、分级提示、静音、CPA 最近会遇 |
+| **多站** | 6×60° 全向拼接、扇区共视、航迹级加权最小二乘交会、盲区标定、朝向标定向导 |
+| **接入** | 串口（自动识别 CH340/CP210x）、TCP/UDP、蓝牙 BLE、文件回放，含非阻塞连接测试 |
+| **扩展** | AIS（NMEA 解析）、联网地图底图（OSM/CARTO，支持 IP 自动定位与手动经纬度）、UDP 数据转发、WebSocket 实时订阅端、插件系统（SHA256 信任确认） |
+| **仿真** | 内置合成雷达 + 相控阵模拟 + **模拟电子站**（巡逻/逼近/交叉场景与自定义移动目标注入，无需硬件即可压测跟踪与防区告警） |
+| **工程** | SQLite 会话/航迹/事件、时间轴轨迹回放、统计分析、HTML/CSV 报表导出、中英双语切换、录像、无窗口自检 |
 
 ## 快速开始
 
@@ -62,7 +63,7 @@
 ### 打包成 exe
 
 ```bat
-.venv\Scripts\pyinstaller.exe --noconfirm --clean --windowed --name Lookout --icon assets/app.ico --collect-submodules radarscope main.py
+.venv\Scripts\pyinstaller.exe --noconfirm --clean installer\Lookout.spec
 ```
 
 打完后跑一次 `dist\Lookout\Lookout.exe --selftest`（**不开窗口**）验证产物。
@@ -161,31 +162,32 @@ def setup(api):
 ## 测试
 
 ```bat
-.venv\Scripts\python.exe tests\test_core.py   :: 20 组
-.venv\Scripts\python.exe tools\check.py       :: 编译 + 测试 + 链路自检
+.venv\Scripts\python.exe tests\test_core.py   :: 36 组
+.venv\Scripts\python.exe tools\check.py       :: 编译 + 测试 + 链路自检 + 夹具回归
 ```
 
 不打桩：测试直接跑真实算法与真实 SQLite。CI 见 `.github/workflows/ci.yml`，
-Windows + Python 3.11/3.12 双版本。
+覆盖 `Windows / Linux / macOS` × Python `3.11 / 3.12`（无头 `QT_QPA_PLATFORM=offscreen`）。
 
-演示动图由 `tools/make_demo.py` 离屏生成（`requirements-dev.txt` 里的 Pillow）。
+演示动图由 `tools/make_demo.py` 离屏生成（`tools/requirements-dev.txt` 里的 Pillow）。
 
 ## 已知限制
 
-- **真运动**边缘处理在极大量程下还需打磨
-- **瀑布图**在 6 站融合时偏亮（`max over 方位` 会把目标抹宽）
-- **GIS 底图**只有栅格瓦片，没有矢量要素与离线包
-- **STC/FTC** 走 `set_control()` 下行通道，目前只有模拟器实现（真机驱动需覆写）
-- 只解 AIS 位置报告（1/2/3/18/19），不支持静态与航程报文
-- 未做多语言（仅中文界面）
+- **真机实测尚未完全覆盖**：LD19/LD06、LD2450/LD2410、BLE 实机及真实多站组网有录制夹具回归，但仍需对应实体硬件进一步联调（见 [ROADMAP.md](docs/ROADMAP.md) 阶段 A）
+- **GIS 底图**仅支持开源栅格瓦片（OSM/CARTO）与离线磁盘缓存，无矢量要素编辑；室外 `≥30 m` 量程可见街道/岸线，IP 自动定位仅城市级精度
+- **STC/FTC** 走 `set_control()` 下行通道，目前仅模拟器完整响应（真机驱动需按设备协议覆写）
+- 只解 AIS 位置报告（1/2/3/18/19），不处理静态与航程报文
+- **真运动**边缘在极大量程下的边界显示仍可继续打磨
 
 ## 路线图
 
-- [ ] 目标历史轨迹回放（时间轴拖动）
-- [ ] 告警区支持多边形
-- [ ] 真机雷达参数下发
-- [ ] 英文界面
-- [ ] 点云叠加（3D 传感器）
+- [x] 目标历史轨迹回放（时间轴拖动与倍速播放）
+- [x] 告警区支持多边形与画布右键编辑/移动/单个删除
+- [x] 中英文界面实时切换（i18n）与 HTML/CSV 报表导出
+- [x] 模拟电子站（动态场景与虚拟目标叠加注入）
+- [ ] **阶段 A 实机联调**：LD19/LD06、LD2450/LD2410、BLE 真机与真实多站组网
+- [ ] **阶段 B4 原始 ADC → FFT 链路**：需要 IWR6843 + DCA1000 等相参硬件
+- [ ] 真机雷达参数下行下发与协议适配扩展
 
 ## 许可与致谢
 

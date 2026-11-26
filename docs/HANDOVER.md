@@ -16,18 +16,17 @@
 | 源码包 | `<根>\radarscope\`（包名 `radarscope`，**不要改成产品名**） |
 | 文档 | `<根>\docs\`，接手先读 `ROADMAP.md` → 本文第 4/6 节 → `STRUCTURE.md` |
 | 虚拟环境 | `<根>\.venv\`，Windows 下解释器是 `.venv\Scripts\python.exe` |
-| 打包产物 | `<根>\dist\Lookout\Lookout.exe`（129 MB，含 `plugins/`） |
+| 打包产物 | `<根>\dist\Lookout\Lookout.exe`（便携版已发布至 GitHub Release `v1.1.0`，含 `plugins/`） |
 | 桌面入口 | `C:\Users\L\Desktop\瞭望 Lookout.lnk`（指向 `dist\Lookout\Lookout.exe`） |
 | 运行数据 | 开发时 `<根>\data\`；打包版 `%LOCALAPPDATA%\Lookout\data` |
 | Git 仓库 | https://github.com/sun2006-xin/lookout-radar （public / main / MIT） |
-| 基线提交 | `558bd33`（2026-11-26，REVIEW 全部闭环）；之后以 `git log -1` 为准 |
+| 当前版本 | `v1.1.0`（2026-11-26，具体提交以 `git log -1` 为准） |
 
-**当前状态**：61 个 Python 文件 / 约 11 400 行 / **20 组测试全过** /
+**当前状态**：70 个 Python 文件 / 约 12 700 行 / **36 组测试全过** /
 `tools/check.py` 全绿 / `Lookout.exe --selftest` 退出码 0。
 产品名「瞭望 Lookout」，默认主题现代白（色板 daylight），可切深色（ice）。
 
-**接下来做什么**：[`docs/ROADMAP.md`](ROADMAP.md) 是唯一的任务清单，
-阶段 A（真机联调）优先级最高，阶段 B/C 是算法与架构深水区。
+**接下来做什么**：[`docs/ROADMAP.md`](ROADMAP.md) 是唯一的任务清单：软件侧 B1~B3 / C1~C4 / D1~D6 与 A5 夹具已完成，当前重点为阶段 A（A1~A4 真机硬件联调）及 B4（原始 ADC→FFT，需硬件）。
 **不要在没读 ROADMAP 的情况下自己挑功能加。**
 
 ---
@@ -37,9 +36,9 @@
 ```bat
 cd /d D:\workbudy\2026-11-25-19-11-27\radarscope
 .venv\Scripts\python.exe -m pip install -r requirements.txt
-rem 20 组测试，必须全绿
+rem 36 组测试，必须全绿
 .venv\Scripts\python.exe tests\test_core.py
-rem 编译 + 测试 + 链路自检，提交前必跑
+rem 编译 + 测试 + 链路自检 + 夹具回归，提交前必跑
 .venv\Scripts\python.exe tools\check.py
 rem 无界面自检，不弹窗，退出码 0 才算通过
 .venv\Scripts\python.exe main.py --selftest
@@ -55,7 +54,7 @@ rem 启动图形界面（会弹窗口）
 
 1. 这是个**分层**项目：传输 / 协议 / 驱动 / 数据 / 处理 / 呈现，单向依赖。
 2. 界面是**能力驱动**的：显示什么由 `Capabilities` 决定，不按型号写分支。
-3. 有 **20 组测试**，改完必须全绿。测试就是规格文档，不打桩不 mock。
+3. 有 **36 组测试**，改完必须全绿。测试就是规格文档，不打桩不 mock。
 
 ---
 
@@ -238,6 +237,7 @@ class MyRadarDriver(RadarDriver):
 | 工具栏中间出现空白条且「设置」弹窗右侧空白 | 先 `tb.addWidget(w)` 再 `form.addRow(..., w)`，Qt 把 `QWidgetAction` 留在了工具栏且把原控件设为隐藏 | 只往弹窗 `form` 里加控件，不要先 `tb.addWidget()` |
 | 开启「联网地图底图」后 PPI 变全黑且关闭后仍是黑的 | `MapLayer._compose` 用了不透明 `QColor(12,16,20)` `RGB32` 底图且离线 0 瓦片也生成图像；`_toggle_map(False)` 未置空 `ppi.map_layer` | `_compose` 改用透明 `ARGB32` 画布，无已加载瓦片保持 `image = None`；关闭底图显式置 `ppi.map_layer = None`；浅/深主题配对 `carto_light`/`carto_dark` |
 | 右键 PPI 警戒区弹不出编辑/删除菜单 | `_zone_at` 用了 `_screen_to_body`（线性映射且无 `true_motion` 平移与边缘容差），与 `_draw_zones` 像素坐标口径不一致 | `_zone_at` 与 `_hit_zone_handle` 统一按 `_draw_zones` 像素口径与 10px 边缘容差判定 |
+| 底部状态栏文字过长或窗口超出屏幕导致状态栏被挤压裁切 | `status_left` 默认 `Preferred` 策略按文本撑宽，`MainWindow(1340,880)` 在高 DPI 小屏会顶到任务栏 | `status_left` 设 `MinimumWidth(0)` + `QSizePolicy.Ignored`，`_restore()` 按 `availableGeometry()` 限幅并固定状态栏最小高度 |
 
 ---
 

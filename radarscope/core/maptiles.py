@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import json
 import math
 import urllib.request
 from pathlib import Path
@@ -21,22 +22,64 @@ from pathlib import Path
 TILE_PX = 256
 EARTH_C = 156543.03392          # 赤道处 z=0 的米/像素
 
-#: 深色底图。换成别的图源只要改这两个模板。
+#: 联网瓦片图源。换成别的图源只要改这几个模板。
 PROVIDERS = {
-    "carto_dark": {
-        "url": "https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
-        "attribution": "地图 © OpenStreetMap 贡献者 · © CARTO",
-    },
     "carto_light": {
+        "label": "CARTO 浅色街道（适合白昼）",
         "url": "https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
         "attribution": "地图 © OpenStreetMap 贡献者 · © CARTO",
     },
+    "carto_dark": {
+        "label": "CARTO 深色底图（适合夜间）",
+        "url": "https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
+        "attribution": "地图 © OpenStreetMap 贡献者 · © CARTO",
+    },
     "osm": {
+        "label": "OpenStreetMap 标准地图",
         "url": "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
         "attribution": "地图 © OpenStreetMap 贡献者",
     },
 }
 DEFAULT_PROVIDER = "carto_dark"
+
+
+def resolve_provider(choice: str, theme: str = "light") -> str:
+    """将用户图源选择（含 auto 自动跟随主题）解析为真实图源键名。"""
+    if choice in PROVIDERS:
+        return choice
+    return "carto_light" if theme == "light" else "carto_dark"
+
+
+def geolocate_ip(timeout: float = 4.0,
+                 urls: tuple[str, ...] | None = None) -> tuple[float, float, str]:
+    """通过公网 IP 接口粗略获取当前经纬度（仅适合城市/区级参考）。"""
+    endpoints = urls or (
+        "https://ipwho.is/",
+        "https://ipapi.co/json/",
+    )
+    last_err = ""
+    for url in endpoints:
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "Lookout-RadarConsole/1.1 (geolocate)"},
+            )
+            with urllib.request.urlopen(req, timeout=float(timeout)) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+            data = json.loads(raw)
+            if data.get("success") is False:
+                raise ValueError(str(data.get("message") or "接口返回失败"))
+            lat = float(data["latitude"] if "latitude" in data else data["lat"])
+            lon = float(data["longitude"] if "longitude" in data else data["lon"])
+            if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+                raise ValueError(f"超出有效经纬度范围: {lat}, {lon}")
+            city = str(data.get("city") or "").strip()
+            country = str(data.get("country") or data.get("country_name") or "").strip()
+            place = " / ".join(p for p in (country, city) if p) or "网络 IP 位置"
+            return lat, lon, f"{place}（IP 粗略定位）"
+        except Exception as exc:
+            last_err = f"{type(exc).__name__}: {exc}"
+    raise RuntimeError(f"自动定位失败（{last_err or '无可用响应'}），请检查联网或改用手动输入")
 
 
 def meters_per_pixel(lat: float, z: int, tile_px: int = TILE_PX) -> float:

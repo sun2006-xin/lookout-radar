@@ -244,7 +244,7 @@ QPushButton:checked { background: @checked_bg@; border-color: @accent@;
     color: @checked_text@; font-weight: 600; }
 QPushButton:disabled { color: @muted@; border-color: @border@; background: @surface2@; }
 QStatusBar { background: @surface@; color: @muted@; font-size: 12px;
-    border-top: 1px solid @border@; }
+    border-top: 1px solid @border@; min-height: 24px; padding: 2px 6px; }
 QStatusBar::item { border: none; }
 QHeaderView::section { background: @surface2@; color: @muted@; border: none;
     border-bottom: 1px solid @border@; padding: 5px 8px; font-size: 11px;

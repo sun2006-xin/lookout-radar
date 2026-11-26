@@ -15,19 +15,19 @@
 |---|---|
 | 项目根 | `D:\workbudy\2026-11-25-19-11-27\radarscope`（见 HANDOVER 第 0 节） |
 | 产品名 | 瞭望 Lookout（Python 包名仍是 `radarscope`，**不要改包名**） |
-| 源码 | 约 11 400 行 / 61 个 Python 文件 / 20 组测试 |
-| 主窗口 | `ui/mainwindow.py` 1021 行 + `ui/controllers.py` 648 行（三个 mixin） |
-| 打包产物 | `dist/Lookout/Lookout.exe`（PyInstaller，带 `assets/app.ico`） |
-| 桌面入口 | `桌面\瞭望 Lookout.lnk`（手写 MS-SHLLINK） |
+| 源码 | 约 12 700 行 / 70 个 Python 文件 / 36 组测试 |
+| 主窗口 | `ui/mainwindow.py` + `ui/controllers.py`（三个 mixin） |
+| 打包产物 | `dist/Lookout/Lookout.exe`（PyInstaller，带 `assets/app.ico`，Release `v1.1.0`） |
+| 桌面入口 | `桌面\瞭望 Lookout.lnk`（`tools/make_shortcut.py`，WScript.Shell 优先 + MS-SHLLINK 回退） |
 | 仓库 | https://github.com/sun2006-xin/lookout-radar （public, main, MIT） |
 | 主题 | 现代白（默认，色板 daylight）/ 深色（色板 ice） |
-| 已闭环 | [REVIEW.md](REVIEW.md) 20 项全部处理，仅 4 条剩余风险 |
+| 已闭环 | [REVIEW.md](REVIEW.md) 20 项、A5 夹具、B1~B3、C1~C4、D1~D6、模拟电子站与联网地图定位设置 |
 
 **开工前必须跑**（三条都过才算环境正常）：
 
 ```bat
-.venv\Scripts\python.exe tests\test_core.py     :: 20 组全过
-.venv\Scripts\python.exe tools\check.py         :: 编译 + 测试 + 链路自检
+.venv\Scripts\python.exe tests\test_core.py     :: 36 组全过
+.venv\Scripts\python.exe tools\check.py         :: 编译 + 测试 + 链路自检 + 夹具回归
 .venv\Scripts\python.exe main.py --selftest     :: 退出码 0，不弹窗
 ```
 

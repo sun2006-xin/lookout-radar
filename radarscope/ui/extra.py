@@ -4,10 +4,14 @@
 """
 from __future__ import annotations
 
+from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtWidgets import (
-    QCheckBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QLabel,
-    QLineEdit, QSpinBox, QVBoxLayout,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
+    QFormLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSpinBox,
+    QVBoxLayout,
 )
+
+from ..core.maptiles import PROVIDERS, geolocate_ip
 
 
 class ControlDialog(QDialog):
@@ -125,3 +129,129 @@ class AisDialog(QDialog):
         except ValueError:
             lat = lon = 0.0
         return self.sp_port.value(), lat, lon, self.chk.isChecked()
+
+
+class _GeoLocateWorker(QThread):
+    finished_ok = pyqtSignal(float, float, str)
+    finished_err = pyqtSignal(str)
+
+    def run(self) -> None:
+        try:
+            lat, lon, desc = geolocate_ip(timeout=4.0)
+            self.finished_ok.emit(lat, lon, desc)
+        except Exception as exc:
+            self.finished_err.emit(str(exc))
+
+
+class MapLocationDialog(QDialog):
+    """联网地图底图与定位中心设置：支持自动 IP 获取与手动输入经纬度。"""
+
+    def __init__(self, lat: float = 39.9, lon: float = 116.4,
+                 provider: str = "auto", map_enabled: bool = False, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("联网地图与定位设置")
+        self.resize(480, 340)
+        self._worker: _GeoLocateWorker | None = None
+
+        form = QFormLayout()
+        self.cb_provider = QComboBox()
+        self.cb_provider.addItem("自动跟随界面主题（浅色/深色）", "auto")
+        for key, meta in PROVIDERS.items():
+            self.cb_provider.addItem(meta.get("label", key), key)
+        pi = self.cb_provider.findData(provider)
+        if pi >= 0:
+            self.cb_provider.setCurrentIndex(pi)
+        form.addRow("底图图源", self.cb_provider)
+
+        self.ed_lat = QLineEdit(f"{float(lat):.6f}")
+        self.ed_lat.setPlaceholderText("例如 39.904200（-90 ~ 90）")
+        form.addRow("中心纬度", self.ed_lat)
+
+        self.ed_lon = QLineEdit(f"{float(lon):.6f}")
+        self.ed_lon.setPlaceholderText("例如 116.407400（-180 ~ 180）")
+        form.addRow("中心经度", self.ed_lon)
+
+        geo_row = QHBoxLayout()
+        self.btn_auto = QPushButton("自动获取当前位置 (IP)")
+        self.btn_auto.clicked.connect(self._start_auto)
+        self.lbl_status = QLabel("可手动输入或点击自动获取；会同步为 AIS 本机坐标")
+        self.lbl_status.setWordWrap(True)
+        self.lbl_status.setStyleSheet("color:#6B7280;font-size:12px;")
+        geo_row.addWidget(self.btn_auto)
+        geo_row.addWidget(self.lbl_status, 1)
+
+        self.chk_enable = QCheckBox("确定后立即开启并刷新联网地图底图")
+        self.chk_enable.setChecked(bool(map_enabled))
+
+        tip = QLabel(
+            "说明：\n"
+            "1. 联网地图以此处经纬度为中心下载公开 OSM/CARTO 栅格瓦片并缓存到磁盘；\n"
+            "2. 街道/岸线瓦片仅在 ≥30 m 室外或海图量程下具备细节（室内 6~15 m 量程下地图会自动保持透明）；\n"
+            "3. 自动获取通过公网 IP 定位，精度通常在城市/区级（误差约 1~10 km），室外实测建议手动填写精确坐标。"
+        )
+        tip.setWordWrap(True)
+        tip.setStyleSheet("color:#6B7280;font-size:12px;")
+
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.buttons.accepted.connect(self._on_accept)
+        self.buttons.rejected.connect(self.reject)
+
+        lay = QVBoxLayout(self)
+        lay.addLayout(form)
+        lay.addLayout(geo_row)
+        lay.addWidget(self.chk_enable)
+        lay.addWidget(tip, 1)
+        lay.addWidget(self.buttons)
+
+    def _start_auto(self) -> None:
+        if self._worker is not None and self._worker.isRunning():
+            return
+        self.btn_auto.setEnabled(False)
+        self.lbl_status.setStyleSheet("color:#1F6FEB;font-size:12px;")
+        self.lbl_status.setText("正在通过网络自动定位，请稍候…")
+        self._worker = _GeoLocateWorker(self)
+        self._worker.finished_ok.connect(self._on_geo_ok)
+        self._worker.finished_err.connect(self._on_geo_err)
+        self._worker.start()
+
+    def _on_geo_ok(self, lat: float, lon: float, desc: str) -> None:
+        self.btn_auto.setEnabled(True)
+        self.ed_lat.setText(f"{lat:.6f}")
+        self.ed_lon.setText(f"{lon:.6f}")
+        self.lbl_status.setStyleSheet("color:#0F766E;font-size:12px;")
+        self.lbl_status.setText(f"已获取：{desc}（{lat:.4f}, {lon:.4f}）")
+
+    def _on_geo_err(self, msg: str) -> None:
+        self.btn_auto.setEnabled(True)
+        self.lbl_status.setStyleSheet("color:#B42318;font-size:12px;")
+        self.lbl_status.setText(msg)
+
+    def _on_accept(self) -> None:
+        try:
+            lat = float(self.ed_lat.text().strip())
+            lon = float(self.ed_lon.text().strip())
+            if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+                raise ValueError("纬度需在 -90~90，经度需在 -180~180")
+        except ValueError as exc:
+            self.lbl_status.setStyleSheet("color:#B42318;font-size:12px;")
+            self.lbl_status.setText(f"坐标格式有误：{exc}")
+            return
+        self.accept()
+
+    def closeEvent(self, ev) -> None:
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.wait(500)
+        super().closeEvent(ev)
+
+    def values(self) -> tuple[float, float, str, bool]:
+        try:
+            lat = max(-90.0, min(90.0, float(self.ed_lat.text().strip())))
+            lon = max(-180.0, min(180.0, float(self.ed_lon.text().strip())))
+        except ValueError:
+            lat, lon = 39.9, 116.4
+        return (
+            lat,
+            lon,
+            str(self.cb_provider.currentData() or "auto"),
+            self.chk_enable.isChecked(),
+        )

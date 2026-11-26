@@ -12,12 +12,12 @@ from pathlib import Path
 import numpy as np
 
 from PyQt5.QtCore import QSettings, Qt, QThread, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QKeySequence
+from PyQt5.QtGui import QColor, QGuiApplication, QKeySequence
 from PyQt5.QtWidgets import (
     QAction, QActionGroup, QApplication, QComboBox, QDialog, QDockWidget,
     QDoubleSpinBox, QFileDialog, QFormLayout, QHBoxLayout, QInputDialog, QLabel,
     QDialogButtonBox, QMainWindow, QMenu, QMessageBox, QPushButton,
-    QShortcut, QTabWidget,
+    QShortcut, QSizePolicy, QTabWidget,
     QToolBar, QToolButton, QVBoxLayout, QWidget, QWidgetAction,
 )
 
@@ -25,6 +25,7 @@ from ..core import cpa, pipeline
 from ..core.aisfeed import AisFeed
 from ..core.forwarder import Forwarder
 from ..core.alarm import DEFAULT_RULES, AlarmEngine, merge_rules, rules_from_json
+from ..core.maptiles import resolve_provider
 from .. import drivers as _builtin_drivers  # noqa: F401  保证单独实例化 MainWindow 也能注册内置驱动
 from ..core.driver import available_drivers
 from ..core.model import Capabilities
@@ -51,7 +52,7 @@ from .statsdialog import StatsDialog
 from .theme import (DEFAULT_PALETTE, DEFAULT_THEME, PALETTES, THEMES,
                     build_stylesheet)
 from .tracktable import TrackTable
-from .extra import AisDialog, ControlDialog
+from .extra import AisDialog, ControlDialog, MapLocationDialog
 from .waterfall import WaterfallWidget
 from .winstyle import enable_dark_titlebar, install_dialog_titlebar, make_app_icon
 
@@ -64,7 +65,7 @@ class MainWindow(ConnectionController, ExportController,
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("瞭望 Lookout · 通用雷达显控台")
-        self.resize(1340, 880)
+        self.resize(1240, 760)
 
         self.settings = QSettings("RadarScope", "Console")
         self.data_dir = paths.data_dir()
@@ -107,9 +108,10 @@ class MainWindow(ConnectionController, ExportController,
         self._rec_dir: Path | None = None
         self._rec_n = 0
         self._rec_t = 0.0
-        # AIS
+        # AIS / 地图中心坐标
         self.ais = AisFeed()
         self._ais_ref = (39.9, 116.4)
+        self._map_provider = "auto"
         # 模拟电子站（动态虚拟目标叠加）
         from ..core.sim_targets import ElectronicStation
         self.sim_station = ElectronicStation()
@@ -489,6 +491,8 @@ class MainWindow(ConnectionController, ExportController,
         act_map.setCheckable(True)
         act_map.toggled.connect(self._toggle_map)
         m_view.addAction(act_map)
+        self.act_map = act_map
+        m_view.addAction("联网地图与定位设置…", self._open_map_settings)
         ais_on = self.settings.value("show_ais", True, type=bool)
         act_ais = QAction("显示 AIS 目标", self)
         act_ais.setCheckable(True)
@@ -505,6 +509,7 @@ class MainWindow(ConnectionController, ExportController,
         m_set.addAction("连接设置…", self._open_link_dialog)
         m_set.addAction("告警规则…", self._open_rules)
         m_set.addAction("传感器配置…", self._open_sensor_config)
+        m_set.addAction("联网地图与定位设置…", self._open_map_settings)
         m_help = self.menuBar().addMenu("帮助(&H)")
         self._m_help = m_help
         m_help.addAction("操作说明", self._show_help)
@@ -524,15 +529,20 @@ class MainWindow(ConnectionController, ExportController,
         QShortcut(QKeySequence("Ctrl+0"), self, lambda: self._zoom(0, reset=True))
 
         self.status_left = QLabel("未连接")
+        # 允许左侧状态文本随窗口缩放收缩（tooltip 保留全文），防止把右侧 CPA/FPS 或底栏挤出视野
+        self.status_left.setMinimumWidth(0)
+        self.status_left.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.status_right = QLabel("-- fps")
         self.status_link = QLabel("")
         self.status_link.setStyleSheet("color:#8B9AA8;padding-right:12px;")
         self.status_cpa = QLabel("CPA --")
         self.status_cpa.setStyleSheet("color:#9FB2A6;")
-        self.statusBar().addWidget(self.status_left, 1)
-        self.statusBar().addPermanentWidget(self.status_link)
-        self.statusBar().addPermanentWidget(self.status_cpa)
-        self.statusBar().addPermanentWidget(self.status_right)
+        sb = self.statusBar()
+        sb.setMinimumHeight(26)
+        sb.addWidget(self.status_left, 1)
+        sb.addPermanentWidget(self.status_link)
+        sb.addPermanentWidget(self.status_cpa)
+        sb.addPermanentWidget(self.status_right)
 
         self.log.push("info", "RadarScope 启动")
         self._rebuild_driver_combo()
@@ -558,6 +568,18 @@ class MainWindow(ConnectionController, ExportController,
         geo = self.settings.value("geometry")
         if geo is not None:
             self.restoreGeometry(geo)
+        # 防止恢复后的窗口高度/宽度超出桌面可用工作区，避免底部状态栏被任务栏挡住或挤压
+        scr = QGuiApplication.primaryScreen()
+        if scr is not None and not self.isMaximized():
+            avail = scr.availableGeometry()
+            w = min(self.width(), max(900, avail.width() - 24))
+            h = min(self.height(), max(600, avail.height() - 24))
+            self.resize(w, h)
+        lat = float(self.settings.value("ais_lat", 39.9) or 39.9)
+        lon = float(self.settings.value("ais_lon", 116.4) or 116.4)
+        if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0:
+            self._ais_ref = (lat, lon)
+        self._map_provider = str(self.settings.value("map_provider", "auto") or "auto")
         key = self.settings.value("palette", DEFAULT_PALETTE)
         idx = self.pal_combo.findData(key) if isinstance(key, str) else -1
         if idx >= 0:
@@ -587,6 +609,9 @@ class MainWindow(ConnectionController, ExportController,
         self.settings.setValue("palette", self.pal_combo.currentData())
         self.settings.setValue("driver", self.drv_combo.currentData())
         self.settings.setValue("endpoint", self.endpoint_combo.currentText())
+        self.settings.setValue("ais_lat", self._ais_ref[0])
+        self.settings.setValue("ais_lon", self._ais_ref[1])
+        self.settings.setValue("map_provider", self._map_provider)
 
     # ================================================================== #
     # 端点
@@ -985,23 +1010,29 @@ class MainWindow(ConnectionController, ExportController,
 
         enable_dark_titlebar(int(self.winId()), self._theme == "dark")
         if self.map_layer is not None:
-            self.map_layer.set_provider("carto_light" if self._theme == "light" else "carto_dark")
+            self.map_layer.set_provider(resolve_provider(self._map_provider, self._theme))
         self._refresh_alarm_bar()
         self.log.push("info", f"主题：{THEMES[self._theme]['name']}")
 
     def _toggle_map(self, on: bool) -> None:
-        """联网地图：按当前量程自动选瓦片级别，拿"本船经纬度"当中心。"""
+        """联网地图：按当前量程自动选瓦片级别，拿中心坐标（手动/IP/AIS）当原点。"""
+        act = getattr(self, "act_map", None)
+        if act is not None and act.isChecked() != bool(on):
+            act.blockSignals(True)
+            act.setChecked(bool(on))
+            act.blockSignals(False)
         if on:
             if self.map_layer is None:
                 self.map_layer = MapLayer(paths.data_dir() / "tiles", self)
                 self.map_layer.ready.connect(self.ppi.update)
-            self.map_layer.set_provider("carto_light" if self._theme == "light" else "carto_dark")
+            prov = resolve_provider(self._map_provider, self._theme)
+            self.map_layer.set_provider(prov)
             self.map_layer.enabled = True
             self.ppi.map_layer = self.map_layer
             lat, lon = self._ais_ref
             self.map_layer.request(lat, lon, float(self.range_spin.value()),
                                    max(200, self.ppi.width()))
-            hint = f"联网地图已开启（中心 {lat:.5f}, {lon:.5f}）"
+            hint = f"联网地图已开启（中心 {lat:.5f}, {lon:.5f} · 图源 {prov}）"
             if float(self.range_spin.value()) < 30.0:
                 hint += "；提示：街道地图仅在 30m 以上室外/海图量程有细节，离线时自动保持透明"
             self.log.push("ok", hint)
@@ -1014,6 +1045,25 @@ class MainWindow(ConnectionController, ExportController,
             self.log.push("info", "联网地图底图已关闭")
         self.ppi.update()
         self.ppi2.update()
+
+    def _open_map_settings(self) -> None:
+        cur_on = bool(self.map_layer is not None and self.map_layer.enabled)
+        dlg = MapLocationDialog(
+            self._ais_ref[0], self._ais_ref[1], self._map_provider, cur_on, self
+        )
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        lat, lon, prov, want_on = dlg.values()
+        self._ais_ref = (lat, lon)
+        self._map_provider = prov
+        self.settings.setValue("ais_lat", lat)
+        self.settings.setValue("ais_lon", lon)
+        self.settings.setValue("map_provider", prov)
+        if self.map_layer is not None:
+            self.map_layer._key = None
+        self._toggle_map(want_on)
+        if not want_on:
+            self.log.push("ok", f"已保存地图与定位中心：{lat:.5f}, {lon:.5f}")
 
     def _open_sim_station(self) -> None:
         from .simdialog import SimStationDialog

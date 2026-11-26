@@ -1075,6 +1075,61 @@ def test_zone_hit_and_map_toggle() -> None:
     ok("PPI 警戒区像素命中与地图图层离线防黑屏")
 
 
+def test_map_geolocate_and_provider() -> None:
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from radarscope.core.maptiles import geolocate_ip, resolve_provider
+
+    assert resolve_provider("auto", "light") == "carto_light"
+    assert resolve_provider("auto", "dark") == "carto_dark"
+    assert resolve_provider("osm", "light") == "osm"
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = b'{"success":true,"latitude":31.2304,"longitude":121.4737,"city":"Shanghai","country":"China"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), _Handler)
+    th = threading.Thread(target=srv.handle_request, daemon=True)
+    th.start()
+    try:
+        lat, lon, desc = geolocate_ip(timeout=2.0, urls=(f"http://127.0.0.1:{srv.server_port}/",))
+        assert abs(lat - 31.2304) < 1e-4 and abs(lon - 121.4737) < 1e-4
+        assert "Shanghai" in desc
+    finally:
+        srv.server_close()
+    ok("联网地图图源解析与 IP 自动定位解析")
+
+
+def test_statusbar_and_map_dialog() -> None:
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt5.QtWidgets import QApplication, QSizePolicy
+    from radarscope.ui.extra import MapLocationDialog
+    from radarscope.ui.mainwindow import MainWindow
+
+    _app = QApplication.instance() or QApplication([])
+    w = MainWindow()
+    assert w.status_left.minimumWidth() == 0
+    assert w.status_left.sizePolicy().horizontalPolicy() == QSizePolicy.Ignored
+    assert w.statusBar().minimumHeight() >= 26
+    w.status_left.setText("超长能力描述 " * 25)
+    assert w.minimumSizeHint().width() < 1200, f"状态栏长文本不应撑宽主窗口: {w.minimumSizeHint().width()}"
+
+    dlg = MapLocationDialog(lat=30.5, lon=114.3, provider="osm", map_enabled=True, parent=w)
+    lat, lon, prov, on = dlg.values()
+    assert abs(lat - 30.5) < 1e-6 and abs(lon - 114.3) < 1e-6
+    assert prov == "osm" and on is True
+    w.close()
+    ok("状态栏防挤压约束与联网地图定位设置对话框")
+
+
 def main() -> int:
     print("RadarScope 核心测试")
     for fn in (test_codec, test_ld2450_sign, test_pipeline, test_alarm,
@@ -1087,7 +1142,8 @@ def main() -> int:
                test_cfar_adaptive, test_track_level_fusion,
                test_plugin_verification, test_timeline_queries, test_meta_schema,
                test_polygon_zone, test_report_export, test_i18n_and_version,
-               test_ws_bridge, test_electronic_station, test_zone_hit_and_map_toggle):
+               test_ws_bridge, test_electronic_station, test_zone_hit_and_map_toggle,
+               test_map_geolocate_and_provider, test_statusbar_and_map_dialog):
         fn()
     print(f"\n全部通过：{PASS} 组")
     return 0
