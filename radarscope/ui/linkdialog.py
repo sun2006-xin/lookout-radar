@@ -64,42 +64,11 @@ def detect_frame_hints(data: bytes) -> list[str]:
 
 BAUDS = ["256000", "230400", "115200", "921600", "460800", "57600", "38400", "9600"]
 
-#: USB 转串口芯片的 VID（十六进制），用来优先展示"这很可能就是我的板子"
-USB_SERIAL_VIDS = {
-    "1A86": "CH340/CH341",
-    "10C4": "CP210x",
-    "0403": "FTDI",
-    "067B": "Prolific",
-    "1A86&PID_7523": "CH340",
-    "2E8A": "树莓派 Pico",
-    "0483": "STM32 虚拟串口",
-}
-
+from ..core.transport import scan_serial_ports as _core_scan_serial_ports
 
 def scan_serial_ports() -> list[dict]:
     """枚举串口。返回 [{'device','description','chip','is_usb'}]，USB 的排前面。"""
-    try:
-        from serial.tools import list_ports
-    except Exception:
-        return []
-
-    out: list[dict] = []
-    for p in list_ports.comports():
-        hwid = (p.hwid or "").upper()
-        chip = ""
-        for vid, name in USB_SERIAL_VIDS.items():
-            if vid in hwid:
-                chip = name
-                break
-        out.append({
-            "device": p.device,
-            "description": p.description or "",
-            "chip": chip,
-            "is_usb": "USB" in hwid or bool(chip),
-        })
-    # USB 转串口优先，其次按名字排
-    out.sort(key=lambda d: (not d["is_usb"], d["device"]))
-    return out
+    return _core_scan_serial_ports()
 
 
 class _BleScan(QThread):

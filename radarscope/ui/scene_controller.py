@@ -92,10 +92,15 @@ class SceneAndMapController:
         self._sync_scene_ui()
 
     def _ensure_sim_running(self, reason: str = "") -> bool:
-        """若当前未连接且位于模拟源（或用户触发仿真场景），自动连接以消除「点了没画面」断层。"""
+        """若当前未连接（无论上次停在哪个数据源），在用户主动触发仿真场景时自动切回模拟源并启动。"""
         if self.reader is not None:
             return True
         src = self.src_combo.currentData()
+        if src != "sim":
+            si = self.src_combo.findData("sim")
+            if si >= 0:
+                self.src_combo.setCurrentIndex(si)
+                src = self.src_combo.currentData()
         if src != "sim":
             return False
         self._want_connect = True
@@ -185,6 +190,12 @@ class SceneAndMapController:
             self.sim_station.jam_mode = "none"
             self.sim_station.fc_sim = False
             self.sim_station._jam_t = 0.0
+
+        # 若当前并未连接任何真实硬件却停在 device/replay 数据源，主动切回 sim 源以保证选场景即出画面
+        if key != "none" and self.reader is None and self.src_combo.currentData() != "sim":
+            si = self.src_combo.findData("sim")
+            if si >= 0:
+                self.src_combo.setCurrentIndex(si)
 
         if self.src_combo.currentData() == "sim":
             cur_drv = self.drv_combo.currentData()

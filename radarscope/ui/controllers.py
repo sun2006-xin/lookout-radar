@@ -169,16 +169,14 @@ class ConnectionController:
         return int(getattr(cls, "default_baud", 256000) or 256000)
 
     def _refresh_endpoints(self) -> None:
+        from ..core.transport import scan_serial_ports
+
         cur = self.endpoint_combo.currentText()
         self.endpoint_combo.clear()
         items: list[str] = []
         baud = self._driver_baud()
-        try:
-            from serial.tools import list_ports
-            for p in list_ports.comports():
-                items.append(f"serial://{p.device}?baud={baud}")
-        except Exception:
-            pass
+        for p in scan_serial_ports():
+            items.append(f"serial://{p['device']}?baud={baud}")
         items.extend(PRESET_ENDPOINTS)
         for f in sorted(self.data_dir.glob("*.rad"))[-5:]:
             items.append(str(f))

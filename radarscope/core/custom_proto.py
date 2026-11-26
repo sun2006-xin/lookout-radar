@@ -29,12 +29,13 @@ _KN_TO_MS = 1852.0 / 3600.0
 class CustomProtocolSpec:
     id: str
     label: str
-    mode: str = "csv_xy"            # nmea_ttm | csv_xy | csv_polar | binary_fixed
+    mode: str = "csv_xy"            # nmea_ttm | csv_xy | csv_polar | json_lines | binary_fixed | binary_point | binary_polar
     form: str = "sector"            # point | sector | omni | tracking
     vendor: str = "通用协议"
     range_min: float = 0.2
     range_max: float = 50.0
     az_fov: float = 180.0
+    baud_rate: int = 115200
     # 文本协议配置
     delimiter: str = ","
     prefix: str = ""
@@ -43,7 +44,8 @@ class CustomProtocolSpec:
     col_vx: int = 3                 # vx 或 -1
     col_vy: int = 4                 # vy 或 -1
     col_snr: int = 5                # snr 或 -1
-    scale: float = 1.0              # 坐标缩放系数（例如 mm -> 0.001）
+    scale: float = 1.0              # 坐标/距离缩放系数（例如 mm -> 0.001）
+    angle_scale: float = 1.0        # binary_polar 角度缩放（如 0.1 表示 0.1°）
     # 二进制协议配置
     header_hex: str = "AA 55"
     tail_hex: str = ""
@@ -186,6 +188,7 @@ def builtin_presets() -> list[CustomProtocolSpec]:
             range_min=0.05,
             range_max=50.0,
             az_fov=15.0,
+            baud_rate=9600,
             header_hex="01 03",
             tail_hex="",
             frame_len=7,
@@ -194,6 +197,39 @@ def builtin_presets() -> list[CustomProtocolSpec]:
             struct_fmt="H",
             scale=0.001,
             notes="7字节大端帧：01 03 byte_cnt + uint16(dist_mm) + CRC16",
+        ),
+        CustomProtocolSpec(
+            id="json_radar_stream",
+            label="网络 / ESP32 JSON 行目标流 (TCP/UDP/串口)",
+            mode="json_lines",
+            form="sector",
+            vendor="通用 JSON 传感器",
+            range_min=0.2,
+            range_max=80.0,
+            az_fov=180.0,
+            baud_rate=115200,
+            transports=("tcp", "udp", "serial", "file"),
+            notes="支持 {\"x\":1.2,\"y\":3.4}、{\"rng\":5.0,\"az\":30} 或 {\"targets\":[...]}",
+        ),
+        CustomProtocolSpec(
+            id="polar_bin_radar",
+            label="毫米波/ToF · 二进制极坐标帧 (AA 56 · cm/0.1°)",
+            mode="binary_polar",
+            form="sector",
+            vendor="通用极坐标二进制",
+            range_min=0.2,
+            range_max=40.0,
+            az_fov=120.0,
+            baud_rate=115200,
+            header_hex="AA 56",
+            tail_hex="0D 0A",
+            frame_len=10,
+            endian="<",
+            payload_offset=2,
+            struct_fmt="HhH",
+            scale=0.01,
+            angle_scale=0.1,
+            notes="10字节帧：AA 56 + uint16(dist_cm) + int16(az_0.1deg) + uint16(snr) + 0D 0A",
         ),
     ]
 
@@ -270,6 +306,64 @@ def parse_hex_bytes(text: str) -> bytes:
     return bytes.fromhex(cleaned)
 
 
+def _finite_target(
+    x: float, y: float, vx: float = 0.0, vy: float = 0.0,
+    snr: float = 0.85, tid: int = -1, z: float = 0.0, cls: str = "",
+) -> Target | None:
+    if not all(math.isfinite(v) for v in (x, y, vx, vy, snr, z)):
+        return None
+    return Target(
+        x=float(x), y=float(y), vx=float(vx), vy=float(vy),
+        snr=max(0.1, min(1.0, float(snr))), tid=int(tid), z=float(z), cls=str(cls),
+    )
+
+
+def _target_from_mapping(item: dict, scale: float = 1.0, angle_scale: float = 1.0) -> Target | None:
+    if not isinstance(item, dict):
+        return None
+    try:
+        if "x" in item and "y" in item:
+            x = float(item["x"]) * scale
+            y = float(item["y"]) * scale
+        elif any(k in item for k in ("rng", "range", "dist", "r")):
+            rk = next(k for k in ("rng", "range", "dist", "r") if k in item)
+            ak = next((k for k in ("az", "az_deg", "angle", "bearing", "theta") if k in item), None)
+            rng = float(item[rk]) * scale
+            az_deg = float(item[ak]) * angle_scale if ak else 0.0
+            az = math.radians(az_deg)
+            x, y = rng * math.sin(az), rng * math.cos(az)
+        else:
+            return None
+        vx = float(item.get("vx", 0.0) or 0.0)
+        vy = float(item.get("vy", 0.0) or 0.0)
+        raw_s = float(item.get("snr", item.get("strength", 0.85)) or 0.85)
+        snr = raw_s / 100.0 if raw_s > 1.5 else raw_s
+        tid = int(item.get("tid", item.get("id", -1)) or -1)
+        z = float(item.get("z", 0.0) or 0.0)
+        cls = str(item.get("cls", item.get("type", "")) or "")
+    except (TypeError, ValueError):
+        return None
+    return _finite_target(x, y, vx, vy, snr, tid=tid, z=z, cls=cls)
+
+
+def parse_json_line(spec: CustomProtocolSpec, line: str) -> list[Target]:
+    """解析单行 JSON 雷达目标或 {"targets":[...]} 目标列表。"""
+    s = line.strip()
+    if not s or not (s.startswith("{") or s.startswith("[")):
+        return []
+    try:
+        data = json.loads(s)
+    except ValueError:
+        return []
+    items = data.get("targets", []) if isinstance(data, dict) and "targets" in data else (data if isinstance(data, list) else [data])
+    out: list[Target] = []
+    for item in items:
+        t = _target_from_mapping(item, scale=spec.scale, angle_scale=spec.angle_scale)
+        if t is not None:
+            out.append(t)
+    return out
+
+
 def parse_custom_line(spec: CustomProtocolSpec, line: str) -> list[Target]:
     """按文本协议规则解析一行报文为目标列表。"""
     s = line.strip()
@@ -278,6 +372,8 @@ def parse_custom_line(spec: CustomProtocolSpec, line: str) -> list[Target]:
     if spec.mode == "nmea_ttm":
         t = parse_nmea_ttm(s)
         return [t] if t is not None else []
+    if spec.mode == "json_lines":
+        return parse_json_line(spec, s)
     if spec.prefix and not s.startswith(spec.prefix):
         return []
     parts = [p.strip() for p in s.split(spec.delimiter or ",")]
@@ -289,16 +385,18 @@ def parse_custom_line(spec: CustomProtocolSpec, line: str) -> list[Target]:
         vb = float(parts[spec.col_b])
         if spec.mode == "csv_polar":
             # col_a = 距离（乘 scale），col_b = 方位角（度，正北为0顺时针）
-            az = math.radians(vb)
+            az = math.radians(vb * spec.angle_scale)
             x, y = va * math.sin(az), va * math.cos(az)
         else:
             x, y = va, vb * spec.scale
         vx = float(parts[spec.col_vx]) if 0 <= spec.col_vx < len(parts) and parts[spec.col_vx] else 0.0
         vy = float(parts[spec.col_vy]) if 0 <= spec.col_vy < len(parts) and parts[spec.col_vy] else 0.0
-        snr = float(parts[spec.col_snr]) if 0 <= spec.col_snr < len(parts) and parts[spec.col_snr] else 0.85
+        raw_s = float(parts[spec.col_snr]) if 0 <= spec.col_snr < len(parts) and parts[spec.col_snr] else 0.85
+        snr = raw_s / 100.0 if raw_s > 1.5 else raw_s
     except ValueError:
         return []
-    return [Target(x=x, y=y, vx=vx, vy=vy, snr=max(0.1, min(1.0, snr)))]
+    t = _finite_target(x, y, vx, vy, snr)
+    return [t] if t is not None else []
 
 
 def parse_custom_binary(spec: CustomProtocolSpec, pkt: bytes) -> list[Target]:
@@ -318,9 +416,23 @@ def parse_custom_binary(spec: CustomProtocolSpec, pkt: bytes) -> list[Target]:
         if len(vals) >= 2:
             raw_s = float(vals[1])
             snr = min(1.0, raw_s / 1000.0) if raw_s > 100.0 else (raw_s / 100.0 if raw_s > 1.5 else raw_s)
-        return [Target(x=0.0, y=dist, snr=max(0.1, min(1.0, snr)))]
+        t = _finite_target(0.0, dist, snr=snr)
+        return [t] if t is not None else []
     if len(vals) < 2:
         return []
+    if spec.mode == "binary_polar":
+        dist = float(vals[0]) * spec.scale
+        if dist <= 0.0:
+            return []
+        az_deg = float(vals[1]) * spec.angle_scale
+        az = math.radians(az_deg)
+        x, y = dist * math.sin(az), dist * math.cos(az)
+        vx, vy, snr = 0.0, 0.0, 0.85
+        if len(vals) >= 3:
+            raw_s = float(vals[2])
+            snr = min(1.0, raw_s / 1000.0) if raw_s > 100.0 else (raw_s / 100.0 if raw_s > 1.5 else raw_s)
+        t = _finite_target(x, y, vx, vy, snr)
+        return [t] if t is not None else []
     x = float(vals[0]) * spec.scale
     y = float(vals[1]) * spec.scale
     vx, vy, snr = 0.0, 0.0, 0.85
@@ -333,7 +445,8 @@ def parse_custom_binary(spec: CustomProtocolSpec, pkt: bytes) -> list[Target]:
         if len(vals) >= 5:
             raw_s = float(vals[4])
             snr = raw_s / 100.0 if raw_s > 1.5 else raw_s
-    return [Target(x=x, y=y, vx=vx, vy=vy, snr=max(0.1, min(1.0, snr)))]
+    t = _finite_target(x, y, vx, vy, snr)
+    return [t] if t is not None else []
 
 
 def _make_decoder(spec: CustomProtocolSpec) -> StreamDecoder:
@@ -350,7 +463,7 @@ def _make_decoder(spec: CustomProtocolSpec) -> StreamDecoder:
 
 def preview_sample(spec: CustomProtocolSpec, sample_text: str) -> list[Target]:
     """UI 向导调测用：把一段文本行或十六进制字节样本送入规则解析。"""
-    if spec.mode in ("binary_fixed", "binary_point"):
+    if spec.mode in ("binary_fixed", "binary_point", "binary_polar"):
         raw = parse_hex_bytes(sample_text)
         dec = _make_decoder(spec)
         out: list[Target] = []
@@ -396,17 +509,19 @@ def build_driver_class(spec: CustomProtocolSpec) -> type[RadarDriver]:
         source = "device"
         form = spec.form
         vendor = spec.vendor
+        default_baud = int(spec.baud_rate or 115200)
 
         def __init__(self) -> None:
             self._spec = spec
             self._tr = None
             self._dec: StreamDecoder | None = None
+            self._txt_buf = ""
             self._endpoint = ""
             self._good = 0
             self._bad = 0
 
         def capabilities(self) -> Capabilities:
-            has_v = spec.mode == "nmea_ttm" or spec.col_vx >= 0 or len(spec.struct_fmt) >= 4
+            has_v = spec.mode in ("nmea_ttm", "json_lines") or spec.col_vx >= 0 or len(spec.struct_fmt) >= 4
             return Capabilities(
                 name=spec.label,
                 form=spec.form,
@@ -428,11 +543,13 @@ def build_driver_class(spec: CustomProtocolSpec) -> type[RadarDriver]:
             )
 
         def open(self, **kwargs) -> None:
-            self._endpoint = endpoint_of(kwargs, 115200)
-            self._tr = open_transport(self._endpoint, default_baud=115200)
+            baud = int(self._spec.baud_rate or 115200)
+            self._endpoint = endpoint_of(kwargs, baud)
+            self._tr = open_transport(self._endpoint, default_baud=baud)
             self._good = 0
             self._bad = 0
-            if self._spec.mode in ("binary_fixed", "binary_point"):
+            self._txt_buf = ""
+            if self._spec.mode in ("binary_fixed", "binary_point", "binary_polar"):
                 self._dec = _make_decoder(self._spec)
             else:
                 self._dec = None
@@ -441,7 +558,7 @@ def build_driver_class(spec: CustomProtocolSpec) -> type[RadarDriver]:
             if self._tr is None:
                 return None
             tgts: list[Target] = []
-            if self._spec.mode in ("binary_fixed", "binary_point") and self._dec is not None:
+            if self._spec.mode in ("binary_fixed", "binary_point", "binary_polar") and self._dec is not None:
                 chunk = self._tr.read(4096)
                 if not chunk:
                     time.sleep(0.01)
@@ -454,16 +571,31 @@ def build_driver_class(spec: CustomProtocolSpec) -> type[RadarDriver]:
                 if not pkts:
                     return None
             else:
-                raw_line = self._tr.readline()
-                if not raw_line:
+                # 批量读取缓冲并按行切分，防止多目标 NMEA/CSV/JSON 突发报文一次只画一个目标
+                chunk = self._tr.read(4096)
+                if chunk:
+                    self._txt_buf += chunk.decode("utf-8", errors="ignore")
+                if len(self._txt_buf) > 65536:
+                    self._txt_buf = self._txt_buf[-32768:]
+                if "\n" not in self._txt_buf:
+                    raw_line = self._tr.readline()
+                    if raw_line:
+                        self._txt_buf += raw_line.decode("utf-8", errors="ignore")
+                if "\n" not in self._txt_buf:
                     time.sleep(0.01)
                     return None
-                txt = raw_line.decode("utf-8", errors="ignore")
-                tgts = parse_custom_line(self._spec, txt)
-                if tgts:
-                    self._good += 1
-                else:
-                    self._bad += 1
+                lines = self._txt_buf.split("\n")
+                self._txt_buf = lines.pop()
+                for ln in lines[:64]:
+                    if not ln.strip():
+                        continue
+                    parsed = parse_custom_line(self._spec, ln)
+                    if parsed:
+                        self._good += 1
+                        tgts.extend(parsed)
+                    else:
+                        self._bad += 1
+                if not tgts:
                     return None
 
             caps = self.capabilities()

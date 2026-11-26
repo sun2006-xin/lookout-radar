@@ -162,6 +162,8 @@ class Store:
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.executescript(_SCHEMA)
+        self._migrate_schema()
+        self._close_dangling_sessions()
         self._db.commit()
         self._pending_tracks: list[tuple] = []
         self._pending_events: list[tuple] = []
@@ -170,6 +172,21 @@ class Store:
         # 写失败必须可见：航迹没进库却一声不吭，等于"以为在留证其实没留"
         self.write_errors = 0
         self.last_error = ""
+
+    def _migrate_schema(self) -> None:
+        """向后兼容补齐 3D 高度 / 仰角 / RCS 列，旧库无痛升级。"""
+        cols = {row[1] for row in self._db.execute("PRAGMA table_info(tracks)").fetchall()}
+        for col, spec in (("z", "REAL DEFAULT 0.0"), ("el_deg", "REAL DEFAULT 0.0"), ("rcs", "REAL DEFAULT 0.0")):
+            if col not in cols:
+                self._db.execute(f"ALTER TABLE tracks ADD COLUMN {col} {spec}")
+
+    def _close_dangling_sessions(self) -> None:
+        """将上次异常崩溃未调用 end_session() 的历史挂起会话回填合理结束时间。"""
+        self._db.execute(
+            "UPDATE sessions SET ended = COALESCE("
+            "(SELECT MAX(ts) FROM tracks WHERE sid = sessions.id), started)"
+            " WHERE ended IS NULL"
+        )
 
     # ------------------------------------------------------------------ #
     def start_session(self, driver: str, endpoint: str = "",
@@ -203,10 +220,15 @@ class Store:
         if sid is None:
             return
         ts = ts or time.time()
-        for t in tracks:
-            self._pending_tracks.append(
-                (sid, ts, t.tid, t.x, t.y, t.vx, t.vy, t.rng, t.az_deg, t.snr,
-                 t.threat, t.cls))
+        with self._lock:
+            for t in tracks:
+                self._pending_tracks.append((
+                    sid, ts, t.tid, t.x, t.y, t.vx, t.vy, t.rng, t.az_deg,
+                    t.snr, t.threat, t.cls,
+                    float(getattr(t, "z", 0.0) or 0.0),
+                    float(getattr(t, "el_deg", 0.0) or 0.0),
+                    float(getattr(t, "rcs", 0.0) or 0.0),
+                ))
         self.flush()
 
     def record_event(self, level: str, kind: str, message: str,
@@ -215,8 +237,9 @@ class Store:
         sid = self.session_id
         if sid is None:
             return
-        self._pending_events.append(
-            (sid, ts if ts is not None else time.time(), level, kind, rule_id, message, int(active), tid))
+        with self._lock:
+            self._pending_events.append(
+                (sid, ts if ts is not None else time.time(), level, kind, rule_id, message, int(active), tid))
         self.flush()
 
     def flush(self, force: bool = False) -> None:
@@ -227,8 +250,8 @@ class Store:
             try:
                 if self._pending_tracks:
                     self._db.executemany(
-                        "INSERT INTO tracks(sid,ts,tid,x,y,vx,vy,rng,az,snr,threat,cls)"
-                        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", self._pending_tracks)
+                        "INSERT INTO tracks(sid,ts,tid,x,y,vx,vy,rng,az,snr,threat,cls,z,el_deg,rcs)"
+                        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", self._pending_tracks)
                     self._pending_tracks.clear()
                 if self._pending_events:
                     self._db.executemany(
@@ -346,6 +369,59 @@ class Store:
                 "SELECT MAX(tid), MIN(ts), MAX(ts) FROM tracks WHERE sid=?", (sid,)).fetchone()
         return {"tracks_rows": n_trk, "events": n_evt,
                 "max_tid": row[0] or 0, "first_ts": row[1], "last_ts": row[2]}
+
+    def track_summaries(self, sid: int) -> list[dict]:
+        """按目标航迹号聚合历史会话详情（点数 / 最近最远距 / 最大速度 / 峰值SNR / 最高威胁 / 高度）。"""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT tid, COUNT(*) AS pts, MIN(rng), MAX(rng), "
+                "MAX(SQRT(vx*vx + vy*vy)), MAX(snr), MAX(threat), "
+                "MAX(COALESCE(cls, '')), MAX(COALESCE(z, 0.0)), MIN(ts), MAX(ts) "
+                "FROM tracks WHERE sid=? GROUP BY tid ORDER BY pts DESC, tid ASC",
+                (sid,),
+            ).fetchall()
+        return [
+            {
+                "tid": int(r[0]),
+                "points": int(r[1]),
+                "min_rng": float(r[2] or 0.0),
+                "max_rng": float(r[3] or 0.0),
+                "max_speed": float(r[4] or 0.0),
+                "peak_snr": float(r[5] or 0.0),
+                "max_threat": int(r[6] or 0),
+                "cls": str(r[7] or ""),
+                "max_z": float(r[8] or 0.0),
+                "first_ts": float(r[9] or 0.0),
+                "last_ts": float(r[10] or 0.0),
+            }
+            for r in rows
+        ]
+
+    def delete_session(self, sid: int) -> None:
+        """事务级删除指定会话及其关联航迹/事件/归档索引。"""
+        with self._lock:
+            if self.session_id == sid:
+                self.session_id = None
+            for tbl in ("tracks", "events", "archives"):
+                self._db.execute(f"DELETE FROM {tbl} WHERE sid=?", (sid,))
+            self._db.execute("DELETE FROM sessions WHERE id=?", (sid,))
+            self._db.commit()
+
+    def cleanup_empty_sessions(self) -> int:
+        """清理既无航迹点又无事件的历史空会话，返回清理数量。"""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id FROM sessions WHERE id != COALESCE(?, -1) "
+                "AND NOT EXISTS (SELECT 1 FROM tracks WHERE tracks.sid = sessions.id) "
+                "AND NOT EXISTS (SELECT 1 FROM events WHERE events.sid = sessions.id)",
+                (self.session_id,),
+            ).fetchall()
+            sids = [int(r[0]) for r in rows]
+            for sid in sids:
+                self._db.execute("DELETE FROM archives WHERE sid=?", (sid,))
+                self._db.execute("DELETE FROM sessions WHERE id=?", (sid,))
+            self._db.commit()
+            return len(sids)
 
     def tracks_window(self, sid: int, t0: float, t1: float) -> list[tuple]:
         """按时间窗口查询航迹（走 ix_tracks(sid, ts) 索引，用于时间轴回放 C3）。"""

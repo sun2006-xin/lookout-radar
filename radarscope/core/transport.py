@@ -33,6 +33,42 @@ class TransportError(RuntimeError):
     """传输层故障：连不上、断了、超时。上层据此决定是否重连。"""
 
 
+USB_SERIAL_VIDS = {
+    "1A86": "CH340/CH341",
+    "10C4": "CP210x",
+    "0403": "FTDI",
+    "067B": "Prolific",
+    "1A86&PID_7523": "CH340",
+    "2E8A": "树莓派 Pico",
+    "0483": "STM32 虚拟串口",
+}
+
+
+def scan_serial_ports() -> list[dict]:
+    """枚举本机串口设备（由 core 层统一隔离 pyserial 依赖）。USB 转串口优先。"""
+    try:
+        from serial.tools import list_ports
+    except Exception:
+        return []
+
+    out: list[dict] = []
+    for p in list_ports.comports():
+        hwid = (getattr(p, "hwid", "") or "").upper()
+        chip = ""
+        for vid, name in USB_SERIAL_VIDS.items():
+            if vid in hwid:
+                chip = name
+                break
+        out.append({
+            "device": str(p.device),
+            "description": str(getattr(p, "description", "") or ""),
+            "chip": chip,
+            "is_usb": ("USB" in hwid) or bool(chip),
+        })
+    out.sort(key=lambda d: (not d["is_usb"], d["device"]))
+    return out
+
+
 class Transport(ABC):
     scheme = ""
 

@@ -37,6 +37,8 @@ class TimelineDialog(QDialog):
         self._timer.timeout.connect(self._tick)
 
         rmax = float((caps_dict or {}).get("range_max") or 10.0)
+        rate = float((caps_dict or {}).get("scan_rate") or 2.0)
+        self._hold_win = max(1.8, (1.0 / max(0.2, rate)) * 2.5)
         caps = Capabilities(
             name=str((caps_dict or {}).get("name") or f"会话 #{sid}"),
             has_scan=False, has_azimuth=True, has_targets=True,
@@ -105,7 +107,7 @@ class TimelineDialog(QDialog):
         self.lbl_time.setText(
             f"{time.strftime('%H:%M:%S', time.localtime(cur))}  ({offset_s:.1f}s / {self._dur:.1f}s)"
         )
-        rows = self.store.tracks_window(self.sid, cur - 0.35, cur + 0.05)
+        rows = self.store.tracks_window(self.sid, cur - self._hold_win, cur + 0.05)
         latest: dict[int, Target] = {}
         for _ts, tid, x, y, vx, vy, _rng, _az, snr, threat, cls in rows:
             latest[int(tid)] = Target(

@@ -128,12 +128,19 @@ class StatsDialog(QDialog):
         w = QWidget()
         v = QVBoxLayout(w)
         self.lbl_kpi = QLabel("")
-        self.lbl_kpi.setStyleSheet("font-size:13px;color:#CFE0D5;")
+        self.lbl_kpi.setStyleSheet("font-size:13px;font-weight:600;")
         self.chart = ActivityChart()
+        self.tbl_tracks = QTableWidget(0, 7)
+        self.tbl_tracks.setHorizontalHeaderLabels(["航迹号", "点数", "最近(m)", "最远(m)", "最大速度", "峰值SNR", "最高威胁"])
+        self.tbl_tracks.verticalHeader().setVisible(False)
+        self.tbl_tracks.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.tbl_tracks.setShowGrid(False)
+        self.tbl_tracks.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.tbl_tracks.setMaximumHeight(175)
         v.addWidget(self.lbl_kpi)
         v.addWidget(self.chart, 1)
-        v.addWidget(QLabel("说明：柱高是每个时间桶内的航迹点数，"
-                           "用来判断目标活动是均匀还是集中爆发。"))
+        v.addWidget(QLabel("目标统计摘要（按航迹号 SQL 聚合）："))
+        v.addWidget(self.tbl_tracks)
         return w
 
     def _build_alarm(self) -> QWidget:
@@ -203,6 +210,23 @@ class StatsDialog(QDialog):
         bucket = 10 if dur <= 300 else 60 if dur <= 7200 else 300
         self.chart.set_data(self.store.tracks_per_bucket(self._sid, bucket), bucket)
 
+        summaries = self.store.track_summaries(self._sid)
+        self.tbl_tracks.setRowCount(len(summaries))
+        for r, item in enumerate(summaries):
+            vals = [
+                f"T{item['tid']}",
+                str(item["points"]),
+                f"{item['min_rng']:.1f}",
+                f"{item['max_rng']:.1f}",
+                f"{item['max_speed']:.1f} m/s",
+                f"{item['peak_snr']:.2f}",
+                {3: "高", 2: "中", 1: "低"}.get(item["max_threat"], "无"),
+            ]
+            for c, val in enumerate(vals):
+                it = QTableWidgetItem(val)
+                it.setTextAlignment(Qt.AlignCenter)
+                self.tbl_tracks.setItem(r, c, it)
+
         rows = self.store.alarm_summary(self._sid)
         self.tbl_alarm.setRowCount(len(rows))
         for r, (rule, msg, cnt) in enumerate(rows):
@@ -210,8 +234,8 @@ class StatsDialog(QDialog):
                 item = QTableWidgetItem(val)
                 if c == 1:
                     item.setTextAlignment(Qt.AlignCenter)
-                    item.setForeground(QColor(232, 163, 58) if cnt >= 5
-                                       else QColor(200, 210, 202))
+                    if cnt >= 5:
+                        item.setForeground(QColor(217, 119, 6))
                 self.tbl_alarm.setItem(r, c, item)
 
         self._load_events()

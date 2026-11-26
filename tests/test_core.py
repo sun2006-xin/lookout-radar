@@ -2003,6 +2003,102 @@ def test_digital_twins_and_ew_battlefields() -> None:
     ok("真实物理参数雷达数字孪生、电子战空/海/城/车多战场态势与真实物理建模")
 
 
+def test_universal_protocol_and_history_db() -> None:
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt5.QtWidgets import QApplication
+    from radarscope.core.custom_proto import (
+        CustomProtocolSpec, build_driver_class, parse_custom_line, preview_sample,
+    )
+    from radarscope.core.model import Capabilities, Target
+    from radarscope.core.storage import Store
+    from radarscope.core.transport import scan_serial_ports
+    from radarscope.ui.history import HistoryPanel
+    from radarscope.ui.statsdialog import StatsDialog
+    from radarscope.ui.timeline import TimelineDialog
+
+    # 1. 通用协议：json_lines（含数组与 NaN 过滤）、binary_polar 极坐标帧与批量多行串口帧合包
+    assert isinstance(scan_serial_ports(), list)
+    js_spec = CustomProtocolSpec(id="t_json", label="JSON测试", mode="json_lines", baud_rate=460800)
+    tgts_js = preview_sample(
+        js_spec,
+        '{"targets":[{"x":1.5,"y":4.0,"vx":0.2,"vy":-0.3,"snr":0.9},{"x":"nan","y":2.0}]}\n'
+        '{"rng":10.0,"az":30.0,"snr":85}',
+    )
+    assert len(tgts_js) == 2 and abs(tgts_js[1].x - 5.0) < 1e-3
+
+    pol_spec = CustomProtocolSpec(
+        id="t_pol_bin", label="极坐标二进制测试", mode="binary_polar",
+        header_hex="AA 56", tail_hex="0D 0A", frame_len=10, endian="<",
+        payload_offset=2, struct_fmt="HhH", scale=0.01, angle_scale=0.1, baud_rate=230400,
+    )
+    tgts_pol = preview_sample(pol_spec, "AA 56 2C 01 E2 FF 55 00 0D 0A")
+    assert len(tgts_pol) == 1 and abs(tgts_pol[0].rng - 3.0) < 0.05 and tgts_pol[0].az_deg < 0.0
+
+    # 验证多行 $TGT 突发报文一次 read() 合并全量目标，且 default_baud 跟随自定义波特率
+    drv_cls = build_driver_class(js_spec)
+    assert drv_cls.default_baud == 460800
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+        bin_p = Path(td) / "burst.txt"
+        bin_p.write_text('{"x":1.0,"y":5.0}\n{"x":-2.0,"y":6.0}\n', encoding="utf-8")
+        d = drv_cls()
+        d.open(endpoint=f"file://{bin_p}")
+        fr = None
+        dl = time.monotonic() + 0.5
+        while fr is None and time.monotonic() < dl:
+            fr = d.read()
+        d.close()
+        assert fr is not None and len(fr.targets) == 2, f"多行文本突发丢目标: {len(fr.targets) if fr else None}"
+
+        # 2. 历史数据库：旧库迁移补 3D 列、悬挂会话自动收口、目标聚合查询、明细面板/统计/时间轴/清理
+        db_p = Path(td) / "hist.db"
+        import sqlite3
+        con = sqlite3.connect(str(db_p))
+        con.executescript(
+            "CREATE TABLE sessions(id INTEGER PRIMARY KEY AUTOINCREMENT,started REAL,ended REAL,driver TEXT,endpoint TEXT,caps TEXT,note TEXT);"
+            "CREATE TABLE tracks(sid INTEGER,ts REAL,tid INTEGER,x REAL,y REAL,vx REAL,vy REAL,rng REAL,az REAL,snr REAL,threat INTEGER,cls TEXT);"
+            "INSERT INTO sessions(started,ended,driver,endpoint,caps,note) VALUES(1000.0,NULL,'sim','sim://','{}','crash');"
+            "INSERT INTO tracks VALUES(1,1005.0,1,1.0,3.0,0.5,0.0,3.16,18.4,0.9,2,'未知');"
+        )
+        con.commit()
+        con.close()
+
+        st = Store(db_p)
+        try:
+            sess = st.list_sessions(10)
+            assert len(sess) == 1 and sess[0].ended == 1005.0, "异常挂起会话应按末条航迹自动收口"
+            sid = st.start_session("custom", "udp://0.0.0.0:9000", Capabilities(name="TestRadar", range_max=50.0))
+            st.record_tracks(2000.0, [Target(x=3.0, y=4.0, vx=1.0, vy=2.0, snr=0.92, tid=1, z=12.5, rcs=2.5, threat=2, cls="UAV")])
+            st.record_event("warn", "alarm", "防区告警", rule_id="zone_1", tid=1, ts=2001.0)
+            st.end_session()
+            empty_sid = st.start_session("empty", "")
+            st.end_session()
+            sums = st.track_summaries(sid)
+            assert len(sums) == 1 and sums[0]["points"] == 1 and abs(sums[0]["max_z"] - 12.5) < 0.01
+
+            _app = QApplication.instance() or QApplication([])
+            hp = HistoryPanel(st)
+            assert hp.table.rowCount() >= 3
+            hp.table.selectRow(1)
+            _app.processEvents()
+            assert hp.tbl_tracks.rowCount() >= 1 and hp.tbl_events.rowCount() >= 1
+            dlg_st = StatsDialog(st, sid)
+            assert dlg_st.tbl_tracks.rowCount() == 1
+            dlg_tl = TimelineDialog(st, sid, {"name": "TestRadar", "range_max": 50.0, "scan_rate": 1.0})
+            assert dlg_tl._hold_win >= 1.8
+            dlg_st.close()
+            dlg_tl.close()
+            hp.close()
+
+            cleaned = st.cleanup_empty_sessions()
+            assert cleaned == 1 and all(s.id != empty_sid for s in st.list_sessions(20))
+            st.delete_session(sid)
+            assert all(s.id != sid for s in st.list_sessions(20))
+        finally:
+            st.close()
+    ok("多品牌通用协议适配（JSON/极坐标二进制/连包合并）与历史数据库明细闭环")
+
+
 def main() -> int:
     print("RadarScope 核心测试")
     for fn in (test_codec, test_ld2450_sign, test_pipeline, test_alarm,
@@ -2024,7 +2120,7 @@ def main() -> int:
                test_e7_3d_rhi_scope, test_ux_cohesion_and_controller_links,
                test_tracker_gnn_mn_kalman3d_and_imm, test_workspace_docks_canvas_edit_and_i18n,
                test_mission_recorder_and_recompute_compare, test_hardware_readiness_guards,
-               test_digital_twins_and_ew_battlefields):
+               test_digital_twins_and_ew_battlefields, test_universal_protocol_and_history_db):
         fn()
     print(f"\n全部通过：{PASS} 组")
     return 0

@@ -17,8 +17,10 @@ _SAMPLES = {
     "nmea_ttm": "$RATTM,01,1.25,045.0,T,12.5,210.0,T,0.3,4.2,N,VESSEL_A,T,,*46",
     "csv_xy": "$TGT,1.8,12.5,-0.5,-1.2,0.88",
     "csv_polar": "$SCAN,4.25,042.0,0.86",
+    "json_lines": '{"x":2.4,"y":8.6,"vx":0.1,"vy":-0.4,"snr":0.88}',
     "binary_fixed": "AA 55 96 00 C8 01 58 00 0D 0A",
     "binary_point": "59 59 5E 01 20 03 00 00 A0",
+    "binary_polar": "AA 56 2C 01 E2 FF 55 00 0D 0A",
 }
 
 _PRESET_SAMPLES = {
@@ -26,6 +28,8 @@ _PRESET_SAMPLES = {
     "tf_point_bin": "59 59 5E 01 20 03 00 00 A0",
     "can_udp_77g": "AB CD 00 00 00 40 00 00 20 41 00 00 80 BF 00 00 00 40 0D 0A",
     "modbus_u16_dist": "01 03 02 0D AC B8 1D",
+    "json_radar_stream": '{"x":2.4,"y":8.6,"vx":0.1,"vy":-0.4,"snr":0.88}',
+    "polar_bin_radar": "AA 56 2C 01 E2 FF 55 00 0D 0A",
 }
 
 
@@ -58,7 +62,9 @@ class ProtoWizardDialog(QDialog):
             ("nmea_ttm", "航海 NMEA TTM ($RATTM 目标报文)"),
             ("csv_xy", "文本行 · 笛卡尔坐标 (X, Y, Vx, Vy)"),
             ("csv_polar", "文本行 · 极坐标 (距离, 方位°)"),
+            ("json_lines", "网络/串口 · JSON 目标流 ({x,y} 或 {targets:[...]})"),
             ("binary_fixed", "二进制 · 坐标结构体 (X, Y / Vx, Vy)"),
+            ("binary_polar", "二进制 · 极坐标结构体 (距离, 方位, 强度)"),
             ("binary_point", "二进制 · 单点测距 (距离, 强度)"),
         ):
             self.cb_mode.addItem(v, k)
@@ -91,6 +97,14 @@ class ProtoWizardDialog(QDialog):
         self.sp_scale.setDecimals(5)
         self.sp_scale.setRange(0.00001, 1000.0)
         self.sp_scale.setValue(1.0)
+        self.sp_angle_scale = QDoubleSpinBox()
+        self.sp_angle_scale.setDecimals(4)
+        self.sp_angle_scale.setRange(0.0001, 100.0)
+        self.sp_angle_scale.setValue(1.0)
+        self.cb_baud = QComboBox()
+        self.cb_baud.setEditable(True)
+        for b in ("115200", "256000", "230400", "460800", "921600", "57600", "38400", "9600"):
+            self.cb_baud.addItem(b, int(b))
 
         form.addRow("驱动 ID（英文唯一）", self.ed_id)
         form.addRow("界面显示名称", self.ed_label)
@@ -102,16 +116,20 @@ class ProtoWizardDialog(QDialog):
         row_rng.addWidget(self.sp_rmax)
         row_rng.addWidget(QLabel("视场角(°)"))
         row_rng.addWidget(self.sp_fov)
-        form.addRow("量程与视场", row_rng)
+        row_rng.addWidget(QLabel("默认波特率"))
+        row_rng.addWidget(self.cb_baud)
+        form.addRow("量程与串口", row_rng)
 
         row_txt = QHBoxLayout()
         row_txt.addWidget(QLabel("行前缀"))
         row_txt.addWidget(self.ed_prefix)
         row_txt.addWidget(QLabel("分隔符"))
         row_txt.addWidget(self.ed_delim)
-        row_txt.addWidget(QLabel("坐标缩放"))
+        row_txt.addWidget(QLabel("距缩放"))
         row_txt.addWidget(self.sp_scale)
-        form.addRow("文本协议参数", row_txt)
+        row_txt.addWidget(QLabel("角缩放"))
+        row_txt.addWidget(self.sp_angle_scale)
+        form.addRow("文本/通用缩放", row_txt)
 
         row_bin = QHBoxLayout()
         row_bin.addWidget(QLabel("帧头Hex"))
@@ -188,9 +206,15 @@ class ProtoWizardDialog(QDialog):
         self.sp_offset.setValue(spec.payload_offset)
         self.ed_fmt.setText(spec.struct_fmt)
         self.sp_scale.setValue(spec.scale)
+        self.sp_angle_scale.setValue(getattr(spec, "angle_scale", 1.0))
+        self.cb_baud.setCurrentText(str(getattr(spec, "baud_rate", 115200)))
         self.ed_sample.setPlainText(_PRESET_SAMPLES.get(spec.id, _SAMPLES.get(spec.mode, "")))
 
     def _build_spec(self) -> CustomProtocolSpec:
+        try:
+            baud = max(1200, int(self.cb_baud.currentText().strip() or 115200))
+        except ValueError:
+            baud = 115200
         return CustomProtocolSpec(
             id=self.ed_id.text().strip() or "custom_proto",
             label=self.ed_label.text().strip() or "自定义雷达协议",
@@ -199,6 +223,7 @@ class ProtoWizardDialog(QDialog):
             range_min=0.2,
             range_max=float(self.sp_rmax.value()),
             az_fov=float(self.sp_fov.value()),
+            baud_rate=baud,
             prefix=self.ed_prefix.text().strip(),
             delimiter=self.ed_delim.text() or ",",
             header_hex=self.ed_hdr.text().strip(),
@@ -207,6 +232,7 @@ class ProtoWizardDialog(QDialog):
             payload_offset=int(self.sp_offset.value()),
             struct_fmt=self.ed_fmt.text().strip() or "hhh",
             scale=float(self.sp_scale.value()),
+            angle_scale=float(self.sp_angle_scale.value()),
         )
 
     def _test_parse(self) -> None:
