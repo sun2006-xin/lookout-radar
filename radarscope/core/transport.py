@@ -311,7 +311,8 @@ class FileTransport(Transport):
             time.sleep(min(0.01, self._t_next - now))
             return b""
         self._t_next = now + self.interval
-        end = min(len(self._data), self._pos + self.chunk)
+        step = min(max(1, n), self.chunk)
+        end = min(len(self._data), self._pos + step)
         out = self._data[self._pos:end]
         self._pos = end
         if self._pos >= len(self._data):

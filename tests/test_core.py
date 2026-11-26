@@ -732,6 +732,26 @@ def test_noise_floor_stable() -> None:
     ok("底噪稳定性：多帧后不抬升（防噪声累加回归）")
 
 
+def test_capture_fixtures() -> None:
+    """录制夹具回归：.bin 原始字节流与 .rad 归档可离线复现且不丢最后一帧。"""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "capture_check",
+        Path(__file__).resolve().parents[1] / "tools" / "capture_check.py",
+    )
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["capture_check"] = mod
+    spec.loader.exec_module(mod)
+
+    results = mod.verify_manifest()
+    assert len(results) >= 5, f"夹具数量不足：{len(results)}"
+    rad_res = [r for r in results if r.kind == "rad"]
+    assert rad_res and rad_res[0].frames == 5, f"ReplayDriver 丢帧：{rad_res}"
+    ok("录制夹具：.bin / .rad 离线回放与 CRC 拒绝数回归")
+
+
 def main() -> int:
     print("RadarScope 核心测试")
     for fn in (test_codec, test_ld2450_sign, test_pipeline, test_alarm,
@@ -739,7 +759,7 @@ def main() -> int:
                test_fusion, test_fusion_triangulation, test_calibration,
                test_lidar_protocol, test_viewmath, test_stats_queries, test_cpa,
                test_forwarder, test_ais, test_control_channel, test_maptiles,
-               test_noise_floor_stable):
+               test_noise_floor_stable, test_capture_fixtures):
         fn()
     print(f"\n全部通过：{PASS} 组")
     return 0

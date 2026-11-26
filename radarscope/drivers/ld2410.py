@@ -96,6 +96,12 @@ class LD2410Driver(RadarDriver):
         self._cmd_dec = StreamDecoder(
             FrameSpec(header=_CMD_H, tail=_CMD_T)
         )
+        if getattr(self._tr, "scheme", "") == "file":
+            # 文件回放不支持下行写命令，直接按工程模式解析录制流
+            self._engineering = True
+            self._last_state = "回放"
+            return
+
         time.sleep(0.1)
         try:
             self._tr.read(4096)                     # 清掉上电残留
@@ -116,11 +122,12 @@ class LD2410Driver(RadarDriver):
 
     def close(self) -> None:
         if self._tr is not None:
-            try:
-                self._cmd(0x0063, b"", wait_ack=False)   # 关工程模式
-                self._cmd(0x00FE, b"", wait_ack=False)
-            except Exception:
-                pass
+            if getattr(self._tr, "scheme", "") != "file":
+                try:
+                    self._cmd(0x0063, b"", wait_ack=False)   # 关工程模式
+                    self._cmd(0x00FE, b"", wait_ack=False)
+                except Exception:
+                    pass
             try:
                 self._tr.close()
             except Exception:

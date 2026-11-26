@@ -36,6 +36,7 @@ class ReplayDriver(RadarDriver):
         self._play_t0 = 0.0
         self._speed = 1.0
         self._loop = True
+        self._finished = False
         self._path = ""
         self._caps = Capabilities()
 
@@ -73,6 +74,7 @@ class ReplayDriver(RadarDriver):
         self._t0 = ts0
         self._play_t0 = time.monotonic()
         self._i = 0
+        self._finished = False
 
     def close(self) -> None:
         self._frames = []
@@ -80,6 +82,8 @@ class ReplayDriver(RadarDriver):
     def read(self) -> RadarFrame | None:
         if not self._frames:
             return None
+        if self._finished:
+            raise RuntimeError("回放结束")
         elapsed = (time.monotonic() - self._play_t0) * self._speed
         want_ts = self._t0 + elapsed
 
@@ -93,7 +97,8 @@ class ReplayDriver(RadarDriver):
                     self._play_t0 = time.monotonic()
                     self._t0 = self._frames[0][0]
                 else:
-                    raise RuntimeError("回放结束")
+                    # 先把最后一帧交出去，下一轮再报结束，避免丢最后一帧
+                    self._finished = True
             return RadarFrame(
                 timestamp=time.monotonic(),
                 scan=scan,

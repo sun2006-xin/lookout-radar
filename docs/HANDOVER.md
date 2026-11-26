@@ -17,7 +17,7 @@
 | 文档 | `<根>\docs\`，接手先读 `ROADMAP.md` → 本文第 4/6 节 → `STRUCTURE.md` |
 | 虚拟环境 | `<根>\.venv\`，Windows 下解释器是 `.venv\Scripts\python.exe` |
 | 打包产物 | `<根>\dist\Lookout\Lookout.exe`（129 MB，含 `plugins/`） |
-| 桌面入口 | `C:\Users\L\Desktop\瞭望 Lookout.lnk`（+ 同名 .bat 兜底） |
+| 桌面入口 | `C:\Users\L\Desktop\瞭望 Lookout.lnk`（指向 `dist\Lookout\Lookout.exe`） |
 | 运行数据 | 开发时 `<根>\data\`；打包版 `%LOCALAPPDATA%\Lookout\data` |
 | Git 仓库 | https://github.com/sun2006-xin/lookout-radar （public / main / MIT） |
 | 基线提交 | `558bd33`（2026-11-26，REVIEW 全部闭环）；之后以 `git log -1` 为准 |
@@ -199,7 +199,9 @@ class MyRadarDriver(RadarDriver):
 |---|---|---|
 | 界面在跑但数据全错 | 帧长度字段偏移算错 | 长度字段紧跟帧头，偏移 = `len(header)` |
 | 逐字节喂数据永远拼不出帧 | 半包被当"非法长度"丢弃 | `_total_of()` 用 `0` 表示"等数据"，`-1` 才表示非法 |
-| 回放丢最后一帧 | 到文件尾先抛异常后交付 | 标记 `_finished`，下一轮再抛 |
+| 回放丢最后一帧 | 到文件尾先抛异常后交付 | `FileTransport` 与 `ReplayDriver` 都用 `_finished` 标记，下一轮再抛 |
+| 文本协议 `file://` 回放读不到行 | `FileTransport.read(n)` 忽略 `n`，`readline()` 调 `read(1)` 一次返回整块 | `step = min(max(1, n), self.chunk)`，严格遵守 `n` 上限 |
+| LD2410 无法用 `file://` 离线回放 | `open()` 强行发配置命令调 `write()`，而文件传输只读 | 检测 `scheme == "file"` 时跳过握手，直接按工程模式解析 |
 | 目标跑到屏幕外 | 量程上限写死 | 量程从 `Capabilities.range_max` 取 |
 | 面板糊成一片绿 | 刻度步长写死 | 用 `theme.nice_step()` |
 | RD 图上下反了 | 数组第 0 行是 `-V_MAX` | 显示前 `arr[::-1]` |
@@ -228,6 +230,7 @@ class MyRadarDriver(RadarDriver):
 | 换浅色主题后雷达图一片灰白 | 深色色板挂在白底上 | `_apply_theme()` 里按主题自动配对色板（daylight/ice） |
 | 工具栏留下没有控件的孤字 | 控件搬进面板后 QLabel 还在，hide 不拆 action | 干脆删掉那些 `tb.addWidget(QLabel(...))` |
 | 点「录像」实际动了「录制帧」 | 两个按钮都叫 `btn_rec`，后者覆盖前者 | 录像改名 `btn_clip` |
+| 工具栏中间出现空白条且「设置」弹窗右侧空白 | 先 `tb.addWidget(w)` 再 `form.addRow(..., w)`，Qt 把 `QWidgetAction` 留在了工具栏且把原控件设为隐藏 | 只往弹窗 `form` 里加控件，不要先 `tb.addWidget()` |
 
 ---
 

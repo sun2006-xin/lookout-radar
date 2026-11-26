@@ -1,0 +1,42 @@
+[
+  {
+    "file": "ld19_sample.bin",
+    "driver": "ldlidar",
+    "chunk": 600,
+    "min_frames": 1,
+    "min_peak": 0.5,
+    "min_targets": 1,
+    "expected_bad": 1
+  },
+  {
+    "file": "ld2450_sample.bin",
+    "driver": "ld2450",
+    "chunk": 24,
+    "min_frames": 5,
+    "min_peak": 0.5,
+    "min_targets": 10
+  },
+  {
+    "file": "ld2410_sample.bin",
+    "driver": "ld2410",
+    "chunk": 24,
+    "min_frames": 5,
+    "min_peak": 0.7
+  },
+  {
+    "file": "ultrasonic_sample.bin",
+    "driver": "ultrasonic",
+    "chunk": 32,
+    "min_frames": 6,
+    "min_peak": 0.7,
+    "min_targets": 4
+  },
+  {
+    "file": "sim_sample.rad",
+    "driver": "replay",
+    "min_frames": 5,
+    "max_frames": 5,
+    "min_peak": 0.7,
+    "min_targets": 10
+  }
+]

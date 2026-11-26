@@ -16,7 +16,6 @@
 | `main.py` | 程序入口：日志初始化、全局异常兜底、`--selftest` 分支、创建 QApplication 与 MainWindow、套用上次主题 | `--selftest` **不创建窗口**，靠退出码表达成败；自检逻辑已抽到 `core/selftest.py` |
 | `selftest.py` | 独立的无界面自检脚本（历史入口，链路验证） | 与 `main.py --selftest` 有重叠，新代码优先用 `core/selftest.py` |
 | `1-安装依赖.bat` | 首次使用：建 `.venv`、装 `requirements.txt` | Windows 批处理，CRLF |
-| `启动.bat` | 日常源码启动（控制台可见，报错会停） | 排查启动失败时用这个，不用 exe |
 | `2-打包EXE.bat` | 重新打包：检查占用 → PyInstaller `--name Lookout --icon assets/app.ico` → 拷插件 → **跑 `--selftest` 验证** | 程序开着会 `Permission denied`，先关窗口 |
 | `requirements.txt` | 运行时依赖（PyQt5 / numpy / pyserial；`bleak` 可选） | 新依赖必须确认能进 PyInstaller 包体 |
 | `requirements-dev.txt` | 仅文档/开发工具：Pillow（动图）、PyInstaller | **不要**和运行依赖混在一起 |
@@ -38,7 +37,7 @@
 | `data/` | 运行时生成，**不进版本库**：见下表 |
 | `plugins/` | 用户插件目录，丢 `.py` 即生效 |
 | `tools/` | 开发/文档工具（下面单列） |
-| `tests/` | 一组测试文件 + 未来的 `fixtures/`（真机录制样本） |
+| `tests/` | `test_core.py`（21 组测试）+ `fixtures/`（5 份 `.bin`/`.rad` 回归夹具与 `manifest.json`） |
 | `docs/` | 全部文档（下面单列） |
 | `installer/` | Inno Setup 安装包脚本 `radarscope.iss`（尚未编译签名，见 ROADMAP D4） |
 | `firmware/` | `hc_sr04_servo.ino`，HC-SR04 + 舵机扫描的 Arduino 示例 |
@@ -151,7 +150,8 @@
 
 | 文件 | 具体职责 |
 |---|---|
-| `check.py` | **提交前必跑**：编译 + 20 组测试 + 链路自检，判据与 CI 一致 |
+| `check.py` | **提交前必跑**：编译 + 21 组测试 + 链路自检 + 录制夹具回归，判据与 CI 一致 |
+| `capture_check.py` | 离线校验 `.bin`/`.rad` 录制夹具（帧数/峰值/目标数/CRC 拒绝数），默认批量跑 `tests/fixtures/manifest.json` |
 | `bench.py` | 性能基准（改线程模型 C1 前先留基线） |
 | `make_icon.py` | 离屏画 `assets/logo.png` + `assets/app.ico`（手写多尺寸 ICO 头 + PNG 负载） |
 | `make_shortcut.py` | 按 **MS-SHLLINK** 手写 `桌面\瞭望 Lookout.lnk`（COM 被安全策略拦，不依赖 COM） |

@@ -206,7 +206,6 @@ class MainWindow(ConnectionController, ExportController,
         self.mode_combo = QComboBox()
         self.mode_combo.addItem("旋转扫描", "rotating")
         self.mode_combo.addItem("凝视扇区", "staring")
-        tb.addWidget(self.mode_combo)
 
         tb.addWidget(QLabel("  端点 "))
         self.endpoint_combo = QComboBox()
@@ -243,15 +242,17 @@ class MainWindow(ConnectionController, ExportController,
         self.range_spin.setSingleStep(0.5)
         self.range_spin.setValue(6.0)
         self.range_spin.setSuffix(" m")
+        self.range_spin.setMinimumWidth(96)
         self.range_spin.valueChanged.connect(self._on_range_changed)
         tb.addWidget(self.range_spin)
 
+        # 以下控件统一收进「设置」对话框，不挂到工具栏上，
+        # 避免 addWidget() 创建的 QWidgetAction 在 reparent 后留下空白占位并隐藏控件。
         self.thr_spin = QDoubleSpinBox()
         self.thr_spin.setRange(0.05, 0.95)
         self.thr_spin.setSingleStep(0.05)
         self.thr_spin.setValue(0.30)
         self.thr_spin.valueChanged.connect(self._on_threshold_changed)
-        tb.addWidget(self.thr_spin)
 
         # 显示增益：对已解析的矩阵做后处理，不涉及设备控制。
         # 真实雷达的 STC/FTC 要在设备侧下发参数，那是另一件事。
@@ -261,7 +262,6 @@ class MainWindow(ConnectionController, ExportController,
         self.gain_spin.setValue(1.0)
         self.gain_spin.setDecimals(1)
         self.gain_spin.setToolTip("显示增益：放大弱回波（只影响显示，不改变检测门限）")
-        tb.addWidget(self.gain_spin)
 
         self.pal_combo = QComboBox()
         for key, pal in PALETTES.items():
@@ -270,14 +270,12 @@ class MainWindow(ConnectionController, ExportController,
         if idx >= 0:
             self.pal_combo.setCurrentIndex(idx)
         self.pal_combo.currentIndexChanged.connect(self._on_palette_changed)
-        tb.addWidget(self.pal_combo)
 
         # 朝向：车载/船载场景下"北在哪"很重要；固定雷达用艏向朝上即可
         self.btn_north = QPushButton("北向朝上")
         self.btn_north.setCheckable(True)
         self.btn_north.setToolTip("勾选后画面按航向旋转，让北始终朝上；不勾选则平台正前朝上")
         self.btn_north.toggled.connect(self._on_orientation_changed)
-        tb.addWidget(self.btn_north)
 
         self.heading_spin = QDoubleSpinBox()
         self.heading_spin.setRange(0.0, 359.9)
@@ -286,9 +284,9 @@ class MainWindow(ConnectionController, ExportController,
         self.heading_spin.setSuffix("°")
         self.heading_spin.setToolTip("平台航向（0=正北，顺时针）。接罗盘/IMU 后可由插件自动更新")
         self.heading_spin.valueChanged.connect(self._on_orientation_changed)
-        tb.addWidget(self.heading_spin)
 
         spacer = QWidget()
+        spacer.setStyleSheet("background: transparent;")
         spacer.setSizePolicy(spacer.sizePolicy().Expanding, spacer.sizePolicy().Preferred)
         tb.addWidget(spacer)
 
@@ -306,7 +304,6 @@ class MainWindow(ConnectionController, ExportController,
         self.speed_spin.setSuffix(" m/s")
         self.speed_spin.setToolTip("本舰/本车速度，用于 CPA 计算。0 表示静止")
         self.speed_spin.valueChanged.connect(lambda *_: self._update_cpa_label())
-        tb.addWidget(self.speed_spin)
 
         self.btn_fwd = QPushButton("转发")
         self.btn_fwd.setCheckable(True)
@@ -348,12 +345,10 @@ class MainWindow(ConnectionController, ExportController,
         self.btn_rec.setCheckable(True)
         self.btn_rec.setToolTip("把强度矩阵写入 data/*.rad，之后可用回放驱动复现")
         self.btn_rec.toggled.connect(self._on_record_toggled)
-        tb.addWidget(self.btn_rec)
 
         self.chk_reconnect = QPushButton("自动重连")
         self.chk_reconnect.setCheckable(True)
         self.chk_reconnect.setChecked(True)
-        tb.addWidget(self.chk_reconnect)
 
         # 收敛工具栏：常用的留在外面，其余收进「更多设置」。
         # 之前三行二十多个控件铺开，一眼找不到重点 —— 工具应该按使用频率分层。
@@ -390,7 +385,6 @@ class MainWindow(ConnectionController, ExportController,
         _bb = QDialogButtonBox(QDialogButtonBox.Close)
         _bb.rejected.connect(self._settings_dlg.reject)
         _lay.addWidget(_bb)
-        panel.setParent(self._settings_dlg)
 
         self.btn_settings = QPushButton("设置")
         self.btn_settings.setToolTip("采集模式 / 门限 / 增益 / 配色 / 航向 / 航速 / 录制帧 / 自动重连")

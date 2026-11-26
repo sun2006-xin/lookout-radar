@@ -40,18 +40,21 @@ def main() -> int:
     py = sys.executable
     results = []
 
-    print("=== 1/3 字节码编译 ===")
+    print("=== 1/4 字节码编译 ===")
     ok = compileall.compile_dir(str(ROOT / "radarscope"), quiet=1) and \
         compileall.compile_dir(str(ROOT / "plugins"), quiet=1) and \
         compileall.compile_file(str(ROOT / "main.py"), quiet=1)
     print(f"    {'通过' if ok else '失败'}")
     results.append(("编译", ok))
 
-    ok, _, _ = run("2/3 单元测试", [py, str(ROOT / "tests" / "test_core.py")])
+    ok, _, _ = run("2/4 单元测试", [py, str(ROOT / "tests" / "test_core.py")])
     results.append(("单元测试", ok))
 
-    ok, _, _ = run("3/3 链路自检", [py, str(ROOT / "selftest.py")])
+    ok, _, _ = run("3/4 链路自检", [py, str(ROOT / "selftest.py")])
     results.append(("链路自检", ok))
+
+    ok, _, _ = run("4/4 录制夹具回归", [py, str(ROOT / "tools" / "capture_check.py")])
+    results.append(("录制夹具", ok))
 
     print("\n" + "=" * 46)
     bad = [n for n, o in results if not o]

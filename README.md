@@ -56,7 +56,7 @@
 
 ```bat
 1-安装依赖.bat
-启动.bat
+.venv\Scripts\python.exe main.py
 ```
 
 ### 打包成 exe

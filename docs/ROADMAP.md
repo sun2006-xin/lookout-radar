@@ -18,7 +18,7 @@
 | 源码 | 约 11 400 行 / 61 个 Python 文件 / 20 组测试 |
 | 主窗口 | `ui/mainwindow.py` 1021 行 + `ui/controllers.py` 648 行（三个 mixin） |
 | 打包产物 | `dist/Lookout/Lookout.exe`（PyInstaller，带 `assets/app.ico`） |
-| 桌面入口 | `桌面\瞭望 Lookout.lnk`（手写 MS-SHLLINK）+ 同名 .bat 兜底 |
+| 桌面入口 | `桌面\瞭望 Lookout.lnk`（手写 MS-SHLLINK） |
 | 仓库 | https://github.com/sun2006-xin/lookout-radar （public, main, MIT） |
 | 主题 | 现代白（默认，色板 daylight）/ 深色（色板 ice） |
 | 已闭环 | [REVIEW.md](REVIEW.md) 20 项全部处理，仅 4 条剩余风险 |
@@ -89,14 +89,15 @@
 - **验收**：已知位置的角反射器，融合误差 < 单站误差；盲区标注与实际漏检一致。
 - **风险**：不同设备的 `range_min/max` 不一致时，全局距离格对齐会错位。
 
-### A5 · 录制回放作为回归夹具（**建议先做，能加速上面四项**） `难度 ★★ 纯软件`
+### [x] A5 · 录制回放作为回归夹具（**已完成，2026-11-26**） `难度 ★★ 纯软件`
 
 - **目标**：把每段真机录制变成可重复的自动化测试输入，以后改协议不用插板子。
-- **涉及**：`core/storage.py`（`FrameArchive`）、`drivers/replay.py`、`tests/test_core.py`
-- **实现路径**：`tools/` 下加 `capture_check.py`，输入 `.bin`/`.rad`，
-  断言帧数、峰值、目标数、CRC 拒绝数；把 3~5 段真机样本放 `tests/fixtures/`
-  （样本要脱敏、体积 < 1 MB）。
-- **验收**：`check.py` 里加一步，CI 上不依赖硬件也能回归协议解析。
+- **涉及**：`core/storage.py`（`FrameArchive`）、`drivers/replay.py`、`core/transport.py`、`drivers/ld2410.py`、`tests/test_core.py`、`tools/capture_check.py`、`tools/check.py`
+- **实现与实测结论**：
+  - 新增 `tools/capture_check.py`（支持单文件 `.bin`/`.rad` CLI 校验与 `tests/fixtures/manifest.json` 批量回归），已接入 `tools/check.py`（4/4）与 `tests/test_core.py`（`test_capture_fixtures`，第 21 组测试）。
+  - `tests/fixtures/` 已放置 5 份离线回归样本（`ld19_sample.bin` / `ld2450_sample.bin` / `ld2410_sample.bin` / `ultrasonic_sample.bin` / `sim_sample.rad`，总计 < 10 KB），覆盖帧数、峰值、目标数、CRC 拒绝数与碎片重同步。
+  - 夹具回归顺手发现并修复 3 个真实问题：`ReplayDriver` 非循环回放丢最后一帧、`LD2410Driver` 在 `file://` 下发配置命令报错、`FileTransport.read(n)` 忽略 `n` 导致 `readline()` 失效。
+  - 后续真机联调（A1~A4）录到真实 `.bin` 后，只需脱敏放进 `tests/fixtures/` 并在 `manifest.json` 追加条目即可。
 
 ---
 
