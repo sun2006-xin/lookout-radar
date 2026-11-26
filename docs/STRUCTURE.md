@@ -211,7 +211,9 @@
 | [ROADMAP.md](ROADMAP.md) | 开发计划与未来路线图（阶段 A~F） | 查看已落地能力与后续排期 |
 | [ADR/0001-language-choice.md](ADR/0001-language-choice.md) | 技术栈选型依据（Python + PyQt5 + NumPy 性能剖析） | — |
 | [ADR/0002-product-positioning.md](ADR/0002-product-positioning.md) | 产品定位与取舍原则 | — |
-| `screenshot-v1.1.png` | 最新主界面展示截图 | 用于 README 展示 |
+| `screenshot-v1.3-daily.png` | 日常纯净显控主界面展示截图 | 用于 README 展示 |
+| `screenshot-v1.3-dark.png` | 深色 3D 无人机场景展示截图 | 用于 README 展示 |
+| `screenshot-v1.3-ew.png` | 电子战抗干扰与停靠台展示截图 | 用于 README 展示 |
 
 ---
 
