@@ -14,6 +14,8 @@ A1：mainwindow 一度长到 1580 行，成了"什么都知道"的上帝对象�
 """
 
 
+from __future__ import annotations
+
 import logging
 import time
 from pathlib import Path
@@ -319,6 +321,16 @@ class ConnectionController:
         if self.reader is not None:
             self.reader.stop()
             self.reader = None
+        mr = getattr(self, "mission_recorder", None)
+        if mr is not None:
+            mf = mr.close()
+            self.mission_recorder = None
+            if hasattr(self, "btn_mission"):
+                self.btn_mission.blockSignals(True)
+                self.btn_mission.setChecked(False)
+                self.btn_mission.setText("任务录制")
+                self.btn_mission.blockSignals(False)
+            self.log.push("ok", f"任务包已归档：{mf.mission_id}（{mf.frames} 帧）")
         if self.archive is not None:
             self.archive.close()
             if self.store.session_id is not None:
@@ -414,6 +426,61 @@ class ExportController:
             self.log.push("info", f"录制结束：{self.archive.path.name}"
                                   f"（{self.archive.frames} 帧）")
             self.archive = None
+
+    def _toggle_mission_record(self, on: bool) -> None:
+        """一键任务录制：同步写入 frames.rad、manifest.json 参数快照并关联 SQLite 会话。"""
+        from ..core.i18n import tr
+        from ..core.mission import MissionRecorder
+
+        if not on:
+            mr = getattr(self, "mission_recorder", None)
+            if mr is not None:
+                mf = mr.close()
+                self.mission_recorder = None
+                self.log.push("ok", f"任务包已保存：{mf.mission_id}（{mf.frames} 帧）")
+            if hasattr(self, "btn_mission"):
+                self.btn_mission.setText(tr("任务录制"))
+            if hasattr(self, "_update_status_telemetry"):
+                self._update_status_telemetry()
+            return
+
+        if self.reader is None and hasattr(self, "_ensure_sim_running"):
+            self._ensure_sim_running("任务录制")
+        if self.reader is None:
+            if hasattr(self, "btn_mission"):
+                self.btn_mission.blockSignals(True)
+                self.btn_mission.setChecked(False)
+                self.btn_mission.blockSignals(False)
+            self.log.push("warn", "请先连接雷达或模拟源，再开启一键任务录制")
+            return
+
+        snap = {
+            "cfar_mode": getattr(self, "_cfar_mode", "auto"),
+            "threshold": getattr(self, "_thresh", 0.30),
+            "clutter_enabled": bool(self.clutter_map.enabled),
+            "land_mask": bool(self.land_mask.enabled),
+            "filter_mode": self.tracker.filter_mode,
+            "assoc_mode": self.tracker.assoc_mode,
+        }
+        did = str(self.drv_combo.currentData() or getattr(self.driver, "id", "sim"))
+        ep = self.endpoint_combo.currentText().strip()
+        self.mission_recorder = MissionRecorder(
+            self.data_dir / "missions",
+            driver=did, endpoint=ep, caps=self.caps,
+            settings_snapshot=snap, session_id=self.store.session_id,
+        )
+        if hasattr(self, "btn_mission"):
+            self.btn_mission.setText(tr("停止任务"))
+        if hasattr(self, "_update_status_telemetry"):
+            self._update_status_telemetry()
+        self.log.push("ok", f"开始录制任务包：{self.mission_recorder.manifest.mission_id}")
+
+    def _open_mission_compare(self) -> None:
+        from .missiondialog import MissionCompareDialog
+
+        dlg = MissionCompareDialog(self.data_dir / "missions", self)
+        dlg.replayRequested.connect(self._start_replay)
+        dlg.exec_()
 
     def _toggle_forward(self, on: bool) -> None:
         if not on:
@@ -590,7 +657,7 @@ class AlarmBarController:
     def _load_rules(self) -> None:
         """规则优先级：内置默认 < 插件 < 用户手动编辑。"""
         user_rules = []
-        p = self.data_dir / "rules.json"
+        p = self._user_rules_path()
         if p.exists():
             try:
                 user_rules = rules_from_json(p.read_text(encoding="utf-8"))
@@ -601,7 +668,7 @@ class AlarmBarController:
         self._sync_zones()
 
     def _user_rules_path(self) -> Path:
-        return self.data_dir / "rules.json"
+        return getattr(self.alarm, "save_path", None) or (self.data_dir / "rules.json")
 
     def _save_zone_rule(self, x: float, y: float, r: float) -> None:
         """把屏上画出来的圈存成一条 zone 规则并立即生效。
@@ -712,29 +779,59 @@ class AlarmBarController:
         self._load_rules()
         self.log.push("info", f"已删除警戒区「{name}」")
 
-    def _update_zone_geometry(self, rule_id: str, cx: float, cy: float, r: float) -> None:
-        """在 PPI 上拖拽移动或调整半径后，将新位置/半径写回 rules.json。"""
+    def _upsert_user_rule(self, rule_id: str, mutator) -> AlarmRule | None:
+        """公共辅助：按 rule_id 读取、编辑或覆写 rules.json 后重加载规则并同步画面。"""
         cur_rule = next((x for x in getattr(self.alarm, "rules", []) if str(x.id) == rule_id), None)
         if cur_rule is None:
-            return
+            return None
         data = self._read_user_rules_doc()
         rules = data["rules"]
-        updated = False
-        new_params = {"cx": round(cx, 3), "cy": round(cy, 3), "r": round(max(0.2, r), 3)}
+        entry = None
         for item in rules:
             if str(item.get("id")) == rule_id:
-                item["params"] = new_params
-                item["enabled"] = True
-                updated = True
+                entry = dict(item)
                 break
-        if not updated:
+        if entry is None:
             entry = cur_rule.to_dict()
-            entry["params"] = new_params
-            entry["enabled"] = True
-            rules.append(entry)
+        mutator(entry, cur_rule)
+        data["rules"] = [r for r in rules if str(r.get("id")) != rule_id] + [entry]
         self._write_user_rules_doc(data)
         self._load_rules()
-        self.log.push("info", f"已更新「{cur_rule.name}」({cx:.1f}, {cy:.1f}) r={r:.1f}m")
+        return cur_rule
+
+    def _update_zone_geometry(self, rule_id: str, cx: float, cy: float, r: float) -> None:
+        """在 PPI 上拖拽移动或调整半径后，将新位置/半径写回 rules.json。"""
+        def _mut(entry: dict, _cur) -> None:
+            entry["params"] = {"cx": round(cx, 3), "cy": round(cy, 3), "r": round(max(0.2, r), 3)}
+            entry["enabled"] = True
+
+        cur = self._upsert_user_rule(rule_id, _mut)
+        if cur is not None:
+            self.log.push("info", f"已更新「{cur.name}」({cx:.1f}, {cy:.1f}) r={r:.1f}m")
+
+    def _update_poly_zone_geometry(self, rule_id: str, points: list) -> None:
+        """在 PPI 上直接拖拽多边形顶点后写回 rules.json。"""
+        clean_pts = [[round(float(x), 3), round(float(y), 3)] for x, y in points]
+        if len(clean_pts) < 3:
+            return
+
+        def _mut(entry: dict, _cur) -> None:
+            entry["params"] = {"points": clean_pts}
+            entry["enabled"] = True
+
+        cur = self._upsert_user_rule(rule_id, _mut)
+        if cur is not None:
+            self.log.push("info", f"已更新多边形防区「{cur.name}」({len(clean_pts)} 顶点)")
+
+    def _toggle_zone_enabled(self, rule_id: str, enabled: bool) -> None:
+        def _mut(entry: dict, _cur) -> None:
+            entry["enabled"] = bool(enabled)
+
+        cur = self._upsert_user_rule(rule_id, _mut)
+        if cur is not None:
+            if enabled and hasattr(self, "_set_ppi_flag"):
+                self._set_ppi_flag("show_zones", True)
+            self.log.push("info", f"{'启用' if enabled else '停用'}防区「{cur.name}」")
 
     def _edit_zone(self, rule_id: str) -> None:
         """打开单个警戒区的友好参数编辑弹窗（名称 / 级别 / 坐标 / 半径）。"""
@@ -817,6 +914,9 @@ class AlarmBarController:
             w = getattr(self, name, None)
             if w is not None:
                 w.set_alarm_zones(zs, polys)
+        zp = getattr(self, "zones_panel", None)
+        if zp is not None:
+            zp.refresh_zones(list(getattr(self.alarm, "rules", [])))
 
     def _open_rules(self) -> None:
         dlg = RulesDialog(self.alarm, self)

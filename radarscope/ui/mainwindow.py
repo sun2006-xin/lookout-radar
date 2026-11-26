@@ -47,6 +47,8 @@ from .rhiscope import RHIScopeWidget
 from .rulesdialog import RulesDialog
 from .sensorpanel import SensorPanel
 from .sensorsdialog import SensorsDialog
+from .simdialog import SimStationWidget
+from .zonespanel import ZonesOpsWidget
 from .controllers import (PRESET_ENDPOINTS, ALARM_STYLE, ALARM_STYLE_LIGHT, LIGHT_PALETTES,
                           ConnectionController, ExportController,
                           AlarmBarController, ReaderThread)
@@ -99,11 +101,17 @@ class MainWindow(ConnectionController, ExportController,
         self.driver = None
         self.reader: ReaderThread | None = None
         self.caps = Capabilities()
-        self.tracker = Tracker()
+        self.tracker = Tracker(
+            filter_mode=str(self.settings.value("filter_mode", "kalman3d")),
+            assoc_mode=str(self.settings.value("assoc_mode", "gnn")),
+            confirm_hits=int(self.settings.value("confirm_hits", 1) or 1),
+            confirm_window=int(self.settings.value("confirm_window", 1) or 1),
+        )
         self.alarm = AlarmEngine()
         self.alarm.save_path = self.data_dir / "rules.json"
         self._load_rules()
         self.archive: FrameArchive | None = None
+        self.mission_recorder = None
 
         self._thresh = 0.30
         self._cfar_mode = str(self.settings.value("cfar_mode", "auto"))
@@ -174,8 +182,11 @@ class MainWindow(ConnectionController, ExportController,
         self.sensors_panel.btn_cfg.clicked.connect(self._open_sensor_config)
         self.ppi.zoneDrawn.connect(self._save_zone_rule)
         self.ppi.zoneMoved.connect(self._update_zone_geometry)
+        self.ppi.polyZoneMoved.connect(self._update_poly_zone_geometry)
         self.ppi.zoneEditRequested.connect(self._edit_zone)
         self.ppi.zoneDeleteRequested.connect(self._delete_zone)
+        self.ppi.simTargetInjectRequested.connect(self._on_canvas_sim_inject)
+        self.ppi.sensorBearingEdited.connect(self._on_canvas_sensor_bearing)
 
         # 报警条常驻、固定高度。
         # 原来是隐藏/显示切换，报警一来就把下面整个画布挤上去 ——
@@ -186,10 +197,9 @@ class MainWindow(ConnectionController, ExportController,
         self.alarm_bar.setStyleSheet(ALARM_STYLE["ok"])
 
         right = QWidget()
-        right.setMinimumWidth(520)
-        right.setMaximumWidth(680)
+        right.setMinimumWidth(460)
         rv = QVBoxLayout(right)
-        rv.setContentsMargins(8, 0, 0, 0)
+        rv.setContentsMargins(6, 6, 6, 6)
         rv.setSpacing(8)
         rv.addWidget(self.ascope)
         rv.addWidget(self.rdscope)
@@ -213,17 +223,56 @@ class MainWindow(ConnectionController, ExportController,
         cv.setContentsMargins(8, 8, 8, 8)
         cv.setSpacing(8)
         cv.addWidget(self.alarm_bar)
-        h = QHBoxLayout()
-        h.setSpacing(8)
-        h.addWidget(ppi_card, 1)
-        h.addWidget(right, 0)
-        cv.addLayout(h, 1)
+        cv.addWidget(ppi_card, 1)
         self.setCentralWidget(central)
+
+        # 可停靠右侧工作区：波形/航迹台 + 电子战控制台 + 防区与滤波操作台 + 近距窗
+        self.setDockOptions(QMainWindow.AllowTabbedDocks | QMainWindow.AnimatedDocks)
+        self.setTabPosition(Qt.RightDockWidgetArea, QTabWidget.North)
+
+        self.dock_scope = QDockWidget("雷达波形与航迹台", self)
+        self.dock_scope.setObjectName("dock_scope")
+        self.dock_scope.setWidget(right)
+        self.dock_scope.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.dock_scope)
+
+        self.ew_widget = SimStationWidget(self.sim_station, 6.0, show_done=False, parent=self)
+        self.ew_widget.changed.connect(self._on_sim_station_changed)
+        self.ew_widget.scenarioSelected.connect(lambda sc: self._apply_scenario(sc))
+        self.dock_ew = QDockWidget("电子战与场景控制台", self)
+        self.dock_ew.setObjectName("dock_ew")
+        self.dock_ew.setWidget(self.ew_widget)
+        self.dock_ew.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.dock_ew)
+
+        self.zones_panel = ZonesOpsWidget(self)
+        self.zones_panel.sync_tracker(
+            self.tracker.filter_mode, self.tracker.assoc_mode,
+            self.tracker.confirm_hits, self.tracker.confirm_window,
+        )
+        self.zones_panel.trackerConfigChanged.connect(self._on_tracker_config_changed)
+        self.zones_panel.zoneToggleRequested.connect(self._toggle_zone_enabled)
+        self.zones_panel.zoneEditRequested.connect(self._edit_zone)
+        self.zones_panel.zoneDeleteRequested.connect(self._delete_zone)
+        self.zones_panel.openFullRulesRequested.connect(self._open_rules)
+        self.zones_panel.openFullSensorsRequested.connect(self._open_sensor_config)
+        self.zones_panel.calibModeToggled.connect(self._toggle_calib_mode)
+        self.dock_zones = QDockWidget("防区与协议快速台", self)
+        self.dock_zones.setObjectName("dock_zones")
+        self.dock_zones.setWidget(self.zones_panel)
+        self.dock_zones.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.dock_zones)
+
+        self.tabifyDockWidget(self.dock_scope, self.dock_ew)
+        self.tabifyDockWidget(self.dock_scope, self.dock_zones)
+        self.dock_scope.show()
+        self.dock_scope.raise_()
 
         # 近距小量程窗：大范围看态势，小窗看细节，放在右侧避免垂直挤压主图
         self.ppi2 = PPIWidget()
         self.ppi2.setMinimumSize(220, 220)
         self.dock_near = QDockWidget("近距监视（2 m 量程）", self)
+        self.dock_near.setObjectName("dock_near")
         self.dock_near.setWidget(self.ppi2)
         self.dock_near.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock_near)
@@ -375,6 +424,12 @@ class MainWindow(ConnectionController, ExportController,
         self.btn_clip.toggled.connect(self._toggle_record)
         tb.addWidget(self.btn_clip)
 
+        self.btn_mission = QPushButton("任务录制")
+        self.btn_mission.setCheckable(True)
+        self.btn_mission.setToolTip("一键录制完整任务包（frames.rad + 参数快照 + 会话索引），可在「文件 → 任务包回放与参数对比」复盘对比")
+        self.btn_mission.toggled.connect(self._toggle_mission_record)
+        tb.addWidget(self.btn_mission)
+
         self.btn_mute = QPushButton("静音")
         self.btn_mute.setCheckable(True)
         self.btn_mute.setToolTip("临时屏蔽告警提示音（界面与事件仍然记录）")
@@ -383,10 +438,10 @@ class MainWindow(ConnectionController, ExportController,
 
         self.btn_zone = QPushButton("画警戒区")
         self.btn_zone.setCheckable(True)
-        self.btn_zone.setToolTip("开启后在雷达图上按住左键拖出一个圆，松手即生成警戒区；"
-                                 "右键点圆可删除")
+        self.btn_zone.setToolTip("开启后在雷达图上按住左键拖出一个圆、或拖拽已有圆与多边形角点；右键点区可编辑/删除")
         self.btn_zone.toggled.connect(self._on_zone_mode_toggled)
         self.ppi.zoneModeRequested.connect(self.btn_zone.setChecked)
+        self.zones_panel.drawZoneRequested.connect(self.btn_zone.setChecked)
         tb.addWidget(self.btn_zone)
 
         self.btn_true = QPushButton("真运动")
@@ -489,6 +544,9 @@ class MainWindow(ConnectionController, ExportController,
         # 菜单按职责分区：文件 / 场景(仿真与电子战) / 视图 / 工具(硬件校准与扩展) / 设置 / 帮助
         m_file = self.menuBar().addMenu("文件(&F)")
         self._m_file = m_file
+        m_file.addAction("一键任务录制", lambda: self.btn_mission.toggle())
+        m_file.addAction("任务包回放与参数对比…", self._open_mission_compare)
+        m_file.addSeparator()
         m_file.addAction("导出事件日志…", self._export_log)
         m_file.addAction("导出 ROS / Foxglove (.mcap / JSON)…", self._export_ros_log)
         m_file.addAction("导出当前画面…", self._export_screenshot)
@@ -561,6 +619,10 @@ class MainWindow(ConnectionController, ExportController,
         m_tool = self.menuBar().addMenu("工具(&T)")
         self._m_tool = m_tool
         m_tool.addAction("朝向标定…", self._open_calibration)
+        self.act_calib_mode = QAction("传感标定旋转模式（画布拖动扇区）", self)
+        self.act_calib_mode.setCheckable(True)
+        self.act_calib_mode.toggled.connect(self._toggle_calib_mode)
+        m_tool.addAction(self.act_calib_mode)
         m_tool.addAction("统计分析…", self._open_stats)
         m_tool.addAction("设备下行控制 (STC/FTC)…", self._open_control)
         m_tool.addAction("AIS 接入…", self._open_ais)
@@ -571,6 +633,22 @@ class MainWindow(ConnectionController, ExportController,
         # 调试要全信息，两种场景需要不同的界面。
         m_view = self.menuBar().addMenu("视图(&V)")
         self._m_view = m_view
+        m_layout = m_view.addMenu("工作区布局预设")
+        self._m_layout = m_layout
+        for pkey, pname in (
+            ("full", "全功能显控台"),
+            ("minimal", "极简实测监视"),
+            ("ew", "电子战教学对比"),
+            ("ops", "多站与协议排障"),
+        ):
+            m_layout.addAction(pname, lambda _c=False, k=pkey: self._apply_workspace_preset(k))
+        m_layout.addSeparator()
+        m_layout.addAction("重置默认布局", lambda: self._apply_workspace_preset("full"))
+
+        m_docks = m_view.addMenu("停靠面板")
+        for dk in (self.dock_scope, self.dock_ew, self.dock_zones, self.dock_near):
+            m_docks.addAction(dk.toggleViewAction())
+        m_view.addSeparator()
         for text, w in (("A 显", self.ascope), ("瀑布图", self.waterfall),
                         ("距离-多普勒", self.rdscope), ("3D 俯仰 RHI", self.rhiscope),
                         ("传感器页签", self.sensors_panel)):
@@ -584,6 +662,7 @@ class MainWindow(ConnectionController, ExportController,
         for text, attr, default in (
             ("尾迹", "show_trails", True),
             ("多普勒趋近着色", "doppler_color", True),
+            ("航迹置信椭圆 (2σ)", "show_cov", False),
             ("告警禁入区", "show_zones", False),
             ("电子方位线 EBL/VRM", "show_ebl", True),
         ):
@@ -715,6 +794,10 @@ class MainWindow(ConnectionController, ExportController,
         geo = self.settings.value("geometry")
         if geo is not None:
             self.restoreGeometry(geo)
+        wstate = self.settings.value("windowState")
+        if wstate is not None:
+            self.restoreState(wstate)
+            self.dock_scope.show()
         # 防止恢复后的窗口高度/宽度超出桌面可用工作区，避免底部状态栏被任务栏挡住或挤压
         scr = QGuiApplication.primaryScreen()
         if scr is not None and not self.isMaximized():
@@ -766,9 +849,14 @@ class MainWindow(ConnectionController, ExportController,
 
     def _save(self) -> None:
         self.settings.setValue("geometry", self.saveGeometry())
+        self.settings.setValue("windowState", self.saveState())
         self.settings.setValue("palette", self.pal_combo.currentData())
         self.settings.setValue("driver", self.drv_combo.currentData())
         self.settings.setValue("endpoint", self.endpoint_combo.currentText())
+        self.settings.setValue("filter_mode", self.tracker.filter_mode)
+        self.settings.setValue("assoc_mode", self.tracker.assoc_mode)
+        self.settings.setValue("confirm_hits", self.tracker.confirm_hits)
+        self.settings.setValue("confirm_window", self.tracker.confirm_window)
         self.settings.setValue("ais_lat", self._ais_ref[0])
         self.settings.setValue("ais_lon", self._ais_ref[1])
         self.settings.setValue("map_provider", self._map_provider)
@@ -795,6 +883,68 @@ class MainWindow(ConnectionController, ExportController,
         self.ppi.set_zone_mode(on)
         if on and not self.ppi.show_zones:
             self._set_ppi_flag("show_zones", True)
+        if hasattr(self, "zones_panel"):
+            self.zones_panel.btn_draw.blockSignals(True)
+            self.zones_panel.btn_draw.setChecked(bool(on))
+            self.zones_panel.btn_draw.blockSignals(False)
+
+    def _toggle_calib_mode(self, on: bool) -> None:
+        self.ppi.set_calib_mode(bool(on))
+        for obj in (getattr(self, "act_calib_mode", None),
+                    getattr(getattr(self, "zones_panel", None), "btn_calib", None)):
+            if obj is not None and obj.isChecked() != bool(on):
+                obj.blockSignals(True)
+                obj.setChecked(bool(on))
+                obj.blockSignals(False)
+        self.log.push("info", "已开启画布扇区朝向拖动标定" if on else "已退出画布标定模式")
+
+    def _on_tracker_config_changed(self, filter_mode: str, assoc_mode: str,
+                                   confirm_hits: int, confirm_window: int) -> None:
+        self.tracker.configure(
+            filter_mode=filter_mode, assoc_mode=assoc_mode,
+            confirm_hits=confirm_hits, confirm_window=confirm_window,
+        )
+        self.settings.setValue("filter_mode", self.tracker.filter_mode)
+        self.settings.setValue("assoc_mode", self.tracker.assoc_mode)
+        self.settings.setValue("confirm_hits", self.tracker.confirm_hits)
+        self.settings.setValue("confirm_window", self.tracker.confirm_window)
+        self._update_status_telemetry()
+        self.log.push("ok", f"跟踪引擎已切换：{filter_mode} · {assoc_mode.upper()} · 起批 {confirm_hits}/{confirm_window}")
+
+    def _apply_workspace_preset(self, preset: str) -> None:
+        """一键切换停靠面板与工作区布局预设，兼顾极简监视/电子战教学/多站排障。"""
+        self.dock_scope.show()
+        self.dock_ew.show()
+        self.dock_zones.show()
+        self.tabifyDockWidget(self.dock_scope, self.dock_ew)
+        self.tabifyDockWidget(self.dock_scope, self.dock_zones)
+
+        if preset == "minimal":
+            self.dock_ew.hide()
+            self.dock_zones.hide()
+            self.dock_near.hide()
+            self.ascope.setVisible(False)
+            self.waterfall.setVisible(False)
+            self.dock_scope.show()
+            self.dock_scope.raise_()
+        elif preset == "ew":
+            self.ascope.setVisible(True)
+            self.waterfall.setVisible(True)
+            self.dock_zones.hide()
+            self.dock_ew.show()
+            self.dock_ew.raise_()
+        elif preset == "ops":
+            self.ascope.setVisible(False)
+            self.waterfall.setVisible(True)
+            self.tabs.setCurrentWidget(self.sensors_panel)
+            self.dock_zones.show()
+            self.dock_zones.raise_()
+        else:  # full
+            self.ascope.setVisible(True)
+            self.waterfall.setVisible(True)
+            self.dock_scope.show()
+            self.dock_scope.raise_()
+        self.log.push("info", f"已切换工作区布局预设：{preset}")
 
     def _on_range_changed(self, v: float) -> None:
         self.caps.range_max = float(v)
@@ -819,9 +969,9 @@ class MainWindow(ConnectionController, ExportController,
         lang = set_lang(str(self.lang_combo.currentData() or "zh"))
         self.settings.setValue("lang", lang)
         for m, key in (
-            (self._m_file, "文件(&F)"), (self._m_tool, "工具(&T)"),
-            (self._m_view, "视图(&V)"), (self._m_set, "设置(&S)"),
-            (self._m_help, "帮助(&H)"),
+            (self._m_file, "文件(&F)"), (self._m_scene, "场景(&N)"),
+            (self._m_tool, "工具(&T)"), (self._m_view, "视图(&V)"),
+            (self._m_set, "设置(&S)"), (self._m_help, "帮助(&H)"),
         ):
             m.setTitle(tr(key))
         for btn, key in (
@@ -831,8 +981,19 @@ class MainWindow(ConnectionController, ExportController,
             (self.btn_true, "真运动"),
         ):
             btn.setText(tr(key))
+        self.btn_mission.setText(tr("停止任务" if self.btn_mission.isChecked() else "任务录制"))
+        for dock, key in (
+            (self.dock_scope, "雷达波形与航迹台"),
+            (self.dock_ew, "电子战与场景控制台"),
+            (self.dock_zones, "防区与协议快速台"),
+            (self.dock_near, "近距监视（2 m 量程）"),
+        ):
+            dock.setWindowTitle(tr(key))
         for idx, key in enumerate(("航迹", "传感器", "事件", "历史")):
             self.tabs.setTabText(idx, tr(key))
+        self.table.retranslate()
+        self.ew_widget.retranslate()
+        self._update_status_telemetry()
         self._settings_dlg.setWindowTitle(tr("设置"))
 
     def _check_updates(self) -> None:
@@ -1062,6 +1223,8 @@ class MainWindow(ConnectionController, ExportController,
             self.store.record_tracks(time.time(), all_tracks)
         if self.archive is not None and f.has_scan:
             self.archive.append(f)
+        if getattr(self, "mission_recorder", None) is not None and f.has_scan:
+            self.mission_recorder.append_frame(f)
 
         # ---- 刷新率 ----
         self._frames += 1
@@ -1234,26 +1397,35 @@ class MainWindow(ConnectionController, ExportController,
         self.log.push("info", f"主题：{THEMES[self._theme]['name']}")
 
     def _update_status_telemetry(self) -> None:
-        """在底栏集中汇总当前检测算法、杂波/陆地掩膜、地图/AIS/NMEA 与电子战状态。"""
+        """在底栏集中汇总当前检测算法、滤波起批、杂波/陆地掩膜、地图/AIS/NMEA 与电子战状态。"""
+        from ..core.i18n import tr
+
         bits = []
         if getattr(self.store, "write_errors", 0):
             bits.append(f"⚠ 存储异常 {self.store.write_errors}")
         cfar_names = {"auto": "GO-CFAR", "os": "OS-CFAR", "go": "GO-CFAR", "ca": "CA-CFAR"}
         bits.append(cfar_names.get(self._cfar_mode, self._cfar_mode.upper()))
+        f_tag = {"kalman3d": "KF3D", "imm3d": "IMM3D", "alpha_beta": "α-β"}.get(self.tracker.filter_mode, self.tracker.filter_mode)
+        bits.append(f"{f_tag}/{self.tracker.assoc_mode.upper()}")
+        if self.tracker.confirm_hits > 1:
+            bits.append(f"M/N:{self.tracker.confirm_hits}/{self.tracker.confirm_window}")
         if self.clutter_map.enabled:
-            bits.append("杂波抑制")
+            bits.append(tr("杂波抑制"))
         if self.land_mask.enabled:
-            bits.append("陆地掩膜")
+            bits.append(tr("陆地掩膜"))
         if self.sim_station.jam_mode != "none":
             bits.append(f"干扰:{self.sim_station.jam_mode.upper()}")
         if self.map_layer is not None and self.map_layer.enabled:
             bits.append(f"底图 z{self.map_layer.zoom}")
         if self._nmea_enabled:
-            bits.append("NMEA本船")
+            bits.append(tr("NMEA本船"))
         if self.ais.running:
             bits.append(f"AIS:{self.ais.count()}")
         if self.forwarder.enabled:
             bits.append(f"转发:{self.forwarder.sent}")
+        mr = getattr(self, "mission_recorder", None)
+        if mr is not None:
+            bits.append(f"{tr('任务录制中')}:{mr.manifest.frames}F")
         self.status_link.setText("  ·  ".join(bits))
         self.status_link.setStyleSheet(
             "color:#DC2626;font-weight:bold;padding-right:12px;"

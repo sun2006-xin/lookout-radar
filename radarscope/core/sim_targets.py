@@ -26,6 +26,70 @@ SCENARIOS = {
     "drone": "低空无人机 / 安防周界（悬停 + 突防）",
 }
 
+# 场景预设 ↔ 信号检测与跟踪参数自动联动推荐（ROADMAP 跨模块协同）
+SCENARIO_PROFILES: dict[str, dict] = {
+    "marine": {
+        "range_m": 2000.0,
+        "cfar_mode": "go",
+        "clutter_enabled": True,
+        "gate_m": 120.0,
+        "filter_mode": "kalman3d",
+        "confirm_hits": 2,
+        "confirm_window": 4,
+    },
+    "automotive": {
+        "range_m": 80.0,
+        "cfar_mode": "os",
+        "clutter_enabled": False,
+        "gate_m": 4.5,
+        "filter_mode": "kalman3d",
+        "confirm_hits": 2,
+        "confirm_window": 3,
+    },
+    "drone": {
+        "range_m": 150.0,
+        "cfar_mode": "auto",
+        "clutter_enabled": True,
+        "gate_m": 6.5,
+        "filter_mode": "imm3d",
+        "confirm_hits": 3,
+        "confirm_window": 5,
+    },
+    "crossing": {
+        "range_m": 0.0,
+        "cfar_mode": "auto",
+        "clutter_enabled": False,
+        "gate_m": 1.6,
+        "filter_mode": "kalman3d",
+        "confirm_hits": 2,
+        "confirm_window": 3,
+    },
+    "approach": {
+        "range_m": 0.0,
+        "cfar_mode": "os",
+        "clutter_enabled": False,
+        "gate_m": 2.0,
+        "filter_mode": "imm3d",
+        "confirm_hits": 2,
+        "confirm_window": 3,
+    },
+    "patrol": {
+        "range_m": 0.0,
+        "cfar_mode": "auto",
+        "clutter_enabled": False,
+        "gate_m": 1.5,
+        "filter_mode": "kalman3d",
+        "confirm_hits": 1,
+        "confirm_window": 1,
+    },
+}
+
+
+def recommended_profile(scenario: str) -> dict | None:
+    """返回预设场景对应的推荐检测/滤波/确认参数；未定义则返回 None。"""
+    p = SCENARIO_PROFILES.get(scenario)
+    return dict(p) if p is not None else None
+
 JAMMING_MODES = {
     "none": "关闭干扰（正常回波信号）",
     "barrage": "宽带噪声压制（演练全向底噪抬升与烧穿）",

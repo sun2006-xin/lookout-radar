@@ -1578,6 +1578,173 @@ def test_ux_cohesion_and_controller_links() -> None:
     ok("跨模块 UX 联动、航迹双向锁定、非模态电子站与控制器拆解")
 
 
+def test_tracker_gnn_mn_kalman3d_and_imm() -> None:
+    from radarscope.core.alarm import AlarmEngine, AlarmRule
+    from radarscope.core.model import Capabilities, Target
+    from radarscope.core.tracker import Tracker
+
+    # 1. M/N 起批确认（3/5）：单帧杂波保持试探态且不触发告警，第 3 帧正式建轨并带 3D 协方差
+    trk = Tracker(gate_m=2.0, assoc_mode="gnn", filter_mode="kalman3d",
+                  confirm_hits=3, confirm_window=5)
+    eng = AlarmEngine([AlarmRule("intr", "防区", "zone", {"cx": 0.0, "cy": 4.0, "r": 1.0}, hold=0.0)])
+    caps = Capabilities(has_elevation=True, range_max=20.0)
+
+    out1 = trk.update([Target(x=0.0, y=4.0, z=2.0)], dt=0.1)
+    assert len(out1) == 1 and out1[0].tentative, "首帧应处于试探期，不直接起批"
+    assert eng.evaluate(out1, caps, now=0.1) == [], "未确认航迹不应触发正式防区告警"
+
+    out2 = trk.update([Target(x=0.02, y=4.01, z=2.1)], dt=0.1)
+    assert out2[0].tentative
+    out3 = trk.update([Target(x=0.04, y=4.02, z=2.2)], dt=0.1)
+    assert not out3[0].tentative, "3/5 命中后应正式起批转正"
+    assert out3[0].cov_x > 0.0 and out3[0].cov_y > 0.0 and out3[0].vz > 0.0
+    assert any(e.active for e in eng.evaluate(out3, caps, now=0.3)), "正式建轨后应立即触发防区告警"
+
+    # 2. GNN 匈牙利全局匹配：双目标交叉会遇不跳号
+    gnn = Tracker(gate_m=2.5, assoc_mode="gnn", filter_mode="kalman3d", confirm_hits=1, confirm_window=1)
+    for k in range(6):
+        t_x1 = -2.0 + 0.8 * k
+        t_x2 = 2.0 - 0.8 * k
+        res = gnn.update([Target(x=t_x1, y=5.0), Target(x=t_x2, y=5.2)], dt=0.2)
+        if k == 0:
+            id_left = min(res, key=lambda t: t.x).tid
+            id_right = max(res, key=lambda t: t.x).tid
+    after_cross = gnn.update([Target(x=2.8, y=5.0), Target(x=-2.8, y=5.2)], dt=0.2)
+    by_id = {t.tid: t for t in after_cross}
+    assert by_id[id_left].x > 0.0 and by_id[id_right].x < 0.0, "GNN 穿越交叉后应保持各自原有航迹号"
+
+    # 3. IMM3D 高机动模型平滑跟踪转弯目标
+    imm = Tracker(gate_m=3.0, assoc_mode="gnn", filter_mode="imm3d", confirm_hits=1, confirm_window=1)
+    for k in range(8):
+        ang = k * 0.28
+        imm_out = imm.update([Target(x=3.0 * np.cos(ang), y=6.0 + 3.0 * np.sin(ang), z=1.0 + 0.1 * k)], dt=0.15)
+    assert len(imm_out) == 1 and imm_out[0].cov_x > 0.0 and imm_out[0].el_deg > 1.0
+    ok("跟踪深水区：GNN 匈牙利匹配、M/N 起批确认与 3D Kalman / IMM")
+
+
+def test_workspace_docks_canvas_edit_and_i18n() -> None:
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt5.QtCore import QSettings
+    from PyQt5.QtWidgets import QApplication
+    from radarscope.core.i18n import get_lang, set_lang
+    from radarscope.ui.mainwindow import MainWindow
+
+    settings = QSettings("RadarScope", "Console")
+    saved_keys = ("cfar_mode", "clutter_suppress", "filter_mode", "assoc_mode",
+                  "confirm_hits", "confirm_window", "sim_mode", "lang")
+    prev = {k: settings.value(k) for k in saved_keys}
+    _app = QApplication.instance() or QApplication([])
+    w = MainWindow()
+    w.show()
+    try:
+        # 1. 停靠工作区与一键预设切换
+        w._apply_workspace_preset("ew")
+        _app.processEvents()
+        assert not w.dock_ew.isHidden(), "电子战预设应激活电子战控制台 Dock"
+        w._apply_workspace_preset("ops")
+        _app.processEvents()
+        assert not w.dock_zones.isHidden(), "多站排障预设应激活防区与滤波 Dock"
+        w._apply_workspace_preset("full")
+        _app.processEvents()
+
+        # 2. 场景预设 <-> 检测参数 / 杂波 / IMM 滤波器协同联动
+        w._apply_scenario("drone")
+        _app.processEvents()
+        assert w._cfar_mode == "auto" and w.clutter_map.enabled
+        assert w.tracker.filter_mode == "imm3d" and w.tracker.confirm_hits == 3
+        assert abs(w.range_spin.value() - 150.0) < 1e-3
+
+        # 3. PPI 画布直放目标 + 2σ 置信椭圆渲染 + 多边形顶点修改回写
+        before_objs = len(w.sim_station.objects)
+        w.ppi.simTargetInjectRequested.emit(4.5, 12.0)
+        _app.processEvents()
+        assert len(w.sim_station.objects) == before_objs + 1
+
+        from radarscope.core import pipeline
+        from radarscope.core.model import Target
+
+        w.ppi.show_cov = True
+        fr = pipeline.synthesize_scan(w.caps, [Target(x=4.5, y=12.0, tid=1, cov_x=0.35, cov_y=0.18, cov_xy=0.06)])
+        w.ppi.push_frame(fr, fr.targets)
+        w.ppi.grab()
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+            rfile = Path(td) / "rules.json"
+            rfile.write_text(
+                '{"rules":[{"id":"poly_test","name":"多边区","kind":"poly_zone","level":"warn",'
+                '"enabled":true,"params":{"points":[[-1.0,2.0],[1.0,2.0],[1.0,4.0],[-1.0,4.0]]}}]}',
+                encoding="utf-8",
+            )
+            w.alarm.save_path = rfile
+            w._load_rules()
+            w._update_poly_zone_geometry("poly_test", [[-2.0, 2.0], [2.0, 2.0], [2.0, 5.0], [-2.0, 5.0]])
+            txt = rfile.read_text(encoding="utf-8")
+            assert "-2.0" in txt and "5.0" in txt
+
+        # 4. 全界面英文切换覆盖场景菜单 / Dock / 状态栏 / 表头
+        ei = w.lang_combo.findData("en")
+        w.lang_combo.setCurrentIndex(ei)
+        _app.processEvents()
+        assert get_lang() == "en" and "Scenarios" in w._m_scene.title()
+        assert "EW" in w.dock_ew.windowTitle()
+
+        w._apply_scenario("none")
+        w._disconnect("")
+        _app.processEvents()
+    finally:
+        set_lang("zh")
+        w.close()
+        for k, v in prev.items():
+            if v is None:
+                settings.remove(k)
+            else:
+                settings.setValue(k, v)
+    ok("停靠工作区预设、画布直放/多边形编辑、场景参数联动与全量双语")
+
+
+def test_mission_recorder_and_recompute_compare() -> None:
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt5.QtWidgets import QApplication
+    from radarscope.core import pipeline
+    from radarscope.core.mission import (
+        MissionRecorder, list_missions, recompute_mission_comparison, resolve_mission_rad,
+    )
+    from radarscope.core.model import Capabilities, Target
+    from radarscope.ui.missiondialog import MissionCompareDialog
+
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+        root = Path(td) / "missions"
+        caps = Capabilities(name="MissionTest", has_scan=True, has_azimuth=True, az_fov=120.0, range_max=10.0)
+        rec = MissionRecorder(root, "sim", "virtual", caps, {"cfar_mode": "ca", "threshold": 0.30})
+        for k in range(10):
+            fr = pipeline.synthesize_scan(caps, [Target(x=-1.0 + 0.2 * k, y=4.0 + 0.1 * k)])
+            fr.timestamp = 100.0 + k * 0.1
+            rec.append_frame(fr)
+        mf = rec.close()
+        assert mf.frames == 10
+
+        found = list_missions(root)
+        assert len(found) == 1 and found[0][1].mission_id == mf.mission_id
+        rad, loaded_mf = resolve_mission_rad(found[0][0])
+        assert rad.exists() and loaded_mf is not None and loaded_mf.frames == 10
+
+        res = recompute_mission_comparison(
+            found[0][0], baseline_cfar="ca", compare_cfar="auto",
+            compare_clutter=False, confirm_hits=3, confirm_window=5, filter_mode="kalman3d",
+        )
+        assert res["frames"] == 10 and len(res["timeline"]) == 10
+        assert res["compare"]["unique_confirmed"] >= 1
+
+        _app = QApplication.instance() or QApplication([])
+        dlg = MissionCompareDialog(root)
+        dlg._run_compare()
+        assert dlg.table.item(0, 0) is not None and len(dlg.chart._timeline) == 10
+        dlg.close()
+    ok("一体化任务录制包与多参数离线重算对比闭环")
+
+
 def main() -> int:
     print("RadarScope 核心测试")
     for fn in (test_codec, test_ld2450_sign, test_pipeline, test_alarm,
@@ -1596,7 +1763,9 @@ def main() -> int:
                test_protowizard_and_sim_ew_ui, test_multi_themes_and_palettes,
                test_raw_stream_inspector_and_presets, test_ew_f1_f2_f3_and_deception,
                test_e6_mbtiles_nmea_and_land_mask, test_e8_ros_and_mcap_export,
-               test_e7_3d_rhi_scope, test_ux_cohesion_and_controller_links):
+               test_e7_3d_rhi_scope, test_ux_cohesion_and_controller_links,
+               test_tracker_gnn_mn_kalman3d_and_imm, test_workspace_docks_canvas_edit_and_i18n,
+               test_mission_recorder_and_recompute_compare):
         fn()
     print(f"\n全部通过：{PASS} 组")
     return 0

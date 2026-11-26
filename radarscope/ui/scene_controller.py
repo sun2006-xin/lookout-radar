@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import QDialog, QMessageBox
 
 from .. import paths
 from ..core.maptiles import resolve_provider
-from ..core.sim_targets import compute_ew_metrics
+from ..core.sim_targets import compute_ew_metrics, recommended_profile
 from .extra import AisDialog, MapLocationDialog
 from .maplayer import MapLayer
 
@@ -56,6 +56,12 @@ class SceneAndMapController:
                 self.btn_scene.setText(f"目标:{len(self.sim_station.objects)}")
             else:
                 self.btn_scene.setText("场景/电子战")
+        ew_w = getattr(self, "ew_widget", None)
+        if ew_w is not None:
+            ew_w.sync_from_station(float(self.range_spin.value()))
+        sim_dlg = getattr(self, "_sim_dlg", None)
+        if sim_dlg is not None and sim_dlg.isVisible():
+            sim_dlg.panel.sync_from_station(float(self.range_spin.value()))
         if hasattr(self, "_update_status_telemetry"):
             self._update_status_telemetry()
 
@@ -93,16 +99,80 @@ class SceneAndMapController:
                     self._apply_caps(drv.resolve_capabilities())
 
     def _apply_scenario(self, key: str, suggested_range: float = 0.0) -> None:
-        if suggested_range > 0.0 and abs(float(self.range_spin.value()) - suggested_range) > 1.0:
-            self.range_spin.setValue(suggested_range)
+        prof = recommended_profile(key)
+        started = self._ensure_sim_running(key) if key != "none" else False
+        rng_hint = float(suggested_range or (prof["range_m"] if prof else 0.0))
+        if rng_hint > 0.0 and abs(float(self.range_spin.value()) - rng_hint) > 1.0:
+            self.range_spin.setValue(rng_hint)
         self.sim_station.set_scenario(key, float(self.range_spin.value()))
+
+        # 场景预设 <-> 检测算法 / 杂波抑制 / 跟踪滤波参数自动协同联动
+        if prof is not None:
+            cfar_val = prof.get("cfar_mode")
+            if cfar_val and hasattr(self, "cfar_combo"):
+                ci = self.cfar_combo.findData(cfar_val)
+                if ci >= 0:
+                    self.cfar_combo.blockSignals(True)
+                    self.cfar_combo.setCurrentIndex(ci)
+                    self.cfar_combo.blockSignals(False)
+                    self._cfar_mode = cfar_val
+                    self.settings.setValue("cfar_mode", cfar_val)
+            want_clut = bool(prof.get("clutter_enabled", False))
+            if hasattr(self, "btn_clutter") and self.clutter_map.enabled != want_clut:
+                self.btn_clutter.setChecked(want_clut)
+            self.tracker.configure(
+                gate_m=prof.get("gate_m"),
+                filter_mode=prof.get("filter_mode"),
+                confirm_hits=prof.get("confirm_hits"),
+                confirm_window=prof.get("confirm_window"),
+            )
+            zp = getattr(self, "zones_panel", None)
+            if zp is not None:
+                zp.sync_tracker(
+                    self.tracker.filter_mode, self.tracker.assoc_mode,
+                    self.tracker.confirm_hits, self.tracker.confirm_window,
+                )
+
         self._sync_scene_ui()
         if key == "none":
             self.log.push("info", "已关闭预设演练场景")
         else:
-            started = self._ensure_sim_running(key)
-            suffix = "" if started else "（请先切换模拟源或点击「连接」）"
-            self.log.push("ok", f"已开启场景「{key}」，当前目标 {len(self.sim_station.objects)} 个{suffix}")
+            suffix = "" if started or self.reader is not None else "（请先切换模拟源或点击「连接」）"
+            extra = (f" · 联动 CFAR={self._cfar_mode.upper()}, 滤波={self.tracker.filter_mode}, "
+                     f"起批={self.tracker.confirm_hits}/{self.tracker.confirm_window}"
+                     if prof is not None else "")
+            self.log.push("ok", f"已开启场景「{key}」，当前目标 {len(self.sim_station.objects)} 个{extra}{suffix}")
+
+    def _on_canvas_sim_inject(self, x: float, y: float) -> None:
+        """在 PPI 画布 Shift + 左键直接点放动态虚拟目标，免除对话框手输坐标。"""
+        obj = self.sim_station.inject(x, y, vx=0.0, vy=-0.25, amp=0.88, respawn=False)
+        started = self._ensure_sim_running("画布点放目标")
+        self._sync_scene_ui()
+        suffix = "" if started else "（请连接设备或切换模拟源后查看回波）"
+        self.log.push("ok", f"画布直放目标 {obj.name} ({x:.1f}m, {y:.1f}m){suffix}")
+
+    def _on_canvas_sensor_bearing(self, idx: int, new_bearing: float) -> None:
+        """画布拖动多站扇区中心线后更新 sensors.json 并刷新覆盖图。"""
+        import json
+
+        cfg = self.data_dir / "sensors.json"
+        if cfg.exists():
+            try:
+                raw = json.loads(cfg.read_text(encoding="utf-8"))
+                items = raw.get("sensors", raw) if isinstance(raw, dict) else raw
+                if isinstance(items, list) and 0 <= idx < len(items):
+                    items[idx]["bearing_deg"] = round(float(new_bearing), 1)
+                    if isinstance(raw, dict) and "sensors" in raw:
+                        raw["sensors"] = items
+                    else:
+                        raw = items
+                    cfg.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception as exc:
+                self.log.push("warn", f"写入传感器标定角度失败：{exc}")
+        drv = getattr(self, "driver", None)
+        if drv is not None and hasattr(drv, "_specs") and 0 <= idx < len(drv._specs):
+            drv._specs[idx].bearing_deg = round(float(new_bearing), 1)
+        self.log.push("ok", f"已标定传感器 S{idx + 1} 朝向 → {new_bearing:.1f}°")
 
     def _set_jam_mode(self, mode: str) -> None:
         self.sim_station.jam_mode = mode

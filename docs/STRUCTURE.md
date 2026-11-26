@@ -61,7 +61,7 @@
 | `transport.py` | `serial:// / tcp:// / udp:// / ble:// / file://` 端点解析与实际读写 | `open_transport()`、`endpoint_of()`、`TransportError`；BLE 需 bleak（异步→同步桥，见 ROADMAP A3） |
 | `codec.py` | 声明式切帧：`FrameSpec` + `StreamDecoder` 处理粘包、半包、数据区假帧头 | 长度字段偏移 = `len(header)`；`_total_of()` 返回 `0` 表示"等数据"、`-1` 才是非法 |
 | `pipeline.py` | CA-CFAR 检测、目标反投影、`synthesize_scan` 补全缺失矩阵 | 门限目前是固定值（默认 0.30），自适应见 ROADMAP B2；训练窗别落在目标自己身上 |
-| `tracker.py` | 最近邻关联 + α-β 滤波 + 航迹合并 | 丢失判据用**秒**（`missed` 是 float），用帧数会在旋转雷达上断航迹 |
+| `tracker.py` | GNN 匈牙利全局匹配 + M/N 起批确认 + 3D Kalman / IMM 机动滤波 | 保留 `alpha_beta` 模式；输出 3D `vz` 与 2×2 误差协方差 (`cov_x`/`cov_y`/`cov_xy`) |
 | `fusion.py` | 多站空间对齐、扇区拼接、盲区计算 | `_close_gaps()` 3×3 最大值闭运算补散射洞；当前是**点级融合**，加权/航迹级见 ROADMAP B3 |
 | `geometry.py` | 方位线、最小二乘交会（融合与标定共用） | 共址传感器要拒绝交会 |
 | `calibration.py` | 朝向装偏标定、残差报告 | 与 `ui/calibrationwizard.py` 配套 |
@@ -80,6 +80,7 @@
 | `custom_proto.py` | 零代码通用协议解析引擎：7 套开箱预设（NMEA `$--TTM`、CSV/极坐标 `$SCAN`、TF/CAN-UDP/Modbus 结构体二进制帧） | `builtin_presets()`、`preview_sample()`、`build_driver_class()` |
 | `nmea_nav.py` | NMEA 本船定位与航向解析：`$GPGGA/$GNRMC/$HEHDT/$RARSD` 校验与 UDP 监听 | `NmeaOwnShip`、`feed_line()`、`snapshot()` |
 | `ros_export.py` | ROS 2 / Foxglove 遥测导出与二进制 MCAP v0 日志封装 | `to_ros_laserscan()`、`to_ros_pointcloud2()`、`write_mcap_json_log()` |
+| `mission.py` | 一体化任务包录制（`MissionRecorder`）与离线多参数重算对比（`recompute_mission_comparison`） | 同步存档 `manifest.json`、`frames.rad` 与参数快照，支持 CA/GO/OS-CFAR + 杂波/滤波对比 |
 
 ---
 
@@ -133,7 +134,9 @@
 | `extra.py` | 小配置对话框：`ControlDialog`（增益/STC/FTC）、`AisDialog`（端口+经纬度）、`MapLocationDialog`（地图图源+IP自动定位+手动经纬度） | 设备不支持下行控制时**控件置灰并说明原因**；IP 自动定位走后台线程 |
 | `maplayer.py` | 瓦片拼图 + 后台 `_Fetcher` 线程 | `stop()` 会 `requestInterruption()`；地图按 `-heading` 反向旋转对齐雷达 |
 | `winstyle.py` | Windows 标题栏深浅色（DWM）+ 代码生成图标 + 全局对话框标题栏跟随 | `enable_dark_titlebar()` 属性号 **20/19 都试**；`install_dialog_titlebar()` 是应用级事件过滤器（QDialog 是独立原生窗口） |
-| `simdialog.py` | 模拟电子站控制台对话框：`SimStationDialog` 管理虚拟场景、手动注入与电子对抗干扰教学 | 对应 `core/sim_targets.py`；支持 `patrol/marine/automotive/drone` 与干扰样式 |
+| `simdialog.py` | 模拟电子站组件与对话框：`SimStationWidget` / `SimStationDialog`（可独立弹出或停靠右边栏） | 对应 `core/sim_targets.py`；支持实时修改与 `patrol/marine/automotive/drone` 联动配置 |
+| `zonespanel.py` | 可停靠「防区与滤波快速台」：`ZonesOpsWidget`（3D Kalman/IMM、M/N 起批、防区列表与画布标定开关） | 与 `ppi.py` 顶点拖拽/扇区旋转实时双向同步 |
+| `missiondialog.py` | 一体化任务包回放与离线重算对比对话框：`MissionCompareDialog` + `_CurveChart` | 对比基准 vs 优选 CFAR/杂波/滤波参数，并支持一键载入主窗口回放 |
 | `protodialog.py` | 通用协议雷达适配向导：`ProtoWizardDialog` 零代码配置并在线试解析样本报文 | 对应 `core/custom_proto.py`；保存后实时刷新主窗口驱动列表 |
 
 ---
@@ -153,7 +156,7 @@
 
 | 文件 | 具体职责 |
 |---|---|
-| `check.py` | **提交前必跑**：编译 + 46 组测试 + 链路自检 + 录制夹具回归，判据与 CI 一致 |
+| `check.py` | **提交前必跑**：编译 + 49 组测试 + 链路自检 + 录制夹具回归，判据与 CI 一致 |
 | `selftest.py` | 独立的无界面链路自检（含 `validate_frame_meta` 校验） |
 | `capture_check.py` | 离线校验 `.bin`/`.rad` 录制夹具（帧数/峰值/目标数/CRC 拒绝数），默认批量跑 `tests/fixtures/manifest.json` |
 | `ws_bridge.py` | 零依赖 UDP→WebSocket 桥接与静态页服务器（配合 `web_viewer.html` 做 Web 订阅端） |
@@ -171,7 +174,7 @@
 
 ## `tests/` —— 测试即规格
 
-`tests/test_core.py` 共 **46 组**，不依赖 pytest，直接 `python tests/test_core.py`。
+`tests/test_core.py` 共 **49 组**，不依赖 pytest，直接 `python tests/test_core.py`。
 **不打桩、不 mock**：直接跑真实算法与真实 SQLite。
 
 | 组 | 盯的是什么 |

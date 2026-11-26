@@ -183,7 +183,7 @@ class AlarmEngine:
         告警会一秒钟开合十几次。
         """
         p = rule.params
-        alive = [t for t in tracks if t.missed <= 1e-3]
+        alive = [t for t in tracks if t.missed <= 1e-3 and not getattr(t, "tentative", False)]
         hyst = max(0.0, min(0.9, rule.hysteresis))
 
         def relax(lim: float) -> float:

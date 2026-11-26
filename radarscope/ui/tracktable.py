@@ -5,6 +5,7 @@ from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import QAbstractItemView, QHeaderView, QTableWidget, QTableWidgetItem
 
+from ..core.i18n import tr
 from ..core.model import Target
 
 
@@ -53,6 +54,8 @@ class TrackTable(QTableWidget):
         self._period = max(0.3, float(period))
 
     def _status_of(self, t: Target, locked: bool) -> str:
+        if getattr(t, "tentative", False):
+            return "起批中"
         if locked:
             return "锁定"
         if t.missed <= 0.3:
@@ -80,8 +83,11 @@ class TrackTable(QTableWidget):
         cols.append("状态")
         self._cols = cols
         self.setColumnCount(len(cols))
-        self.setHorizontalHeaderLabels(cols)
+        self.setHorizontalHeaderLabels([tr(c) for c in cols])
         self.setRowCount(0)
+
+    def retranslate(self) -> None:
+        self.setHorizontalHeaderLabels([tr(c) for c in self._cols])
 
     def _rng_text(self, m: float) -> str:
         return f"{m:.1f} m" if self._meters else f"{m / 1000.0:.1f} km"

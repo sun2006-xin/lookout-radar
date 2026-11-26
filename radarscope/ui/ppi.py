@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import time
 from collections import deque
-from math import atan2, cos, degrees, exp, hypot, radians, sin
+from math import atan2, cos, degrees, exp, hypot, radians, sin, sqrt
 
 import numpy as np
 from PyQt5.QtCore import QPointF, QRectF, Qt, pyqtSignal
@@ -54,10 +54,13 @@ class PPIWidget(QWidget):
     targetPicked = pyqtSignal(int)
     zoneDrawn = pyqtSignal(float, float, float)   # 圆心 x, y, 半径（米）
     zoneMoved = pyqtSignal(str, float, float, float)  # rule_id, cx, cy, r（米）
+    polyZoneMoved = pyqtSignal(str, object)           # rule_id, list[[x, y], ...]
     zoneEditRequested = pyqtSignal(str)
     zoneDeleted = pyqtSignal()
     zoneDeleteRequested = pyqtSignal(str)   # 指定 rule_id，删"我点的那个"
     zoneModeRequested = pyqtSignal(bool)
+    simTargetInjectRequested = pyqtSignal(float, float)  # Shift+左键直点放置模拟目标 (x_m, y_m)
+    sensorBearingEdited = pyqtSignal(int, float)         # 画布拖动校准多站扇区朝向 (idx, bearing_deg)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -85,6 +88,7 @@ class PPIWidget(QWidget):
         self.trail_len = 36
         self.show_trails = True
         self.doppler_color = True
+        self.show_cov = False
         #: 告警禁入区 (cx, cy, r, level)，与 alarm 规则里的 zone 同源
         #: (cx, cy, r, level, rule_id)
         self._zones: list[tuple] = []
@@ -94,10 +98,13 @@ class PPIWidget(QWidget):
         #: 电子方位线 (方位°, 距离m)：经典雷达的 EBL/VRM
         self._ebl: tuple[float, float] | None = None
         self.show_ebl = True
-        #: 画禁入区模式：按下拖拽出一个圆，或拖拽已有警戒区移动/改半径
+        #: 画禁入区模式：按下拖拽出一个圆，或拖拽已有警戒区移动/改半径/改多边形顶点
         self.zone_mode = False
+        self.calib_mode = False
         self._zone_drag: tuple[float, float, float, float] | None = None
         self._zone_op: list | None = None
+        self._poly_op: list | None = None
+        self._calib_drag: int | None = None
         #: 真运动显示时本舰已行驶的距离（米），画面按它整体平移
         self.origin = (0.0, 0.0)
         self.true_motion = False
@@ -420,13 +427,25 @@ class PPIWidget(QWidget):
                 p.setBrush(QColor(255, 190, 80))
                 p.drawEllipse(QPointF(ctr.x() + rad, ctr.y()), 4.0, 4.0)
                 p.setBrush(Qt.NoBrush)
-        for pts, level, _rid in self._poly_zones:
+        for pts, level, rid in self._poly_zones:
             if len(pts) < 3:
                 continue
-            poly = QPolygonF([self._pt(cx, cy, hypot(x, y) / rmax * R, atan2(x, y)) for x, y in pts])
+            s_rid = str(rid)
+            live_pts = self._poly_op[2] if (self._poly_op and self._poly_op[0] == s_rid) else pts
+            scr_pts = [self._pt(cx, cy, hypot(x, y) / rmax * R, atan2(x, y)) for x, y in live_pts]
+            poly = QPolygonF(scr_pts)
             col = colors.get(level, colors["warn"])
-            p.setPen(QPen(col, 1.4, Qt.DashLine))
+            selected = bool(s_rid) and s_rid == self._zone_selected
+            p.setPen(QPen(QColor(255, 190, 80) if selected else col,
+                          2.2 if selected else 1.4,
+                          Qt.SolidLine if selected else Qt.DashLine))
             p.drawPolygon(poly)
+            if self.zone_mode or selected:
+                p.setBrush(QColor(255, 190, 80))
+                p.setPen(QPen(QColor(40, 40, 40), 1))
+                for sp in scr_pts:
+                    p.drawRect(QRectF(sp.x() - 3.5, sp.y() - 3.5, 7.0, 7.0))
+                p.setBrush(Qt.NoBrush)
 
     def _draw_ebl(self, p: QPainter, cx, cy, R, pal) -> None:
         """EBL（电子方位线）+ VRM（可变距离圈）。
@@ -655,6 +674,15 @@ class PPIWidget(QWidget):
             pt = self._pt(cx, cy, r, a)
             x, y = pt.x(), pt.y()
 
+            if getattr(t, "tentative", False):
+                gcol = QColor(150, 162, 178, 175)
+                p.setBrush(Qt.NoBrush)
+                p.setPen(QPen(gcol, 1.1, Qt.DotLine))
+                p.drawEllipse(QPointF(x, y), 4.0, 4.0)
+                p.setPen(QPen(gcol))
+                p.drawText(QPointF(x + 7, y + 3), f"P{t.tid}")
+                continue
+
             # 颜色：锁定 > 威胁等级 > 多普勒趋近/远离着色 > 默认色
             if t.locked:
                 col = lc
@@ -675,6 +703,30 @@ class PPIWidget(QWidget):
                     col = tc
             else:
                 col = tc
+
+            # 2σ 航迹误差置信椭圆（根据 3D Kalman 协方差阵 [cov_x, cov_xy; cov_xy, cov_y] 特征分解）
+            cov_x = float(getattr(t, "cov_x", 0.0))
+            cov_y = float(getattr(t, "cov_y", 0.0))
+            cov_xy = float(getattr(t, "cov_xy", 0.0))
+            if self.show_cov and (cov_x > 1e-4 or cov_y > 1e-4):
+                tr_c = cov_x + cov_y
+                disc = sqrt(max(0.0, (cov_x - cov_y) ** 2 + 4.0 * cov_xy * cov_xy))
+                lam1 = max(1e-4, 0.5 * (tr_c + disc))
+                lam2 = max(1e-4, 0.5 * (tr_c - disc))
+                px_per_m = R / span
+                rx_px = max(4.0, min(R * 0.45, 2.0 * sqrt(lam1) * px_per_m))
+                ry_px = max(3.0, min(R * 0.45, 2.0 * sqrt(lam2) * px_per_m))
+                ang_body = degrees(0.5 * atan2(2.0 * cov_xy, cov_x - cov_y))
+                # 数学角 (x右, y上) 转屏幕角度并叠加画布旋转
+                scr_deg = -ang_body + self._rot_deg
+                p.save()
+                p.translate(x, y)
+                p.rotate(scr_deg)
+                p.setBrush(QColor(col.red(), col.green(), col.blue(), 22))
+                p.setPen(QPen(QColor(col.red(), col.green(), col.blue(), 135), 1.0, Qt.DashLine))
+                p.drawEllipse(QPointF(0.0, 0.0), rx_px, ry_px)
+                p.restore()
+                p.setBrush(Qt.NoBrush)
 
             if t.locked:
                 h = 7.0
@@ -770,13 +822,29 @@ class PPIWidget(QWidget):
         span = max(1e-6, caps.range_max - caps.range_min)
         best: tuple[float, int] | None = None
         for t in self._tracks:
+            if getattr(t, "tentative", False):
+                continue
             r = (t.rng - caps.range_min) / span * R
-            px = cx + r * sin(t.az)
-            py = cy - r * cos(t.az)
-            d = ((pos.x() - px) ** 2 + (pos.y() - py) ** 2) ** 0.5
+            pt = self._pt(cx, cy, r, t.az)
+            d = hypot(pos.x() - pt.x(), pos.y() - pt.y())
             if d <= 14.0 and (best is None or d < best[0]):
                 best = (d, t.tid)
         return best[1] if best else -1
+
+    def _hit_sensor_ray(self, pos) -> int | None:
+        if not self.calib_mode or not self._coverage:
+            return None
+        cx, cy, R = self._geometry()
+        dx, dy = pos.x() - cx, pos.y() - cy
+        pr = hypot(dx, dy)
+        if pr < R * 0.15 or pr > R * 1.02:
+            return None
+        for i, s in enumerate(self._coverage):
+            bearing = float(s.get("bearing", 0.0))
+            lp = self._pt(cx, cy, pr, radians(bearing))
+            if hypot(pos.x() - lp.x(), pos.y() - lp.y()) <= 16.0:
+                return i
+        return None
 
     def _zone_offset_px(self, cx: float, cy: float, R: float) -> tuple[float, float]:
         if not self.true_motion:
@@ -784,13 +852,19 @@ class PPIWidget(QWidget):
         rmax = max(1e-6, self._caps.range_max)
         return self.origin[0] / rmax * R, -self.origin[1] / rmax * R
 
-    def _hit_zone_handle(self, pos) -> tuple[str, tuple] | None:
-        """命中检测：优先边缘调半径（resize），其次圆内移动（move）。"""
-        if not self.show_zones or not self._zones:
+    def _hit_zone_handle(self, pos) -> tuple[str, object] | None:
+        """命中检测：优先多边形顶点，其次圆边缘调半径（resize），最后圆内移动（move）。"""
+        if not self.show_zones or (not self._zones and not self._poly_zones):
             return None
         cx, cy, R = self._geometry()
         offpx, offpy = self._zone_offset_px(cx, cy, R)
         rmax = max(1e-6, self._caps.range_max)
+        for pts, _level, rid in reversed(self._poly_zones):
+            s_rid = str(rid)
+            for idx, (vx, vy) in enumerate(pts):
+                sp = self._pt(cx, cy, hypot(vx, vy) / rmax * R, atan2(vx, vy))
+                if hypot(pos.x() - sp.x(), pos.y() - sp.y()) <= 10.0:
+                    return "poly_vtx", (s_rid, idx, [[float(a), float(b)] for a, b in pts])
         for z in reversed(self._zones):
             if len(z) < 5:
                 continue
@@ -831,12 +905,25 @@ class PPIWidget(QWidget):
                 self.update()
                 self._show_zone_menu(ev.globalPos(), hit)
                 return
+        if self.calib_mode and ev.button() == Qt.LeftButton:
+            s_idx = self._hit_sensor_ray(ev.pos())
+            if s_idx is not None:
+                self._calib_drag = s_idx
+                self.setCursor(Qt.ClosedHandCursor)
+                return
         if self.zone_mode:
-            # 画区/调整模式：点中已有警戒区可移动或调半径，点空白则新拖一个圆
+            # 画区/调整模式：点中已有警戒区（多边形顶点/圆移动/半径）则拖拽，点空白则新拖一个圆
             if ev.button() == Qt.LeftButton:
                 hit = self._hit_zone_handle(ev.pos())
                 if hit is not None:
-                    op, z = hit
+                    op, payload = hit
+                    if op == "poly_vtx":
+                        rid, idx, pts_copy = payload
+                        self._zone_selected = rid
+                        self._poly_op = [rid, idx, pts_copy]
+                        self.update()
+                        return
+                    z = payload
                     rid = str(z[4])
                     cx0, cy0, r0 = float(z[0]), float(z[1]), float(z[2])
                     self._zone_selected = rid
@@ -851,6 +938,11 @@ class PPIWidget(QWidget):
             if ev.button() == Qt.RightButton:
                 self._zone_selected = ""
                 self.update()
+                return
+        if ev.button() == Qt.LeftButton and (ev.modifiers() & Qt.ShiftModifier):
+            body = self._screen_to_body(QPointF(ev.pos()))
+            if body is not None:
+                self.simTargetInjectRequested.emit(body[0], body[1])
                 return
         if ev.button() == Qt.LeftButton:
             tid = self.pick_target(ev.pos())
@@ -874,6 +966,22 @@ class PPIWidget(QWidget):
         super().mousePressEvent(ev)
 
     def mouseMoveEvent(self, ev) -> None:
+        if self.calib_mode and self._calib_drag is not None:
+            cx, cy, _R = self._geometry()
+            az_scr = (degrees(atan2(ev.pos().x() - cx, -(ev.pos().y() - cy))) - self._rot_deg) % 360.0
+            if 0 <= self._calib_drag < len(self._coverage or []):
+                self._coverage[self._calib_drag]["bearing"] = round(az_scr, 1)
+                self.update()
+            return
+        if self.calib_mode:
+            self.setCursor(Qt.OpenHandCursor if self._hit_sensor_ray(ev.pos()) is not None else Qt.ArrowCursor)
+        if self.zone_mode and self._poly_op is not None:
+            _rid, idx, pts_copy = self._poly_op
+            body = self._screen_to_body(QPointF(ev.pos()))
+            if body is not None and 0 <= idx < len(pts_copy):
+                pts_copy[idx] = [round(body[0], 3), round(body[1], 3)]
+                self.update()
+            return
         if self.zone_mode and self._zone_op is not None:
             op, _rid, cx0, cy0, r0, ox, oy = self._zone_op
             body = self._screen_to_body(QPointF(ev.pos()))
@@ -893,12 +1001,27 @@ class PPIWidget(QWidget):
         if self.zone_mode:
             hit = self._hit_zone_handle(ev.pos())
             if hit is not None:
-                self.setCursor(Qt.SizeFDiagCursor if hit[0] == "resize" else Qt.OpenHandCursor)
+                self.setCursor(Qt.SizeAllCursor if hit[0] == "poly_vtx"
+                               else Qt.SizeFDiagCursor if hit[0] == "resize"
+                               else Qt.OpenHandCursor)
             else:
                 self.setCursor(Qt.CrossCursor)
         super().mouseMoveEvent(ev)
 
     def mouseReleaseEvent(self, ev) -> None:
+        if self.calib_mode and self._calib_drag is not None and ev.button() == Qt.LeftButton:
+            idx = self._calib_drag
+            self._calib_drag = None
+            self.setCursor(Qt.ArrowCursor)
+            if 0 <= idx < len(self._coverage or []):
+                self.sensorBearingEdited.emit(idx, float(self._coverage[idx]["bearing"]))
+            return
+        if self.zone_mode and self._poly_op is not None and ev.button() == Qt.LeftButton:
+            rid, _idx, pts_copy = self._poly_op
+            self._poly_op = None
+            self.update()
+            self.polyZoneMoved.emit(rid, pts_copy)
+            return
         if self.zone_mode and self._zone_op is not None and ev.button() == Qt.LeftButton:
             _op, rid, cx1, cy1, r1, _ox, _oy = self._zone_op
             self._zone_op = None
@@ -948,10 +1071,18 @@ class PPIWidget(QWidget):
             self.update()
 
     def set_zone_mode(self, on: bool) -> None:
-        """画禁入区模式：左键拖出圆，右键删最近一个。"""
+        """画禁入区模式：左键拖出圆/拖多边形顶点，右键编辑/删。"""
         self.zone_mode = bool(on)
         self._zone_drag = None
+        self._poly_op = None
         self.setCursor(Qt.CrossCursor if on else Qt.ArrowCursor)
+        self.update()
+
+    def set_calib_mode(self, on: bool) -> None:
+        """画布拖动传感器朝向偏角模式。"""
+        self.calib_mode = bool(on)
+        self._calib_drag = None
+        self.setCursor(Qt.OpenHandCursor if on else Qt.ArrowCursor)
         self.update()
 
     def _zone_at(self, pos) -> str:

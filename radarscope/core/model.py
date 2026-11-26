@@ -35,6 +35,11 @@ class Target:
     rcs: float = 0.0          # 雷达截面积估值，dBsm；0 表示平台不提供
     z: float = 0.0            # 高度 / 海拔（米），支持 3D 俯仰雷达时有效
     el_deg: float = 0.0       # 俯仰角（度），向上为正
+    vz: float = 0.0           # 垂直速度（m/s），3D 卡尔曼滤波估计
+    tentative: bool = False   # M/N 起批确认中（未确认为 True，PPI 灰点显示）
+    cov_x: float = 0.0        # X 位置估计方差 (m^2)
+    cov_y: float = 0.0        # Y 位置估计方差 (m^2)
+    cov_xy: float = 0.0       # XY 协方差 (m^2)，用于绘制误差置信椭圆
 
     @property
     def rng(self) -> float:
