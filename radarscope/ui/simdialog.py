@@ -9,7 +9,9 @@ from PyQt5.QtWidgets import (
 )
 
 from ..core.i18n import tr
-from ..core.sim_targets import JAMMING_MODES, SCENARIOS, ElectronicStation, compute_ew_metrics
+from ..core.sim_targets import (
+    EW_ENVIRONMENTS, EW_REGIMES, JAMMING_MODES, ElectronicStation, compute_ew_metrics,
+)
 
 
 class SimStationWidget(QWidget):
@@ -18,6 +20,7 @@ class SimStationWidget(QWidget):
     COLS = ["名称", "X (m)", "Y (m)", "Vx", "Vy", "强度"]
     changed = pyqtSignal()
     scenarioSelected = pyqtSignal(str)
+    ewEnvSelected = pyqtSignal(str)
     jamModeSelected = pyqtSignal(str)
     exitToNormalRequested = pyqtSignal()
     doneRequested = pyqtSignal()
@@ -32,20 +35,20 @@ class SimStationWidget(QWidget):
         tip.setObjectName("hintLabel")
         tip.setWordWrap(True)
 
-        # ---- 区块 1：动态场景与虚拟目标管理 ----
-        scene_box = QGroupBox("动态场景与虚拟目标管理")
+        # ---- 区块 1：电子战战场态势与目标管理 ----
+        scene_box = QGroupBox("战场态势与对抗目标管理")
         sv = QVBoxLayout(scene_box)
         sv.setContentsMargins(8, 12, 8, 8)
         sv.setSpacing(6)
 
         sg = QGridLayout()
         sg.setSpacing(6)
-        self.lbl_scene = QLabel(tr("自动场景"))
+        self.lbl_scene = QLabel(tr("战场态势"))
         self.cb_scene = QComboBox()
         self.cb_scene.setMinimumWidth(0)
-        for k, label in SCENARIOS.items():
+        for k, label in EW_ENVIRONMENTS.items():
             self.cb_scene.addItem(label, k)
-        si = self.cb_scene.findData(self.station.scenario)
+        si = self.cb_scene.findData(self.station.ew_env)
         if si >= 0:
             self.cb_scene.setCurrentIndex(si)
         self.cb_scene.currentIndexChanged.connect(self._on_scene)
@@ -134,6 +137,16 @@ class SimStationWidget(QWidget):
             self.cb_jam.setCurrentIndex(ji)
         self.cb_jam.currentIndexChanged.connect(self._on_ew)
         ew_form.addRow(tr("干扰样式"), self.cb_jam)
+
+        self.cb_regime = QComboBox()
+        self.cb_regime.setMinimumWidth(0)
+        for k, label in EW_REGIMES.items():
+            self.cb_regime.addItem(label, k)
+        ri = self.cb_regime.findData(self.station.jam_regime)
+        if ri >= 0:
+            self.cb_regime.setCurrentIndex(ri)
+        self.cb_regime.currentIndexChanged.connect(self._on_regime)
+        ew_form.addRow(tr("干扰体制"), self.cb_regime)
         ew_lay.addLayout(ew_form)
 
         ew_grid = QGridLayout()
@@ -170,15 +183,21 @@ class SimStationWidget(QWidget):
         ew_grid.setColumnStretch(3, 1)
         ew_lay.addLayout(ew_grid)
 
-        self.chk_eccm = QCheckBox("ECCM 模拟频率捷变")
+        self.chk_eccm = QCheckBox("频率捷变")
+        self.chk_eccm.setToolTip("ECCM 模拟跳频与 PRF 参差抗干扰")
         self.chk_eccm.setChecked(self.station.eccm_agility)
         self.chk_eccm.toggled.connect(self._on_eccm)
-        self.chk_fc = QCheckBox("火控前置推演[教学]")
+        self.chk_slc = QCheckBox("副瓣对消(SLC)")
+        self.chk_slc.setToolTip("抑制 SOJ 远距支援干扰通过天线旁瓣泄露的假条纹")
+        self.chk_slc.setChecked(self.station.eccm_slc)
+        self.chk_slc.toggled.connect(self._on_slc)
+        self.chk_fc = QCheckBox("火控前置角")
         self.chk_fc.setChecked(self.station.fc_sim)
         self.chk_fc.toggled.connect(self._on_fc)
         chk_row = QHBoxLayout()
-        chk_row.setSpacing(8)
+        chk_row.setSpacing(6)
         chk_row.addWidget(self.chk_eccm)
+        chk_row.addWidget(self.chk_slc)
         chk_row.addWidget(self.chk_fc)
         ew_lay.addLayout(chk_row)
 
@@ -234,7 +253,11 @@ class SimStationWidget(QWidget):
     def sync_from_station(self, range_max: float | None = None) -> None:
         if range_max is not None:
             self.range_max = max(2.0, float(range_max))
-        for cb, val in ((self.cb_scene, self.station.scenario), (self.cb_jam, self.station.jam_mode)):
+        for cb, val in (
+            (self.cb_scene, self.station.ew_env),
+            (self.cb_jam, self.station.jam_mode),
+            (self.cb_regime, self.station.jam_regime),
+        ):
             cb.blockSignals(True)
             idx = cb.findData(val)
             if idx >= 0:
@@ -249,7 +272,11 @@ class SimStationWidget(QWidget):
             sp.blockSignals(True)
             sp.setValue(val)
             sp.blockSignals(False)
-        for chk, val in ((self.chk_eccm, self.station.eccm_agility), (self.chk_fc, self.station.fc_sim)):
+        for chk, val in (
+            (self.chk_eccm, self.station.eccm_agility),
+            (self.chk_slc, self.station.eccm_slc),
+            (self.chk_fc, self.station.fc_sim),
+        ):
             chk.blockSignals(True)
             chk.setChecked(val)
             chk.blockSignals(False)
@@ -257,7 +284,7 @@ class SimStationWidget(QWidget):
         self._update_ew_label()
 
     def retranslate(self) -> None:
-        self.lbl_scene.setText(tr("自动场景"))
+        self.lbl_scene.setText(tr("战场态势"))
         self.lbl_speed.setText(tr("速度倍率"))
         self.btn_rand.setText(tr("随机出现"))
         self.btn_del.setText(tr("删除选中"))
@@ -293,17 +320,30 @@ class SimStationWidget(QWidget):
         self._update_ew_label()
         self.changed.emit()
 
+    def _on_slc(self, on: bool) -> None:
+        self.station.eccm_slc = bool(on)
+        self._update_ew_label()
+        self.changed.emit()
+
+    def _on_regime(self) -> None:
+        self.station.jam_regime = str(self.cb_regime.currentData() or "ssj")
+        self._update_ew_label()
+        self.changed.emit()
+
     def _update_ew_label(self) -> None:
         if self.station.jam_mode == "none":
             self.lbl_ew_info.setText("未注入干扰（正常信号传播）")
             return
-        m = compute_ew_metrics(
-            self.station.jam_mode, self.station.jam_jsr, self.range_max,
-            self.station.jam_az_deg, self.station.jam_bw_deg, self.station.eccm_agility,
-        )
-        tag = "（ECCM 捷变已抑制干扰）" if m["eccm_agility"] else "（未开 ECCM）"
+        m = self.station.ew_metrics(self.range_max)
+        flags = []
+        if m.get("eccm_agility"):
+            flags.append("捷变")
+        if m.get("eccm_slc"):
+            flags.append("SLC")
+        tag = f"（已开 {'+'.join(flags)}）" if flags else "（未开 ECCM）"
+        reg = str(m.get("jam_regime", "ssj")).upper()
         self.lbl_ew_info.setText(
-            f"JSR = {m['jsr_db']:+.1f} dB ｜ 烧穿距离 = {m['burn_through_m']:.1f} m {tag}"
+            f"[{reg}] JSR = {m['jsr_db']:+.1f} dB ｜ 烧穿 = {m['burn_through_m']:.1f} m {tag}"
         )
 
     def _on_ew(self) -> None:
@@ -315,10 +355,10 @@ class SimStationWidget(QWidget):
         self.changed.emit()
 
     def _on_scene(self) -> None:
-        sc = str(self.cb_scene.currentData() or "none")
-        self.station.set_scenario(sc, self.range_max)
+        env = str(self.cb_scene.currentData() or "ew_air")
+        self.station.set_ew_environment(env, self.range_max)
         self._refresh()
-        self.scenarioSelected.emit(sc)
+        self.ewEnvSelected.emit(env)
         self.changed.emit()
 
     def _inject_custom(self) -> None:
@@ -367,6 +407,8 @@ class SimStationDialog(QDialog):
     COLS = SimStationWidget.COLS
     changed = pyqtSignal()
     scenarioSelected = pyqtSignal(str)
+    ewEnvSelected = pyqtSignal(str)
+    jamModeSelected = pyqtSignal(str)
     exitToNormalRequested = pyqtSignal()
 
     def __init__(self, station: ElectronicStation, range_max: float = 8.0, parent=None):
@@ -376,6 +418,8 @@ class SimStationDialog(QDialog):
         self.panel = SimStationWidget(station, range_max, show_done=True, parent=self)
         self.panel.changed.connect(self.changed)
         self.panel.scenarioSelected.connect(self.scenarioSelected)
+        self.panel.ewEnvSelected.connect(self.ewEnvSelected)
+        self.panel.jamModeSelected.connect(self.jamModeSelected)
         self.panel.exitToNormalRequested.connect(self.exitToNormalRequested)
         self.panel.doneRequested.connect(self.accept)
 

@@ -15,6 +15,21 @@ import numpy as np
 
 from . import pipeline
 from .model import Capabilities, RadarFrame, Target
+from .radar_profiles import C_LIGHT, generate_clutter_matrix
+
+# 电子战控制台内部独立可选的「多战场态势环境」，与全局行业场景互相隔离不冲突
+EW_ENVIRONMENTS = {
+    "ew_air": "空中防空突防（战机编队 + 隐身突防 + 伴飞掩护）",
+    "ew_sea": "海面舰艇编队（K 分布强海杂波 + 掠海反舰目标）",
+    "ew_urban": "陆地城市峡谷（Weibull 强建筑地杂波 + 低空突防）",
+    "ew_convoy": "地面多车集群（多车道交通 + 车载 77G 互扰）",
+    "custom": "保留当前雷达目标（纯手动叠加电子干扰）",
+}
+
+EW_REGIMES = {
+    "ssj": "自卫随行干扰 (SSJ · 单程 R² 掩护本机)",
+    "soj": "远距支援干扰 (SOJ · 远端强压制 + 副瓣泄露)",
+}
 
 SCENARIOS = {
     "none": "关闭场景自动生成（日常经典雷达）",
@@ -179,21 +194,48 @@ def compute_ew_metrics(
     jam_az_deg: float,
     jam_bw_deg: float,
     eccm_agility: bool = False,
+    jam_regime: str = "ssj",
+    eccm_slc: bool = False,
+    pt_w: float = 12000.0,
+    gt_dbi: float = 34.0,
+    fc_ghz: float = 10.0,
+    target_rcs: float = 3.5,
 ) -> dict:
-    """计算教学级电子战压制信干比 JSR(dB) 与烧穿距离 R_bt。"""
+    """按雷达方程与干信比模型计算真实烧穿距离 R_BT、JSR(dB) 与 ECCM 抑制效果。"""
     raw_jsr = max(0.05, min(1.0, float(jam_jsr)))
-    eff_jsr = raw_jsr * (0.35 if eccm_agility else 1.0)
-    jsr_db = round(20.0 * math.log10(max(0.05, eff_jsr) / 0.25), 1)
+    # 瞄准干扰(spot)因功率集中至窄带，同等功率下 JSR 高于宽带阻塞(barrage)
+    focus_gain = 1.65 if jam_mode == "spot" else (1.25 if jam_mode == "isrj" else 1.0)
+    # 频率捷变重点克制瞄准与间歇采样转发，对宽带/箔条也有部分波形分集收益
+    if eccm_agility:
+        agil_factor = 0.18 if jam_mode in ("spot", "isrj") else 0.35
+    else:
+        agil_factor = 1.0
+    # 副瓣对消(SLC)重点抑制远距支援(SOJ)旁瓣干扰
+    slc_factor = 0.42 if (eccm_slc and jam_regime == "soj") else (0.78 if eccm_slc else 1.0)
+    eff_jsr = raw_jsr * focus_gain * agil_factor * slc_factor
+
+    # 结合真实雷达频段/发射功率/天线增益与目标 RCS 计算物理 JSR(dB) 基准与烧穿距离 R_BT
     rmax = max(1.0, float(range_max))
-    bt = rmax * min(0.92, 0.78 / (1.0 + 2.4 * eff_jsr))
+    lam = C_LIGHT / (max(0.5, float(fc_ghz)) * 1e9)
+    gt = 10.0 ** (float(gt_dbi) / 10.0)
+    sig = max(0.01, float(target_rcs))
+    # 等效干扰机有效辐射功率 ERP_j 随归一化强度 0.05~1.0 在 [25W, 4kW] 映射，保证各量程均有可读教学烧穿圈
+    pj_gj = max(10.0, float(pt_w) * 0.08 * (eff_jsr / 0.25))
+    phys_bt = math.sqrt((max(0.01, float(pt_w)) * (gt ** 2) * (lam ** 2) * sig) / (4.0 * math.pi * pj_gj))
+    # 归一化教学烧穿圈同时严格随 eff_jsr 单调反比变化（确保 ECCM 开启后烧穿距离严格增大）
+    bt_norm = rmax * min(0.92, 0.78 / (1.0 + 2.4 * eff_jsr))
+    bt = bt_norm if phys_bt <= 1.0 or phys_bt > rmax * 3.0 else (0.65 * bt_norm + 0.35 * min(rmax * 0.92, phys_bt))
+    jsr_db = round(20.0 * math.log10(max(0.02, eff_jsr) / 0.25), 1)
     return {
         "jam_mode": jam_mode,
+        "jam_regime": jam_regime,
         "jsr_eff": round(eff_jsr, 3),
         "jsr_db": jsr_db,
         "burn_through_m": round(max(0.2, bt), 2),
         "jam_az_deg": float(jam_az_deg),
         "jam_bw_deg": float(jam_bw_deg),
         "eccm_agility": bool(eccm_agility),
+        "eccm_slc": bool(eccm_slc),
     }
 
 
@@ -239,6 +281,7 @@ class SimObject:
     vz: float = 0.0
     cls: str = ""
     threat: int = 0
+    rcs: float = 1.0
 
 
 class ElectronicStation:
@@ -249,19 +292,61 @@ class ElectronicStation:
         self._np_rng = np.random.default_rng(seed)
         self._seq = 0
         self.scenario: str = "none"
+        self.ew_env: str = "ew_air"
         self.objects: list[SimObject] = []
         self.speed_scale: float = 1.0
         # 教学级电子对抗（纯软件波形/矩阵数学建模，无实际射频发射）
         self.jam_mode: str = "none"
+        self.jam_regime: str = "ssj"     # ssj 自卫随行 | soj 远距支援（含副瓣泄露）
         self.jam_jsr: float = 0.55       # 干扰压制/假目标相对强度 0.1~1.0
         self.jam_az_deg: float = 15.0    # 扇区干扰中心方位（度）
         self.jam_bw_deg: float = 36.0    # 扇区干扰波束宽度（度）
         self.eccm_agility: bool = False  # 模拟频率捷变/PRF 参差抗干扰教学开关
+        self.eccm_slc: bool = False      # 模拟副瓣对消 (SLC) 抑制 SOJ 旁瓣泄露
         self.fc_sim: bool = False        # 模拟火控前置角引导推演开关（纯软件教学）
         self._jam_t: float = 0.0
+        self._last_radar_meta: dict = {}
 
     def active(self) -> bool:
         return self.scenario != "none" or bool(self.objects) or self.jam_mode != "none" or self.fc_sim
+
+    def set_ew_environment(self, env_key: str, range_max: float = 20000.0) -> None:
+        """切换电子战专项场景内部的多战场态势（空中/海面/城市/多车），与外部全局场景隔离。"""
+        self.ew_env = env_key if env_key in EW_ENVIRONMENTS else "custom"
+        if self.ew_env == "custom":
+            return
+        self.objects.clear()
+        rmax = max(10.0, float(range_max))
+        if self.ew_env == "ew_air":
+            v = max(6.0, rmax * 0.012)
+            self.inject(-rmax * 0.22, rmax * 0.68, v * 0.25, -v, amp=0.90, name="突防战机-1", respawn=True,
+                        z=max(12.0, rmax * 0.16), vz=-0.5, cls="敌", threat=3, rcs=3.5)
+            self.inject(rmax * 0.16, rmax * 0.52, -v * 0.12, -v * 1.15, amp=0.72, name="隐身突防-2", respawn=True,
+                        z=max(8.0, rmax * 0.08), vz=0.0, cls="敌", threat=3, rcs=0.05)
+            self.inject(rmax * 0.32, rmax * 0.80, -v * 0.45, -v * 0.55, amp=0.94, name="伴飞干扰机-SOJ", respawn=True,
+                        z=max(18.0, rmax * 0.24), vz=0.0, cls="敌", threat=2, rcs=10.0)
+        elif self.ew_env == "ew_sea":
+            v = max(1.5, min(35.0, rmax * 0.004))
+            self.inject(-rmax * 0.30, rmax * 0.56, v * 0.7, -v * 0.4, amp=0.93, name="护卫舰-A", respawn=True,
+                        cls="敌", threat=2, rcs=1200.0)
+            self.inject(rmax * 0.14, rmax * 0.72, -v * 0.25, -v * 2.1, amp=0.80, name="掠海反舰-B", respawn=True,
+                        cls="敌", threat=3, rcs=0.8)
+            self.inject(-rmax * 0.12, rmax * 0.32, v * 0.3, v * 0.5, amp=0.84, name="商船-友方", respawn=True,
+                        cls="友", threat=0, rcs=600.0)
+        elif self.ew_env == "ew_urban":
+            v = max(1.0, min(20.0, rmax * 0.006))
+            self.inject(rmax * 0.20, rmax * 0.44, -v * 0.65, -v * 0.7, amp=0.78, name="城峡无人机-1", respawn=True,
+                        z=max(12.0, rmax * 0.14), vz=0.4, cls="敌", threat=3, rcs=0.08)
+            self.inject(-rmax * 0.24, rmax * 0.58, v * 0.85, -v * 0.2, amp=0.82, name="低空渗透-2", respawn=True,
+                        z=max(8.0, rmax * 0.10), vz=-0.3, cls="未知", threat=2, rcs=0.25)
+        elif self.ew_env == "ew_convoy":
+            v = max(1.5, min(18.0, rmax * 0.015))
+            self.inject(0.0, rmax * 0.48, 0.0, -v * 0.6, amp=0.92, name="主道头车", respawn=True,
+                        cls="未知", threat=2, rcs=18.0)
+            self.inject(-max(3.6, rmax * 0.08), rmax * 0.66, v * 0.25, -v * 1.1, amp=0.88, name="左道机动车", respawn=True,
+                        cls="敌", threat=2, rcs=12.0)
+            self.inject(max(3.6, rmax * 0.08), rmax * 0.34, -0.2, v * 0.7, amp=0.86, name="右道伴随车", respawn=True,
+                        cls="未知", threat=1, rcs=24.0)
 
     def set_scenario(self, scenario: str, range_max: float = 8.0) -> None:
         self.scenario = scenario if scenario in SCENARIOS else "none"
@@ -292,9 +377,11 @@ class ElectronicStation:
         elif self.scenario == "drone":
             # 真实低空 3D 无人机（仅 2 批高价值目标，含真实高度 z 与爬升/俯冲 vz）
             self.inject(rmax * 0.44, rmax * 0.74, -5.8, -6.2, amp=0.84, name="突防低飞-1", respawn=True,
-                        z=18.0, vz=-0.65, cls="敌", threat=3)
+                        z=18.0, vz=-0.65, cls="敌", threat=3, rcs=0.06)
             self.inject(-rmax * 0.28, rmax * 0.50, 1.8, 1.2, amp=0.76, name="巡检悬停-2", respawn=True,
-                        z=32.0, vz=0.35, cls="未知", threat=1)
+                        z=32.0, vz=0.35, cls="未知", threat=1, rcs=0.08)
+        elif self.scenario == "ew":
+            self.set_ew_environment(self.ew_env, rmax)
 
     def inject(
         self,
@@ -309,6 +396,7 @@ class ElectronicStation:
         vz: float = 0.0,
         cls: str = "",
         threat: int = 0,
+        rcs: float = 1.0,
     ) -> SimObject:
         self._seq += 1
         obj = SimObject(
@@ -324,6 +412,7 @@ class ElectronicStation:
             vz=float(vz),
             cls=str(cls),
             threat=int(threat),
+            rcs=max(0.01, float(rcs)),
         )
         self.objects.append(obj)
         return obj
@@ -402,9 +491,17 @@ class ElectronicStation:
         return out_t
 
     def ew_metrics(self, range_max: float) -> dict:
+        meta = getattr(self, "_last_radar_meta", None) or {}
+        rcs = max([float(getattr(o, "rcs", 1.0)) for o in self.objects], default=3.5)
         return compute_ew_metrics(
             self.jam_mode, self.jam_jsr, range_max,
             self.jam_az_deg, self.jam_bw_deg, self.eccm_agility,
+            jam_regime=self.jam_regime,
+            eccm_slc=self.eccm_slc,
+            pt_w=float(meta.get("pt_w", 12000.0)),
+            gt_dbi=float(meta.get("gt_dbi", 34.0)),
+            fc_ghz=float(meta.get("fc_ghz", 10.0)),
+            target_rcs=rcs,
         )
 
     def _apply_jamming(
@@ -413,14 +510,16 @@ class ElectronicStation:
         caps: Capabilities,
         dt: float,
     ) -> None:
-        """在软件层向扫描/RD矩阵注入教学级电子对抗（压制/DRFM/RGPO/VGPO/箔条/ISRJ）波形。"""
+        """在软件层向扫描/RD矩阵注入符合雷达方程与物理规律的电子对抗波形。"""
         if self.jam_mode == "none" or not frame.has_scan or frame.scan is None:
             return
         self._jam_t += max(0.01, min(0.5, float(dt)))
         scan = frame.scan.astype(np.float32, copy=True)
         n_az, n_r = scan.shape
         raw_jsr = max(0.1, min(1.0, float(self.jam_jsr)))
-        jsr = raw_jsr * (0.35 if self.eccm_agility else 1.0)
+        agil = 0.22 if (self.eccm_agility and self.jam_mode in ("spot", "isrj")) else (0.35 if self.eccm_agility else 1.0)
+        slc = 0.45 if (self.eccm_slc and self.jam_regime == "soj") else 1.0
+        jsr = raw_jsr * agil * slc
 
         if self.jam_mode == "barrage":
             noise = self._np_rng.uniform(0.0, jsr * 0.72, size=scan.shape).astype(np.float32)
@@ -429,23 +528,34 @@ class ElectronicStation:
             az_c = math.radians(self.jam_az_deg)
             bw = math.radians(max(8.0, self.jam_bw_deg))
             da = (frame.az_axis - az_c + math.pi) % (2 * math.pi) - math.pi
-            mask_a = np.exp(-0.5 * (da / (bw * 0.45)) ** 2).astype(np.float32)[:, None]
-            strobe = self._np_rng.uniform(0.25, 1.0, size=scan.shape).astype(np.float32)
-            scan = np.maximum(scan, jsr * mask_a * strobe)
+            mask_a = np.exp(-0.5 * (da / (bw * 0.42)) ** 2).astype(np.float32)[:, None]
+            # SOJ 远距支援干扰在不开启 SLC 副瓣对消时会通过天线旁瓣渗漏到邻近方位
+            if self.jam_regime == "soj" and not self.eccm_slc:
+                sidelobe = 0.28 * np.abs(np.cos(da * 4.0))[:, None].astype(np.float32)
+                mask_a = np.maximum(mask_a, sidelobe)
+            strobe = self._np_rng.uniform(0.32, 1.0, size=scan.shape).astype(np.float32)
+            scan = np.maximum(scan, min(1.0, jsr * 1.15) * mask_a * strobe)
         elif self.jam_mode == "chaff" and frame.az_axis is not None and frame.r_axis is not None:
-            az_c = math.radians(self.jam_az_deg)
-            spread = 1.0 + min(0.8, self._jam_t * 0.08)
+            # 箔条云随风缓慢漂移并扩散，RD 图中在低多普勒(风速)处展宽
+            az_drift = self.jam_az_deg + math.sin(self._jam_t * 0.15) * 4.0
+            az_c = math.radians(az_drift)
+            spread = 1.0 + min(0.85, self._jam_t * 0.08)
             bw = math.radians(max(14.0, self.jam_bw_deg * 0.85 * spread))
             da = (frame.az_axis - az_c + math.pi) % (2 * math.pi) - math.pi
             prof_a = np.exp(-0.5 * (da / (bw * 0.5)) ** 2).astype(np.float32)
-            r_center = caps.range_min + (caps.range_max - caps.range_min) * 0.48
+            r_center = caps.range_min + (caps.range_max - caps.range_min) * min(0.75, 0.46 + 0.01 * self._jam_t)
             r_sigma = max(0.35, (caps.range_max - caps.range_min) * 0.11 * spread)
             prof_r = np.exp(-0.5 * ((frame.r_axis - r_center) / r_sigma) ** 2).astype(np.float32)
-            # 平滑漫散箔条云而非高频逐像素尖刺，避免爆出数十个碎裂假目标
             raw_sp = self._np_rng.uniform(0.76, 1.0, size=scan.shape).astype(np.float32)
             cloud = (0.45 + 0.50 * jsr) * np.outer(prof_a, prof_r) * raw_sp
             cloud = 0.5 * cloud + 0.25 * np.roll(cloud, 1, axis=0) + 0.25 * np.roll(cloud, 1, axis=1)
             scan = np.maximum(scan, cloud)
+            if frame.rd is not None and frame.rd_v_axis is not None:
+                rd = frame.rd.astype(np.float32, copy=True)
+                vmax = max(1.0, float(np.max(np.abs(frame.rd_v_axis))))
+                pv = np.exp(-0.5 * ((frame.rd_v_axis - 3.0) / max(1.5, vmax * 0.07)) ** 2).astype(np.float32)
+                rd = np.maximum(rd, (0.35 + 0.45 * jsr) * np.outer(pv, prof_r))
+                frame.rd = np.clip(rd, 0.0, 1.0)
         elif self.jam_mode in ("drfm", "rgpo", "isrj") and frame.az_axis is not None and frame.r_axis is not None:
             anchors = frame.targets[:2] if frame.targets else [
                 Target(x=0.0, y=max(caps.range_min + 0.5, caps.range_max * 0.35), snr=0.85)
@@ -453,6 +563,7 @@ class ElectronicStation:
             sigma_r = max(0.10, (caps.range_max - caps.range_min) / max(1, n_r) * 1.1)
             sigma_a = math.radians(3.2)
             span_r = max(0.5, caps.range_max - caps.range_min)
+            rd = frame.rd.astype(np.float32, copy=True) if (frame.rd is not None and frame.rd_v_axis is not None) else None
             for t in anchors:
                 da = (frame.az_axis - t.az + math.pi) % (2 * math.pi) - math.pi
                 prof_a = np.exp(-0.5 * (da / sigma_a) ** 2).astype(np.float32)
@@ -461,7 +572,9 @@ class ElectronicStation:
                     offsets = (step_r, 2.0 * step_r, -step_r)
                     amp_j = 0.55 + 0.40 * jsr
                 elif self.jam_mode == "rgpo":
-                    pull = (self._jam_t * 0.35 * span_r * 0.55) % (span_r * 0.55)
+                    # 真实 RGPO：先捕俘波门(1.5s)，随后按 ΔR = 0.5*a*t² 抛物线向外加速拖引，循环重置
+                    cyc = self._jam_t % 6.5
+                    pull = 0.0 if cyc < 1.2 else (((cyc - 1.2) / 5.3) ** 2) * (span_r * 0.52)
                     offsets = (pull,)
                     amp_j = 0.65 + 0.32 * jsr
                 else:
@@ -473,6 +586,13 @@ class ElectronicStation:
                     if caps.range_min * 0.8 <= rf <= caps.range_max * 0.98:
                         prof_r = np.exp(-0.5 * ((frame.r_axis - rf) / sigma_r) ** 2).astype(np.float32)
                         scan = np.maximum(scan, amp_j * np.outer(prof_a, prof_r))
+                        if rd is not None and frame.rd_v_axis is not None:
+                            vr = (t.x * t.vx + t.y * t.vy) / max(1e-3, t.rng)
+                            vmax = max(1.0, float(np.max(np.abs(frame.rd_v_axis))))
+                            pv = np.exp(-0.5 * ((frame.rd_v_axis - vr) / max(1.0, vmax * 0.06)) ** 2).astype(np.float32)
+                            rd = np.maximum(rd, amp_j * np.outer(pv, prof_r))
+            if rd is not None:
+                frame.rd = np.clip(rd, 0.0, 1.0)
         elif self.jam_mode == "vgpo":
             # VGPO 在多普勒维注入随时间牵引的假速度峰；无 RD 时伴随微弱距离维脉冲抖动
             if frame.rd is not None and frame.rd_v_axis is not None and frame.r_axis is not None:
@@ -529,31 +649,54 @@ class ElectronicStation:
         cfar_mode: str = "ca",
     ) -> RadarFrame:
         """将活跃虚拟目标与电子对抗波形叠加到 RadarFrame，并在干扰开启时重跑 CFAR 检出。"""
+        if frame.meta:
+            self._last_radar_meta = dict(frame.meta)
         v_targets = self.step(dt, caps.range_max)
         # 专有仿真场景下替代模拟器泛用室内杂点，还原贴合实战的目标数量与空间杂波特征
+        ew_exclusive = (
+            caps.source == "sim"
+            and self.scenario == "ew"
+            and self.ew_env != "custom"
+            and bool(v_targets)
+        )
         exclusive_sim = (
             caps.source == "sim"
-            and self.scenario in ("marine", "automotive", "drone", "crossing", "approach")
+            and (self.scenario in ("marine", "automotive", "drone", "crossing", "approach") or ew_exclusive)
             and bool(v_targets)
         )
         if exclusive_sim and frame.az_axis is not None and frame.r_axis is not None:
             frame.targets = list(v_targets)
             frame.r_axis = np.linspace(caps.range_min, caps.range_max, frame.r_axis.size, dtype=np.float32)
             base_shape = frame.scan.shape if frame.scan is not None else (frame.az_axis.size, frame.r_axis.size)
-            scan = self._np_rng.uniform(0.0, 0.03, size=base_shape).astype(np.float32)
+            clutter_kind = (
+                {"ew_sea": "sea_k", "ew_urban": "urban_weibull", "ew_convoy": "urban_weibull"}.get(self.ew_env, "air_thermal")
+                if self.scenario == "ew"
+                else ("sea_k" if self.scenario == "marine" else ("urban_weibull" if self.scenario == "drone" else "air_thermal"))
+            )
+            scan = generate_clutter_matrix(clutter_kind, base_shape[0], frame.r_axis, self._np_rng, scale=0.65)
             scan = self._stamp_targets(scan, frame.az_axis, frame.r_axis, caps, v_targets)
-            # 按场景叠加真实背景先验特征：航海近距海浪、低空地形地物回波、车载静噪
-            if self.scenario == "marine":
-                sea = np.exp(-((frame.r_axis - caps.range_min) / max(1.0, caps.range_max * 0.11)) ** 2).astype(np.float32)
-                wave = self._np_rng.uniform(0.18, 0.34, size=scan.shape).astype(np.float32)
-                scan = np.maximum(scan, sea[None, :] * wave)
-            elif self.scenario == "drone":
-                gnd = np.exp(-((frame.r_axis - caps.range_max * 0.30) / max(1.0, caps.range_max * 0.08)) ** 2).astype(np.float32)
-                ridge = self._np_rng.uniform(0.15, 0.28, size=scan.shape).astype(np.float32)
-                scan = np.maximum(scan, gnd[None, :] * ridge)
             frame.scan = np.clip(scan, 0.0, 1.0)
+            if frame.rd is not None and frame.rd_v_axis is not None:
+                rd = np.zeros((frame.rd_v_axis.size, frame.r_axis.size), dtype=np.float32)
+                rd += self._np_rng.normal(0.01, 0.005, size=rd.shape).astype(np.float32)
+                if clutter_kind in ("sea_k", "urban_weibull"):
+                    iv0 = int(np.argmin(np.abs(frame.rd_v_axis)))
+                    rd[max(0, iv0 - 1) : min(rd.shape[0], iv0 + 2), :] = np.maximum(
+                        rd[max(0, iv0 - 1) : min(rd.shape[0], iv0 + 2), :],
+                        0.28 * scan.mean(axis=0)[None, :],
+                    )
+                vmax = max(1.0, float(np.max(np.abs(frame.rd_v_axis))))
+                for vt in v_targets:
+                    vr = (vt.x * vt.vx + vt.y * vt.vy) / max(1e-3, vt.rng)
+                    iv = int(np.argmin(np.abs(frame.rd_v_axis - vr)))
+                    ir = int(np.argmin(np.abs(frame.r_axis - vt.rng)))
+                    rd[max(0, iv - 1) : min(rd.shape[0], iv + 2), max(0, ir - 1) : min(rd.shape[1], ir + 2)] = np.maximum(
+                        rd[max(0, iv - 1) : min(rd.shape[0], iv + 2), max(0, ir - 1) : min(rd.shape[1], ir + 2)],
+                        vt.snr,
+                    )
+                frame.rd = np.clip(rd, 0.0, 1.0)
             if frame.rhi is not None and frame.el_axis is not None:
-                rhi = np.zeros_like(frame.rhi, dtype=np.float32)
+                rhi = np.zeros((frame.el_axis.size, frame.r_axis.size), dtype=np.float32)
                 for vt in v_targets:
                     el_r = math.radians(vt.el_deg)
                     pe = np.exp(-0.5 * ((frame.el_axis - el_r) / math.radians(3.5)) ** 2).astype(np.float32)

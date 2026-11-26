@@ -239,6 +239,10 @@ def normalize(
             keep = frame.r_axis <= caps.range_max * 1.02
             if keep.any() and not keep.all():
                 frame.scan = frame.scan[:, keep]
+                if frame.rd is not None and frame.rd.shape[1] == keep.size:
+                    frame.rd = frame.rd[:, keep]
+                if frame.rhi is not None and frame.rhi.shape[1] == keep.size:
+                    frame.rhi = frame.rhi[:, keep]
                 frame.r_axis = frame.r_axis[keep]
         if frame.az_axis is None:
             frame.az_axis = np.zeros(frame.scan.shape[0], dtype=np.float32)

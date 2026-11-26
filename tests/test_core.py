@@ -1922,6 +1922,87 @@ def test_hardware_readiness_guards() -> None:
     ok("真机防坑加固：静默断流看门狗、驱动波特率自适应、&record落盘、BLE断连与LD2450连帧矢量")
 
 
+def test_digital_twins_and_ew_battlefields() -> None:
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt5.QtCore import QSettings
+    from PyQt5.QtWidgets import QApplication
+    import radarscope.drivers  # noqa: F401
+    from radarscope.core.driver import available_drivers
+    from radarscope.core.radar_profiles import (
+        RADAR_PROFILES, generate_clutter_matrix, radar_snr_db,
+    )
+    from radarscope.core.sim_targets import EW_ENVIRONMENTS, ElectronicStation, compute_ew_metrics
+    from radarscope.ui.mainwindow import MainWindow
+
+    # 1. 真实物理参数雷达数字孪生：5 套主流体制（77G车载/24G室内/X波段航海/3D激光/机载AESA）均可独立产出真实能力与帧
+    drvs = available_drivers()
+    rng = np.random.default_rng(123)
+    for pid, prof in RADAR_PROFILES.items():
+        assert pid in drvs, f"数字孪生驱动未注册: {pid}"
+        snr_near = radar_snr_db(prof, prof.range_max * 0.25, 10.0, swerling=0)
+        snr_far = radar_snr_db(prof, prof.range_max * 0.90, 10.0, swerling=0)
+        assert snr_near > snr_far, f"{pid} 雷达方程近强远弱物理单调性异常: {snr_near} vs {snr_far}"
+        d = drvs[pid]()
+        d.open()
+        caps = d.capabilities()
+        assert abs(caps.range_max - prof.range_max) < 1e-3
+        assert caps.has_range_doppler == prof.has_doppler
+        assert caps.has_elevation == prof.has_elevation
+        fr = None
+        dl = time.monotonic() + 0.5
+        while fr is None and time.monotonic() < dl:
+            time.sleep(0.01)
+            fr = d.read()
+        d.close()
+        assert fr is not None and fr.has_scan and fr.meta.get("profile_id") == pid
+        if prof.has_doppler:
+            assert fr.rd is not None and fr.rd_v_axis is not None
+        if prof.has_elevation:
+            assert fr.rhi is not None and fr.el_axis is not None
+
+    sea = generate_clutter_matrix("sea_k", 32, np.linspace(20.0, 6000.0, 64), rng)
+    urb = generate_clutter_matrix("urban_weibull", 32, np.linspace(1.0, 150.0, 64), rng)
+    assert float(np.max(sea)) > 0.05 and float(np.max(urb)) > 0.05
+
+    # 2. 电子战物理模型：Spot 功率集中 JSR 高于 Barrage；SOJ 下 SLC 副瓣对消可显著压低 JSR 提升烧穿距离；RGPO 抛物线牵引
+    m_barrage = compute_ew_metrics("barrage", 0.6, 20000.0, 15.0, 36.0)
+    m_spot = compute_ew_metrics("spot", 0.6, 20000.0, 15.0, 36.0)
+    assert m_spot["jsr_db"] > m_barrage["jsr_db"], "瞄准压制功率集中应高于宽带阻塞"
+    m_soj_raw = compute_ew_metrics("spot", 0.6, 20000.0, 15.0, 36.0, jam_regime="soj", eccm_slc=False)
+    m_soj_slc = compute_ew_metrics("spot", 0.6, 20000.0, 15.0, 36.0, jam_regime="soj", eccm_slc=True)
+    assert m_soj_slc["burn_through_m"] > m_soj_raw["burn_through_m"], "开启 SLC 副瓣对消后 SOJ 烧穿距离应增大"
+
+    # 3. 电子战控制台内部独立切换空/海/城/车四套战场态势，不退出 ew 场景且不影响全局普通场景
+    settings = QSettings("RadarScope", "Console")
+    saved = {k: settings.value(k) for k in ("driver", "sim_mode", "cfar_mode", "land_mask", "ais_lat", "ais_lon")}
+    _app = QApplication.instance() or QApplication([])
+    w = MainWindow()
+    try:
+        w._apply_scenario("ew")
+        _app.processEvents()
+        assert w.ew_widget.cb_scene.count() == len(EW_ENVIRONMENTS)
+        for env_key in ("ew_sea", "ew_urban", "ew_convoy", "ew_air"):
+            idx = w.ew_widget.cb_scene.findData(env_key)
+            assert idx >= 0, f"缺少电子战战场态势: {env_key}"
+            w.ew_widget.cb_scene.setCurrentIndex(idx)
+            _app.processEvents()
+            assert w.sim_station.scenario == "ew" and w.sim_station.ew_env == env_key
+            assert len(w.sim_station.objects) >= 2
+            assert not w.dock_ew.isHidden()
+        assert w.ew_widget.minimumSizeHint().width() <= 450
+        w._exit_scenario_to_classic()
+        w._disconnect("")
+    finally:
+        w.close()
+        for k, v in saved.items():
+            if v is None:
+                settings.remove(k)
+            else:
+                settings.setValue(k, v)
+    ok("真实物理参数雷达数字孪生、电子战空/海/城/车多战场态势与真实物理建模")
+
+
 def main() -> int:
     print("RadarScope 核心测试")
     for fn in (test_codec, test_ld2450_sign, test_pipeline, test_alarm,
@@ -1942,7 +2023,8 @@ def main() -> int:
                test_e6_mbtiles_nmea_and_land_mask, test_e8_ros_and_mcap_export,
                test_e7_3d_rhi_scope, test_ux_cohesion_and_controller_links,
                test_tracker_gnn_mn_kalman3d_and_imm, test_workspace_docks_canvas_edit_and_i18n,
-               test_mission_recorder_and_recompute_compare, test_hardware_readiness_guards):
+               test_mission_recorder_and_recompute_compare, test_hardware_readiness_guards,
+               test_digital_twins_and_ew_battlefields):
         fn()
     print(f"\n全部通过：{PASS} 组")
     return 0

@@ -96,6 +96,8 @@ _EN: dict[str, str] = {
     "设置": "Settings",
     # 电子战面板标签
     "自动场景": "Auto Scenario",
+    "战场态势": "EW Battlefield",
+    "干扰体制": "Jamming Regime",
     "速度倍率": "Speed Scale",
     "随机出现": "Spawn Random",
     "删除选中": "Remove",

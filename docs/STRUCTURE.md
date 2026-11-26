@@ -76,7 +76,8 @@
 | `maptiles.py` | Web Mercator 换算、瓦片下载、磁盘缓存 | `zoom_for_range()` **从 z=18 往下找**第一个装得下的；`prune(200MB)` 清最旧；UA 与归属见 `PROVIDERS` |
 | `selftest.py` | `run_core_checks()`：跑真实驱动 + 算法，返回 `(ok, 摘要)` | 三个入口共用：`main.py --selftest`、帮助菜单、`tools/check.py` |
 | `paths.py` | 开发/打包两套数据目录解析 | `data_dir()`；打包版落到 `%LOCALAPPDATA%\Lookout\data` |
-| `sim_targets.py` | 模拟电子站引擎：`ElectronicStation` 动态/行业场景 + 教学级电子对抗（噪声/DRFM/RGPO/VGPO/箔条/ISRJ + ECCM/火控推演） | `set_scenario()`、`inject()`、`merge_into_frame()`、`compute_ew_metrics()` |
+| `sim_targets.py` | 模拟电子站引擎：`ElectronicStation` 动态/行业场景 + 多战场电子对抗（空/海/城/车态势、SSJ/SOJ、压制/DRFM/RGPO/VGPO/箔条/ISRJ + ECCM 捷变/SLC 副瓣对消） | `set_scenario()`、`set_ew_environment()`、`inject()`、`merge_into_frame()`、`compute_ew_metrics()` |
+| `radar_profiles.py` | 真实雷达物理参数数字孪生库（TI AWR1843 / HLK-LD2450 / Furuno X波段 / Ouster OS1-64 / 机载 AESA）+ 雷达方程 / Swerling 起伏 / K-分布海杂波 / Weibull 城市杂波 | `RADAR_PROFILES`、`radar_snr_db()`、`generate_clutter_matrix()` |
 | `custom_proto.py` | 零代码通用协议解析引擎：7 套开箱预设（NMEA `$--TTM`、CSV/极坐标 `$SCAN`、TF/CAN-UDP/Modbus 结构体二进制帧） | `builtin_presets()`、`preview_sample()`、`build_driver_class()` |
 | `nmea_nav.py` | NMEA 本船定位与航向解析：`$GPGGA/$GNRMC/$HEHDT/$RARSD` 校验与 UDP 监听 | `NmeaOwnShip`、`feed_line()`、`snapshot()` |
 | `ros_export.py` | ROS 2 / Foxglove 遥测导出与二进制 MCAP v0 日志封装 | `to_ros_laserscan()`、`to_ros_pointcloud2()`、`write_mcap_json_log()` |
@@ -91,6 +92,7 @@
 | `__init__.py` | — | — | 导入即注册所有驱动，**加驱动只需加一行 import** |
 | `simulator.py` | sim | sector | 合成雷达：旋转/凝视双模式、底噪、静止杂波；唯一实现 `set_control()`（gain/STC/FTC）的驱动 |
 | `sim_aesa.py` | sim | rd | 相控阵/脉冲多普勒：9 目标 + RD 图 + IFF + 威胁分级 |
+| `twins.py` | sim | omni/sector/rd | 真实雷达物理参数数字孪生驱动（AWR1843 77G / LD2450 24G / Furuno X波段 / Ouster OS1-64 / 机载 AESA） |
 | `multi.py` | sim / fusion | fusion | 多站融合：6×60° 全向演示 + 真实组网入口 |
 | `ld2410.py` | device | point | 海凌科存在感应，9 距离门能量 |
 | `ld2450.py` | device | sector | 海凌科三目标跟踪，直接给 x/y；**bit15 是独立符号位，不是补码** |

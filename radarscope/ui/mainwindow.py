@@ -279,6 +279,7 @@ class MainWindow(ConnectionController, ExportController,
         self.ew_widget = SimStationWidget(self.sim_station, 6.0, show_done=False, parent=self)
         self.ew_widget.changed.connect(self._on_sim_station_changed)
         self.ew_widget.scenarioSelected.connect(lambda sc: self._apply_scenario(sc))
+        self.ew_widget.ewEnvSelected.connect(self._on_ew_env_selected)
         self.ew_widget.jamModeSelected.connect(self._on_ew_panel_jam_selected)
         self.ew_widget.exitToNormalRequested.connect(self._exit_scenario_to_classic)
         self.dock_ew = QDockWidget("电子战与场景控制台", self)

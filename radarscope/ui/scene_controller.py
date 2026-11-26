@@ -57,7 +57,17 @@ class SceneAndMapController:
         if not banner_text:
             if sc == "ew" or jm != "none":
                 jm_tag = jm.upper() if jm != "none" else "STANDBY"
-                banner_text = f"电子战对抗场景 ({jm_tag}) · 已展开电子战控制台 · 可对比 CA / OS / GO-CFAR 与烧穿曲线"
+                env_name = {
+                    "ew_air": "空中防空",
+                    "ew_sea": "海面舰艇",
+                    "ew_urban": "陆地城市",
+                    "ew_convoy": "多车集群",
+                    "custom": "自定义雷达",
+                }.get(self.sim_station.ew_env, self.sim_station.ew_env)
+                reg_tag = str(getattr(self.sim_station, "jam_regime", "ssj")).upper()
+                banner_text = (
+                    f"电子战场景 [{env_name} · {jm_tag} · {reg_tag}] · 可切换下方战场态势 / CA·OS·GO-CFAR 与烧穿曲线"
+                )
             elif sc != "none":
                 prof = recommended_profile(sc) or {}
                 banner_text = str(prof.get("banner") or f"当前场景：{sc}")
@@ -379,11 +389,7 @@ class SceneAndMapController:
                 self._sync_dock_chrome()
             self._sync_scene_ui()
             self._ensure_sim_running(f"干扰:{mode.upper()}")
-            m = compute_ew_metrics(
-                mode, self.sim_station.jam_jsr, float(self.range_spin.value()),
-                self.sim_station.jam_az_deg, self.sim_station.jam_bw_deg,
-                self.sim_station.eccm_agility,
-            )
+            m = self.sim_station.ew_metrics(float(self.range_spin.value()))
             self.log.push("warn", f"已进入电子战场景（{mode} · JSR {m['jsr_db']:+.1f} dB · 烧穿 {m['burn_through_m']:.1f} m）")
         else:
             self.sim_station.jam_mode = "none"
@@ -399,6 +405,36 @@ class SceneAndMapController:
             self._sync_dock_chrome()
             self._sync_scene_ui()
             self.log.push("info", "已关闭电子战干扰并收起电子战控制台")
+
+    def _on_ew_env_selected(self, env_key: str) -> None:
+        """在电子战控制台内部切换多战场态势（空中/海面/城市/多车），不影响外部正常场景逻辑。"""
+        is_real_dev = (
+            self.src_combo.currentData() == "device"
+            and self.driver is not None
+            and not getattr(self.driver, "simulated", False)
+        )
+        env_cfg = {
+            "ew_air": (20000.0, "go", 800.0),
+            "ew_sea": (6000.0, "go", 240.0),
+            "ew_urban": (150.0, "os", 8.0),
+            "ew_convoy": (80.0, "os", 4.5),
+        }.get(env_key)
+        if env_cfg is not None and not is_real_dev:
+            rng_m, cfar_val, gate_m = env_cfg
+            if abs(float(self.range_spin.value()) - rng_m) > 1.0:
+                self.range_spin.setValue(rng_m)
+            if hasattr(self, "cfar_combo"):
+                ci = self.cfar_combo.findData(cfar_val)
+                if ci >= 0:
+                    self.cfar_combo.blockSignals(True)
+                    self.cfar_combo.setCurrentIndex(ci)
+                    self.cfar_combo.blockSignals(False)
+                    self._cfar_mode = cfar_val
+            self.tracker.configure(gate_m=gate_m, confirm_hits=2, confirm_window=4)
+        self.sim_station.scenario = "ew"
+        self.sim_station.set_ew_environment(env_key, float(self.range_spin.value()))
+        self._sync_scene_ui()
+        self.log.push("ok", f"已切换电子战战场态势：{env_key}（目标 {len(self.sim_station.objects)} 批）")
 
     def _on_ew_panel_jam_selected(self, jm: str) -> None:
         """电子战控制台内切换干扰样式：选回关闭干扰时自动收起 EW 台并还原日常视图。"""
@@ -435,6 +471,7 @@ class SceneAndMapController:
             dlg = SimStationDialog(self.sim_station, float(self.range_spin.value()), self)
             dlg.changed.connect(self._on_sim_station_changed)
             dlg.scenarioSelected.connect(lambda sc: self._apply_scenario(sc))
+            dlg.ewEnvSelected.connect(self._on_ew_env_selected)
             dlg.exitToNormalRequested.connect(self._exit_scenario_to_classic)
             dlg.finished.connect(lambda _r=0: self._sync_scene_ui())
             self._sim_dlg = dlg

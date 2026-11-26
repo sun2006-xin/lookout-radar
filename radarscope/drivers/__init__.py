@@ -10,11 +10,18 @@ from .multi import MultiRadarDriver, MultiSectorDemoDriver
 from .replay import ReplayDriver
 from .sim_aesa import AesaSimDriver
 from .simulator import SimulatorDriver
+from .twins import (
+    TwinAirborneAesaDriver, TwinAWR1843Driver, TwinFurunoMarineDriver,
+    TwinLD2450Driver, TwinOusterLidarDriver,
+)
 from .ultrasonic import UltrasonicDriver
 from . import custom_generic as _custom_generic  # noqa: F401  自动注册通用协议适配器
 
 __all__ = [
     "LD2410Driver", "LD2450Driver", "LDLidarDriver",
     "MultiRadarDriver", "MultiSectorDemoDriver",
-    "ReplayDriver", "AesaSimDriver", "SimulatorDriver", "UltrasonicDriver",
+    "ReplayDriver", "AesaSimDriver", "SimulatorDriver",
+    "TwinAWR1843Driver", "TwinLD2450Driver", "TwinFurunoMarineDriver",
+    "TwinOusterLidarDriver", "TwinAirborneAesaDriver",
+    "UltrasonicDriver",
 ]
