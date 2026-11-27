@@ -126,11 +126,18 @@ class _BaseTwinDriver(RadarDriver):
     def close(self) -> None:
         self._opened = False
 
-    def set_control(self, param: str, value: float) -> bool:
-        if param not in self._ctl:
-            return False
-        self._ctl[param] = float(value)
-        return True
+    def set_control(self, **params) -> bool:
+        """下发模拟增益 / STC / FTC 参数（兼容 ControlDialog 关键字参数契约）。"""
+        changed = False
+        for param, value in params.items():
+            if param in self._ctl:
+                self._ctl[param] = float(value)
+                changed = True
+        return changed
+
+    def control_state(self) -> dict:
+        """返回当前数字孪生控制参数，供 ControlDialog 回显。"""
+        return dict(self._ctl)
 
     def _step_physics(self, dt: float) -> None:
         p = self._p

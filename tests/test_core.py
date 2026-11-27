@@ -2099,6 +2099,389 @@ def test_universal_protocol_and_history_db() -> None:
     ok("多品牌通用协议适配（JSON/极坐标二进制/连包合并）与历史数据库明细闭环")
 
 
+def test_phase0_foundation_hardening() -> None:
+    """阶段0地基止血与回归：二进制自定义驱动、数字孪生控制、时间轴无scan渲染、融合旋转、TrueMotion、360°CFAR、UDP读行与RHI投影。"""
+    import math
+    import socket
+    from PyQt5.QtCore import QPoint, QPointF
+    from PyQt5.QtWidgets import QApplication
+    from radarscope.core.codec import FrameSpec, StreamDecoder
+    from radarscope.core.custom_proto import CustomProtocolSpec, build_driver_class
+    from radarscope.core.fusion import FusionEngine, SensorSpec, local_vec_to_global
+    from radarscope.core.model import Capabilities, RadarFrame, Target
+    from radarscope.core.pipeline import detect_targets
+    from radarscope.core.storage import Store
+    from radarscope.core.tracker import Tracker
+    from radarscope.core.transport import UdpTransport
+    from radarscope.drivers.twins import TwinFurunoMarineDriver
+    from radarscope.ui.ppi import PPIWidget
+    from radarscope.ui.rhiscope import RHIScopeWidget
+    from radarscope.ui.timeline import TimelineDialog
+
+    # 1. StreamDecoder.rejected 别名 + 二进制 CustomProto 驱动端到端 read() 无 AttributeError
+    dec = StreamDecoder(FrameSpec(header=b"\xAA\x55", fixed_total=4))
+    assert dec.rejected == 0
+    bin_spec = CustomProtocolSpec(
+        id="t_bin_drv_fix", label="二进制驱动测试", mode="binary_polar",
+        header_hex="AA 56", tail_hex="0D 0A", frame_len=10, endian="<",
+        payload_offset=2, struct_fmt="HhH", scale=0.01, angle_scale=0.1,
+    )
+    bin_cls = build_driver_class(bin_spec)
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+        fp = Path(td) / "pol.bin"
+        fp.write_bytes(bytes.fromhex("AA 56 2C 01 E2 FF 55 00 0D 0A"))
+        d = bin_cls()
+        d.open(endpoint=f"file://{fp}")
+        fr = None
+        dl = time.monotonic() + 0.5
+        while fr is None and time.monotonic() < dl:
+            fr = d.read()
+        d.close()
+        assert fr is not None and len(fr.targets) == 1 and abs(fr.targets[0].rng - 3.0) < 0.05
+
+        # 2. 数字孪生驱动 set_control(**params) + control_state()
+        twin = TwinFurunoMarineDriver()
+        twin.open()
+        assert twin.set_control(gain=2.4, stc=0.35, ftc=0.15)
+        st_ctl = twin.control_state()
+        assert abs(st_ctl["gain"] - 2.4) < 1e-6 and abs(st_ctl["stc"] - 0.35) < 1e-6
+        twin.close()
+
+        # 3. TimelineDialog 在 scan=None 时正常向 PPI 更新航迹并包含 3D 高度
+        _app = QApplication.instance() or QApplication([])
+        st = Store(Path(td) / "tl.db")
+        sid = st.start_session("sim", "", Capabilities(name="TL", range_max=100.0))
+        st.record_tracks(500.0, [Target(x=10.0, y=20.0, z=15.0, rcs=3.2, snr=0.9, tid=7)])
+        st.end_session()
+        dlg = TimelineDialog(st, sid, {"name": "TL", "range_max": 100.0, "scan_rate": 1.0})
+        dlg._render_at(0.1)
+        assert len(dlg.ppi._tracks) == 1 and dlg.ppi._tracks[0].tid == 7
+        assert abs(dlg.ppi._tracks[0].z - 15.0) < 1e-3
+        dlg.ppi.resize(240, 240)
+        dlg.ppi.grab()
+        dlg.close()
+        st.close()
+
+    # 4. 多站融合：速度矢量按 bearing 旋转 + off-origin 欺骗检测 + lut_key 含安装位移
+    s_east = SensorSpec(name="E", bearing_deg=90.0, x=-5.0, y=0.0, fov_deg=120.0, range_max=20.0)
+    gvx, gvy = local_vec_to_global(0.0, 5.0, s_east)
+    assert abs(gvx - 5.0) < 1e-5 and abs(gvy) < 1e-5, (gvx, gvy)
+    eng = FusionEngine(range_max=20.0)
+    eng.attach(SensorSpec(name="S1", x=-2.0, y=0.0, bearing_deg=0.0, fov_deg=120.0, range_max=15.0), None)
+    eng.attach(SensorSpec(name="S2", x=2.0, y=0.0, bearing_deg=0.0, fov_deg=120.0, range_max=15.0), None)
+    for c in eng._children:
+        c.last_frame_t = time.monotonic()
+        c.frame = RadarFrame(timestamp=c.last_frame_t, targets=[])
+    fused = eng._fuse_targets([(s_east, Target(x=0.0, y=5.0, vx=0.0, vy=4.0, snr=0.8), 0.0, -5.0, 5.0)])
+    assert abs(fused[0].vx - 4.0) < 1e-5 and abs(fused[0].vy) < 1e-5
+    decep = eng._detect_single_station_deception([Target(x=0.0, y=10.0, views=1)], eng._children[0].last_frame_t)
+    assert len(decep) == 1
+
+    # 5. PPI 真运动 + Head-Up 顶点命中与屏幕反解一致性 + 碰撞最大值
+    ppi = PPIWidget()
+    ppi.resize(400, 400)
+    ppi.set_capabilities(Capabilities(has_scan=True, has_azimuth=True, az_fov=360.0, range_min=0.5, range_max=50.0))
+    ppi.set_orientation(False, 90.0)
+    ppi.true_motion = True
+    ppi.set_origin(5.0, 3.0)
+    ppi.show_zones = True
+    ppi.set_alarm_zones([], poly_zones=[([(10.0, 12.0), (14.0, 12.0), (12.0, 16.0)], "warn", "pz1")])
+    cx, cy, R = ppi._geometry()
+    offx, offy = ppi._zone_offset_px(cx, cy, R)
+    sp = ppi._pt(cx, cy, math.hypot(10.0, 12.0) / 50.0 * R, math.atan2(10.0, 12.0))
+    hit_pt = QPoint(int(round(sp.x() - offx)), int(round(sp.y() - offy)))
+    hit = ppi._hit_zone_handle(hit_pt)
+    assert hit is not None and hit[0] == "poly_vtx"
+    bx, by = ppi._screen_to_body(QPointF(sp.x() - offx, sp.y() - offy)) or (0.0, 0.0)
+    assert abs(bx - 10.0) < 0.4 and abs(by - 12.0) < 0.4
+
+    # 6. 360° CFAR 跨 ±180° 接缝无漏检 & 慢速机械雷达 dt=2.5s 不截断
+    az360 = np.radians(np.linspace(-180.0, 180.0, 180, endpoint=False)).astype(np.float32)
+    r_ax = np.linspace(1.0, 20.0, 64, dtype=np.float32)
+    sc360 = np.full((180, 64), 0.05, dtype=np.float32)
+    sc360[0, 30] = 0.95
+    dets_wrap = detect_targets(RadarFrame(timestamp=1.0, scan=sc360, az_axis=az360, r_axis=r_ax),
+                               threshold=0.25, cfar_mode="auto")
+    assert len(dets_wrap) >= 1 and abs(dets_wrap[0].rng - float(r_ax[30])) < 0.5
+    trk = Tracker(gate_m=80.0, max_missed_s=6.0)
+    trk.update([Target(x=0.0, y=5000.0)], dt=2.5)
+    trk.update([Target(x=0.0, y=5025.0)], dt=2.5)
+    res_t = trk.update([Target(x=0.0, y=5050.0)], dt=2.5)
+    assert len(res_t) == 1 and res_t[0].vy > 2.0 and res_t[0].cov_x > 1.0, (
+        f"慢速雷达 dt=2.5s 速度或远距协方差异常: vy={res_t[0].vy}, cov_x={res_t[0].cov_x}"
+    )
+    missed_res = trk.update([], dt=2.5)
+    assert len(missed_res) == 1 and abs(missed_res[0].missed - 2.5) < 1e-6
+
+    # 7. UdpTransport.readline() 支持单报文多字节直接按行切分
+    srv = UdpTransport("127.0.0.1", 0, timeout=0.5)
+    srv.open()
+    assert srv._sock is not None
+    port = srv._sock.getsockname()[1]
+    cli = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    cli.sendto(b"$RATTM,01,1.25,045.0,T*00\r\n", ("127.0.0.1", port))
+    line = srv.readline()
+    cli.close()
+    srv.close()
+    assert line.startswith(b"$RATTM") and line.endswith(b"\n")
+
+    # 8. RHI 剖面 (el, r) -> (r, z) 几何重采样渲染无异常
+    rhi_w = RHIScopeWidget()
+    rhi_w.resize(320, 160)
+    el_ax = np.radians(np.linspace(0.0, 30.0, 16)).astype(np.float32)
+    rhi_mat = np.zeros((16, 40), dtype=np.float32)
+    rhi_mat[8, 20] = 0.95
+    rhi_w.push_frame(
+        RadarFrame(timestamp=1.0, rhi=rhi_mat, el_axis=el_ax, r_axis=np.linspace(1.0, 40.0, 40, dtype=np.float32)),
+        [Target(x=0.0, y=20.0, z=5.0, tid=1)],
+    )
+    rhi_w.grab()
+    ok("阶段0地基止血（二进制自定义驱动/数字孪生控制/Timeline无scan/融合旋转/360°CFAR/UDP行切分/RHI对齐）")
+
+
+def test_g1_protocols_and_g2_eval() -> None:
+    """G1 行业标准协议（TI mmWave TLV / ADS-B / Open Drone ID / ASTERIX CAT048+240 / AIS 多分片）与 G2 算法定量基准（GOSPA/OSPA/CT-IMM/马氏门限/2D OS-CFAR 亚像素插值）。"""
+    import math
+    import struct
+    from radarscope.core.ais import AisDecoder, make_aivdm
+    from radarscope.core.metrics import evaluate_tracker_sequence, gospa_distance, ospa_distance
+    from radarscope.core.model import RadarFrame, Target
+    from radarscope.core.pipeline import detect_targets
+    from radarscope.core.tracker import Tracker
+    from radarscope.drivers.adsb import AdsbDriver
+    from radarscope.drivers.asterix import AsterixDriver
+    from radarscope.drivers.odid import OpenDroneIdDriver
+    from radarscope.drivers.ti_mmwave import TI_MAGIC, TIMmWaveDriver
+
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+        # 1. TI IWR6843 UART TLV (Type 1 点云 + Type 7 SideInfo SNR)
+        tlv1 = struct.pack("<2I", 1, 16) + struct.pack("<4f", 3.0, 8.0, 1.5, -2.2)
+        tlv7 = struct.pack("<2I", 7, 4) + struct.pack("<2h", 240, 50)
+        tot = 40 + len(tlv1) + len(tlv7)
+        ti_pkt = struct.pack("<8s8I", TI_MAGIC, 0x03050000, tot, 0xA6843, 1, 100, 1, 2, 0) + tlv1 + tlv7
+        ti_p = Path(td) / "ti.bin"
+        ti_p.write_bytes(b"\xff\x00" + ti_pkt)
+        ti_drv = TIMmWaveDriver()
+        ti_drv.open(endpoint=f"file://{ti_p}?chunk=32&interval=0.0&loop=0")
+        fr = None
+        for _ in range(10):
+            fr = ti_drv.read()
+            if fr is not None:
+                break
+        ti_drv.close()
+        assert fr is not None and len(fr.targets) == 1
+        assert abs(fr.targets[0].x - 3.0) < 1e-4 and abs(fr.targets[0].z - 1.5) < 1e-4 and fr.targets[0].snr > 0.6
+
+        # 2. ADS-B (SBS-1 + aircraft.json)
+        adsb_p = Path(td) / "adsb.txt"
+        adsb_p.write_text(
+            "MSG,3,1,1,780A1B,1,2026/11/26,10:00:00,2026/11/26,10:00:00,,10000,,,39.95,116.45,0\n"
+            "MSG,4,1,1,780A1B,1,2026/11/26,10:00:00,2026/11/26,10:00:00,,,300,90,,,600\n"
+            "MSG,1,1,1,780A1B,1,2026/11/26,10:00:00,2026/11/26,10:00:00,CCA1234\n",
+            encoding="utf-8",
+        )
+        adsb_drv = AdsbDriver()
+        adsb_drv.open(endpoint=f"file://{adsb_p}?lat=39.9&lon=116.4&chunk=512&interval=0.0&loop=0")
+        fr_ad = adsb_drv.read()
+        adsb_drv.close()
+        assert fr_ad is not None and len(fr_ad.targets) == 1
+        assert fr_ad.targets[0].cls == "CCA1234" and fr_ad.targets[0].z > 3000.0 and fr_ad.targets[0].vx > 100.0
+
+        # 3. Open Drone ID (25B ASTM F3411 Location 二进制帧)
+        lat_i, lon_i = int(39.905 * 1e7), int(116.405 * 1e7)
+        odid_pkt = struct.pack("<BBBBb2i3H6B", 0x10, 0x00, 90, 40, 2, lat_i, lon_i, 2000, 2100, 2240, 0, 0, 0, 0, 0, 0)
+        assert len(odid_pkt) == 25
+        od_p = Path(td) / "odid.bin"
+        od_p.write_bytes(odid_pkt)
+        od_drv = OpenDroneIdDriver()
+        od_drv.open(endpoint=f"file://{od_p}?lat=39.9&lon=116.4&chunk=64&interval=0.0&loop=0")
+        fr_od = od_drv.read()
+        od_drv.close()
+        assert fr_od is not None and len(fr_od.targets) == 1 and fr_od.targets[0].cls == "UAV" and fr_od.targets[0].z > 100.0
+
+        # 4. ASTERIX CAT 048 (FRN 1,4,6 -> FSPEC=0b10010100 = 0x94) + CAT 240
+        rec048 = bytes([0x94, 0x01, 0x02]) + struct.pack(">HH", 2560, 16384) + struct.pack(">h", 400)  # 10 NM @ 90 deg, FL100
+        blk048 = struct.pack(">BH", 48, 3 + len(rec048)) + rec048
+        # CAT 240: FRN 1,5,7 -> FSPEC 0b10001010 = 0x8A
+        cells = bytes([10, 20, 240, 30])
+        rec240 = bytes([0x8A, 0x01, 0x02]) + struct.pack(">HHII", 8192, 8300, 0, 1000) + struct.pack(">H", len(cells)) + cells
+        blk240 = struct.pack(">BH", 240, 3 + len(rec240)) + rec240
+        ast_p = Path(td) / "ast.bin"
+        ast_p.write_bytes(blk048 + blk240)
+        ast_drv = AsterixDriver()
+        ast_drv.open(endpoint=f"file://{ast_p}?chunk=512&interval=0.0&loop=0")
+        fr_ast = ast_drv.read()
+        ast_drv.close()
+        assert fr_ast is not None and len(fr_ast.targets) == 1 and fr_ast.has_scan
+        assert abs(fr_ast.targets[0].rng - 18520.0) < 50.0 and fr_ast.targets[0].z > 3000.0
+
+    # 5. AIS 多分片 Type 5 船名重组并关联到 Type 1 位置报告
+    def _encode_6bit_text(s: str, nchars: int) -> str:
+        s = s.ljust(nchars, "@")[:nchars]
+        out = []
+        for ch in s:
+            v = ord(ch) - 64 if 64 <= ord(ch) < 96 else ord(ch)
+            out.append(f"{v & 0x3F:06b}")
+        return "".join(out)
+
+    bits5 = (
+        f"{5:06b}" + "00" + f"{412345678:030b}" + "00" + f"{123:030b}"
+        + _encode_6bit_text("LOOKOUT", 7) + _encode_6bit_text("STARLIGHT", 20)
+    ).ljust(240, "0")
+    mid = len(bits5) // 2
+    mid -= mid % 6
+    s5_1 = make_aivdm(bits5[:mid], fill=0, chan="A", frag_cnt=2, frag_no=1, seq_id="3")
+    s5_2 = make_aivdm(bits5[mid:], fill=0, chan="A", frag_cnt=2, frag_no=2, seq_id="3")
+    dec = AisDecoder()
+    assert dec.feed(s5_1) is None
+    st5 = dec.feed(s5_2)
+    assert st5 is not None and st5.kind == 5 and st5.name == "STARLIGHT"
+    bits1 = (
+        f"{1:06b}00{412345678:030b}0000" + "0" * 8 + f"{100:010b}0"
+        + f"{int(116.4 * 600000) & ((1 << 28) - 1):028b}"
+        + f"{int(39.9 * 600000) & ((1 << 27) - 1):027b}"
+        + f"{900:012b}{90:09b}"
+    ).ljust(168, "0")
+    pos1 = dec.feed(make_aivdm(bits1))
+    assert pos1 is not None and pos1.name == "STARLIGHT"
+
+    # 6. G2: 2D OS-CFAR + 亚像素抛物线峰值插值 + GOSPA / CT-IMM 马氏门限评测
+    r_ax = np.linspace(1.0, 20.0, 20, dtype=np.float32)  # 步长 1.0 m
+    az_ax = np.linspace(-0.5, 0.5, 11, dtype=np.float32)
+    sc = np.full((11, 20), 0.04, dtype=np.float32)
+    # 真峰值位于 r=10.3m（j=9 与 j=10 之间）
+    sc[5, 8], sc[5, 9], sc[5, 10], sc[5, 11] = 0.25, 0.85, 0.70, 0.20
+    dets_sub = detect_targets(RadarFrame(timestamp=1.0, scan=sc, az_axis=az_ax, r_axis=r_ax),
+                              threshold=0.20, cfar_mode="os")
+    assert len(dets_sub) >= 1 and 10.05 < dets_sub[0].rng < 10.75, f"亚像素插值未生效: {dets_sub[0].rng}"
+
+    g = gospa_distance([Target(x=0, y=10), Target(x=10, y=10)], [Target(x=0.3, y=10)], c=5.0)
+    o, _, _ = ospa_distance([Target(x=0, y=10)], [Target(x=0.3, y=10)], c=5.0)
+    assert g["tp"] == 1 and g["fn"] == 1 and g["fp"] == 0 and abs(o - 0.3) < 1e-6
+
+    truth_seq = [[Target(x=10.0 + k * 0.5, y=20.0 + math.sin(k * 0.15) * 4.0, tid=1)] for k in range(30)]
+    det_seq = [[Target(x=t[0].x + 0.08, y=t[0].y - 0.05, snr=0.9)] for t in truth_seq]
+    res_imm = evaluate_tracker_sequence(
+        truth_seq, det_seq,
+        Tracker(gate_m=3.0, filter_mode="imm3d", assoc_mode="gnn", gating_mode="mahalanobis"),
+        dt=0.1, c=5.0,
+    )
+    assert res_imm["mean_gospa"] < 1.0 and res_imm["id_switches"] == 0, res_imm
+    ok("G1 行业标准协议（TI TLV/ADS-B/ODID/ASTERIX/AIS多分片）与 G2 定量评测/CT-IMM/亚像素OS-CFAR")
+
+
+def test_h1_h2_i1_runtime_and_geodesy() -> None:
+    """H1/H2/I1 完整软件地基：WGS84<->ECEF<->ENU + 4/3 Re 视距、RSF2 归档与索引、原始回波瀑布图、CustomProto 多目标+CRC16、Headless RadarEngineRuntime 与 WS 鉴权。"""
+    import socket
+    import struct
+    import threading
+    from PyQt5.QtWidgets import QApplication
+    from radarscope.core.custom_proto import CustomProtocolSpec, _crc16_modbus, parse_custom_binary
+    from radarscope.core.geodesy import (
+        earth_curvature_drop_m, ecef_to_geodetic, enu_to_geodetic,
+        geodetic_to_ecef, geodetic_to_enu, radar_horizon_m,
+    )
+    from radarscope.core.model import Capabilities, RadarFrame, Target
+    from radarscope.core.ros_export import to_ros_laserscan, write_mcap_json_log
+    from radarscope.core.runtime import RadarEngineRuntime
+    from radarscope.core.storage import FrameArchive
+    from radarscope.ui.waterfall import WaterfallWidget
+    from tools.ws_bridge import BridgeServer
+
+    # 1. WGS84 <-> ECEF <-> ENU 往返与 4/3 R_e 视距
+    X, Y, Z = geodetic_to_ecef(31.2304, 121.4737, 50.0)
+    lat2, lon2, alt2 = ecef_to_geodetic(X, Y, Z)
+    assert abs(lat2 - 31.2304) < 1e-6 and abs(lon2 - 121.4737) < 1e-6 and abs(alt2 - 50.0) < 1e-3
+    e, n, u = geodetic_to_enu(31.3304, 121.5737, 150.0, 31.2304, 121.4737, 10.0)
+    rlat, rlon, ralt = enu_to_geodetic(e, n, u, 31.2304, 121.4737, 10.0)
+    assert abs(rlat - 31.3304) < 1e-6 and abs(rlon - 121.5737) < 1e-6 and abs(ralt - 150.0) < 1e-2
+    assert radar_horizon_m(25.0, 100.0) > 50_000.0 and earth_curvature_drop_m(50_000.0) > 100.0
+
+    # 2. CustomProto 多目标二进制循环 + CRC16-Modbus 校验
+    spec = CustomProtocolSpec(
+        id="t_crc_multi", label="CRC多目标", mode="binary_fixed",
+        header_hex="AA 55", frame_len=12, endian="<", payload_offset=2,
+        struct_fmt="hh", scale=0.01, checksum="crc16_modbus", multi_target=True,
+    )
+    body = bytes.fromhex("AA 55") + struct.pack("<hhhh", 100, 300, -200, 400)
+    pkt = body + struct.pack("<H", _crc16_modbus(body))
+    tgts = parse_custom_binary(spec, pkt)
+    assert len(tgts) == 2 and abs(tgts[0].y - 3.0) < 1e-3 and abs(tgts[1].x + 2.0) < 1e-3
+    assert parse_custom_binary(spec, pkt[:-1] + bytes([pkt[-1] ^ 0xFF])) == []
+
+    # 3. RSF2 全维度归档（保留 RD/RHI/Targets + O(1) 索引跳转）+ Chunked MCAP
+    az = np.radians(np.linspace(-30.0, 30.0, 9, dtype=np.float32))
+    r_ax = np.linspace(1.0, 20.0, 16, dtype=np.float32)
+    v_ax = np.linspace(-10.0, 10.0, 8, dtype=np.float32)
+    el_ax = np.radians(np.linspace(0.0, 30.0, 6, dtype=np.float32))
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+        rad_p = Path(td) / "v2.rad"
+        arc = FrameArchive(rad_p, version=2)
+        for k in range(3):
+            sc = np.full((9, 16), 0.1 * (k + 1), dtype=np.float32)
+            rd = np.full((8, 16), 0.2 * (k + 1), dtype=np.float32)
+            rhi = np.full((6, 16), 0.3 * (k + 1), dtype=np.float32)
+            fr = RadarFrame(
+                timestamp=200.0 + k, scan=sc, az_axis=az, r_axis=r_ax,
+                rd=rd, rd_v_axis=v_ax, rhi=rhi, el_axis=el_ax,
+                targets=[Target(x=1.0 + k, y=5.0, z=2.0, tid=1, snr=0.9)],
+                meta={"tag": k},
+            )
+            arc.append(fr, utc_ts=1700000000.0 + k)
+        arc.close()
+        idx = FrameArchive.index_frames(rad_p)
+        assert len(idx) == 3 and abs(idx[2][2] - 1700000002.0) < 1e-6
+        f2 = FrameArchive.read_frame_at(rad_p, idx[2][0])
+        assert f2 is not None and f2.rd is not None and f2.rhi is not None and len(f2.targets) == 1
+        full = list(FrameArchive.read_full_frames(rad_p))
+        assert len(full) == 3 and full[1].meta["tag"] == 1
+
+        # Chunked MCAP 含 Statistics (0x0B) 与 Chunk (0x06)
+        ls = to_ros_laserscan(full[0])
+        mp = Path(td) / "chunked.mcap"
+        assert write_mcap_json_log(mp, [ls, to_ros_laserscan(full[1])]) == 2
+        blob = mp.read_bytes()
+        assert blob.startswith(b"\x89MCAP0\r\n") and blob.endswith(b"\x89MCAP0\r\n")
+        assert b"Lookout-MCAP/2.0" in blob
+
+        # 4. Headless RadarEngineRuntime（零 Qt）完整闭环 + --daemon CLI
+        rt = RadarEngineRuntime(driver_id="sim", db_path=Path(td) / "rt.db", archive_path=Path(td) / "rt.rad")
+        rt.open()
+        steps = 0
+        dl = time.monotonic() + 2.0
+        while steps < 3 and time.monotonic() < dl:
+            if rt.step() is not None:
+                steps += 1
+        snap = rt.snapshot()
+        rt.close()
+        assert steps == 3 and snap["frames"] == 3 and isinstance(snap["tracks"], list)
+
+    # 5. WaterfallWidget H1 原始回波强度模式渲染
+    _app = QApplication.instance() or QApplication([])
+    wf = WaterfallWidget()
+    wf.resize(300, 140)
+    wf.set_mode("raw")
+    wf.push_frame(RadarFrame(timestamp=1.0, scan=np.full((9, 16), 0.7, dtype=np.float32), az_axis=az, r_axis=r_ax), [])
+    wf.grab()
+
+    # 6. BridgeServer 鉴权拦截未携带有效 token 的连接
+    bs = BridgeServer(udp_port=0, ws_port=0, http_port=0, token="secret123")
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(2)
+    port = srv.getsockname()[1]
+    c_bad = socket.create_connection(("127.0.0.1", port), timeout=1.0)
+    c_conn, _ = srv.accept()
+    threading.Thread(target=bs._handshake, args=(c_conn,), daemon=True).start()
+    c_bad.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\nSec-WebSocket-Key: abc==\r\n\r\n")
+    resp = c_bad.recv(128)
+    c_bad.close()
+    srv.close()
+    assert b"401 Unauthorized" in resp
+
+    ok("H1/H2/I1 完整软件地基（WGS84-ENU/RSF2索引/原始瀑布图/CRC多目标/Headless引擎/MCAP分块/WS鉴权）")
+
+
 def main() -> int:
     print("RadarScope 核心测试")
     for fn in (test_codec, test_ld2450_sign, test_pipeline, test_alarm,
@@ -2120,7 +2503,9 @@ def main() -> int:
                test_e7_3d_rhi_scope, test_ux_cohesion_and_controller_links,
                test_tracker_gnn_mn_kalman3d_and_imm, test_workspace_docks_canvas_edit_and_i18n,
                test_mission_recorder_and_recompute_compare, test_hardware_readiness_guards,
-               test_digital_twins_and_ew_battlefields, test_universal_protocol_and_history_db):
+               test_digital_twins_and_ew_battlefields, test_universal_protocol_and_history_db,
+               test_phase0_foundation_hardening, test_g1_protocols_and_g2_eval,
+               test_h1_h2_i1_runtime_and_geodesy):
         fn()
     print(f"\n全部通过：{PASS} 组")
     return 0

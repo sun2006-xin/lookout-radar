@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+import logging.handlers
 import sys
 
 from radarscope import paths
@@ -17,7 +18,9 @@ from radarscope import paths
 def _setup_logging() -> None:
     log_path = paths.data_dir() / "radarscope.log"
     handlers: list[logging.Handler] = [
-        logging.FileHandler(log_path, encoding="utf-8"),
+        logging.handlers.RotatingFileHandler(
+            log_path, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+        ),
     ]
     # 打包成窗口程序后没有控制台，sys.stdout 可能是 None，加进去反而会报错
     if sys.stdout is not None:
@@ -44,11 +47,51 @@ def _headless_selftest() -> int:
     return 1
 
 
+def _headless_daemon(argv: list[str]) -> int:
+    """`Lookout --daemon`：纯无界面后台采集、追踪、转发与落库服务（ROADMAP I1）。"""
+    import argparse
+    import time
+    import radarscope.drivers  # noqa: F401
+    from radarscope.core.runtime import RadarEngineRuntime
+
+    p = argparse.ArgumentParser(prog="Lookout --daemon")
+    p.add_argument("--daemon", action="store_true")
+    p.add_argument("--driver", default="sim")
+    p.add_argument("--endpoint", default="")
+    p.add_argument("--forward", default="")
+    p.add_argument("--duration", type=float, default=0.0, help="运行秒数（0 表示持续运行直到 Ctrl+C）")
+    p.add_argument("--no-db", action="store_true")
+    args, _ = p.parse_known_args(argv)
+
+    rt = RadarEngineRuntime(
+        driver_id=args.driver,
+        endpoint=args.endpoint,
+        db_path=None if args.no_db else (paths.data_dir() / "radarscope.db"),
+        forward_target=args.forward or None,
+    )
+    rt.open()
+    rt.start()
+    log = logging.getLogger("radarscope")
+    log.info("无头守护引擎已启动：driver=%s endpoint=%s", args.driver, args.endpoint or "virtual")
+    t0 = time.monotonic()
+    try:
+        while args.duration <= 0.0 or (time.monotonic() - t0) < args.duration:
+            time.sleep(0.2)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        rt.close()
+    log.info("无头守护引擎已退出：累计帧=%d", rt.frames)
+    return 0
+
+
 def main() -> int:
     _setup_logging()
 
     if "--selftest" in sys.argv:
         return _headless_selftest()
+    if "--daemon" in sys.argv:
+        return _headless_daemon(sys.argv[1:])
 
     from PyQt5.QtCore import Qt
     from PyQt5.QtWidgets import QApplication

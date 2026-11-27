@@ -3,13 +3,17 @@
 再往下走一步就是运行时插件：把这一行改成扫描 plugins/ 目录下的所有模块。
 架构已经支持，因为注册表是运行时可写的（见 core/driver.py）。
 """
+from .adsb import AdsbDriver
+from .asterix import AsterixDriver
 from .ld2410 import LD2410Driver
 from .ld2450 import LD2450Driver
 from .ldlidar import LDLidarDriver
 from .multi import MultiRadarDriver, MultiSectorDemoDriver
+from .odid import OpenDroneIdDriver
 from .replay import ReplayDriver
 from .sim_aesa import AesaSimDriver
 from .simulator import SimulatorDriver
+from .ti_mmwave import TIMmWaveDriver
 from .twins import (
     TwinAirborneAesaDriver, TwinAWR1843Driver, TwinFurunoMarineDriver,
     TwinLD2450Driver, TwinOusterLidarDriver,
@@ -18,6 +22,7 @@ from .ultrasonic import UltrasonicDriver
 from . import custom_generic as _custom_generic  # noqa: F401  自动注册通用协议适配器
 
 __all__ = [
+    "AdsbDriver", "AsterixDriver", "OpenDroneIdDriver", "TIMmWaveDriver",
     "LD2410Driver", "LD2450Driver", "LDLidarDriver",
     "MultiRadarDriver", "MultiSectorDemoDriver",
     "ReplayDriver", "AesaSimDriver", "SimulatorDriver",

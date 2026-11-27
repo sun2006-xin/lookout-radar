@@ -76,6 +76,7 @@ class Transport(ABC):
         self._rec = open(record, "wb") if record else None
         self._rec_buf_n = 0
         self._rec_last_flush = time.monotonic()
+        self._line_buf = bytearray()
 
     # ---- 子类实现 ----
     @abstractmethod
@@ -88,18 +89,28 @@ class Transport(ABC):
         raise TransportError(f"{self.scheme} 不支持写入")
 
     def readline(self) -> bytes:
-        """默认实现：逐字节拼到换行。逐字节读对串口有额外开销，
-        但保证了不同传输的行为一致；文本协议雷达用这个就够了。"""
-        buf = bytearray()
+        """按行读取（兼容串口单字节以及 UDP/BLE 整包多字节分帧）。"""
+        nl = self._line_buf.find(b"\n")
+        if nl >= 0:
+            line = bytes(self._line_buf[: nl + 1])
+            del self._line_buf[: nl + 1]
+            return line
         deadline = time.monotonic() + 1.0
         while time.monotonic() < deadline:
-            ch = self.read(1)
+            ch = self.read(256)
             if not ch:
                 break
-            buf.extend(ch)
-            if ch == b"\n":
+            self._line_buf.extend(ch)
+            nl = self._line_buf.find(b"\n")
+            if nl >= 0:
+                line = bytes(self._line_buf[: nl + 1])
+                del self._line_buf[: nl + 1]
+                return line
+            if len(self._line_buf) > 65536:
                 break
-        return bytes(buf)
+        out = bytes(self._line_buf)
+        self._line_buf.clear()
+        return out
 
     def close(self) -> None:
         if self._rec is not None:
@@ -265,19 +276,34 @@ class UdpTransport(Transport):
     scheme = "udp"
 
     def __init__(self, host: str, port: int, record: str | None = None,
-                 timeout: float = 0.05) -> None:
+                 timeout: float = 0.05, mcast: str | None = None) -> None:
         super().__init__(record)
         self.host = host
         self.port = port
         self.timeout = timeout
+        self.mcast = mcast
         self._sock: socket.socket | None = None
         self._peer = None
+
+    @staticmethod
+    def _is_multicast(addr: str) -> bool:
+        try:
+            first = int((addr or "").split(".")[0])
+            return 224 <= first <= 239
+        except (ValueError, IndexError):
+            return False
 
     def open(self) -> None:
         try:
             self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self._sock.bind((self.host, self.port))
+            group = self.mcast or (self.host if self._is_multicast(self.host) else None)
+            bind_host = "0.0.0.0" if group else self.host
+            self._sock.bind((bind_host, self.port))
+            if group:
+                import struct
+                mreq = struct.pack("=4s4s", socket.inet_aton(group), socket.inet_aton("0.0.0.0"))
+                self._sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
             self._sock.settimeout(self.timeout)
         except Exception as exc:
             raise TransportError(f"UDP 绑定 {self.host}:{self.port} 失败：{exc}") from exc
@@ -330,7 +356,9 @@ class FileTransport(Transport):
         self.chunk = max(1, chunk)
         self.interval = max(0.0, interval)
         self.loop = loop
+        self._fh = None
         self._data = b""
+        self._size = 0
         self._pos = 0
         self._t_next = 0.0
         self._finished = False
@@ -339,14 +367,18 @@ class FileTransport(Transport):
         p = Path(self.path)
         if not p.exists():
             raise TransportError(f"回放文件不存在：{self.path}")
-        self._data = p.read_bytes()
-        if not self._data:
+        self._size = p.stat().st_size
+        if self._size <= 0:
             raise TransportError("回放文件是空的")
+        self._fh = open(p, "rb")
+        self._data = b""
         self._pos = 0
         self._t_next = 0.0
+        self._finished = False
 
     def read(self, n: int = 4096) -> bytes:
-        if not self._data:
+        total = self._size if self._fh is not None else len(self._data)
+        if total <= 0:
             return b""
         if self._finished:
             raise TransportError("回放结束")
@@ -356,6 +388,16 @@ class FileTransport(Transport):
             return b""
         self._t_next = now + self.interval
         step = min(max(1, n), self.chunk)
+        if self._fh is not None:
+            out = self._fh.read(step)
+            self._pos = self._fh.tell()
+            if self._pos >= self._size:
+                if self.loop:
+                    self._fh.seek(0)
+                    self._pos = 0
+                else:
+                    self._finished = True
+            return out
         end = min(len(self._data), self._pos + step)
         out = self._data[self._pos:end]
         self._pos = end
@@ -363,9 +405,21 @@ class FileTransport(Transport):
             if self.loop:
                 self._pos = 0
             else:
-                # 先把手里的数据交出去，下一次再报结束，不能把尾巴丢了
                 self._finished = True
         return out
+
+    def close(self) -> None:
+        if self._fh is not None:
+            try:
+                self._fh.close()
+            except OSError:
+                pass
+            self._fh = None
+        super().close()
+
+    @property
+    def is_open(self) -> bool:
+        return self._fh is not None and not self._finished
 
     @property
     def label(self) -> str:
@@ -477,10 +531,14 @@ class BleTransport(Transport):
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline:
             if self._err:
+                self._stop.set()
+                self._thread.join(timeout=1.0)
                 raise TransportError(self._err)
             if self._ready:
                 return
             time.sleep(0.05)
+        self._stop.set()
+        self._thread.join(timeout=1.0)
         raise TransportError("BLE 连接超时（10 秒）")
 
     def read(self, n: int = 4096) -> bytes:
@@ -576,11 +634,17 @@ def open_transport(spec: str, default_baud: int = 256000, **overrides) -> Transp
     if scheme == "serial":
         tr = SerialTransport(target, int(opts.pop("baud", default_baud)), record=record)
     elif scheme in ("tcp", "udp"):
+        mcast = opts.pop("mcast", None)
         if ":" in target:
             host, _, ps = target.rpartition(":")
-            tr = _SCHEMES[scheme](host or "127.0.0.1", int(ps), record=record)
+            host = host or "127.0.0.1"
+            port = int(ps)
         else:
-            tr = _SCHEMES[scheme]("127.0.0.1", int(target), record=record)
+            host, port = "127.0.0.1", int(target)
+        if scheme == "udp":
+            tr = UdpTransport(host, port, record=record, mcast=mcast)
+        else:
+            tr = TcpTransport(host, port, record=record)
     elif scheme == "file":
         tr = FileTransport(target,
                            int(opts.pop("chunk", 256)),

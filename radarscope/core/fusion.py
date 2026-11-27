@@ -87,6 +87,13 @@ def local_to_global(x: float, y: float, spec: SensorSpec) -> tuple[float, float]
     return gx, gy
 
 
+def local_vec_to_global(vx: float, vy: float, spec: SensorSpec) -> tuple[float, float]:
+    """本地速度矢量 -> 平台坐标（只做 bearing 旋转，不叠加传感器安装平移）。"""
+    b = radians(spec.bearing_deg)
+    cb, sb = cos(b), sin(b)
+    return vx * cb + vy * sb, vy * cb - vx * sb
+
+
 def global_to_local(x: float, y: float, spec: SensorSpec) -> tuple[float, float]:
     b = radians(spec.bearing_deg)
     cb, sb = cos(b), sin(b)
@@ -210,7 +217,10 @@ class FusionEngine:
         ok = (gr >= self.range_min) & (gr <= self.range_max)
         child.lut_idx = (az_i * self.n_rng + r_i).astype(np.int64)
         child.lut_ok = ok
-        child.lut_key = (az.size, r.size, float(az[0]), float(r[-1]), child.spec.bearing_deg)
+        child.lut_key = (
+            az.size, r.size, float(az[0]), float(r[0]), float(r[-1]),
+            float(child.spec.x), float(child.spec.y), float(child.spec.bearing_deg),
+        )
 
     def _need_lut(self, child: _Child, frame: RadarFrame) -> bool:
         if child.lut_key is None or child.lut_idx is None:
@@ -218,7 +228,10 @@ class FusionEngine:
         az, r = frame.az_axis, frame.r_axis
         if az is None or r is None:
             return False
-        key = (az.size, r.size, float(az[0]), float(r[-1]), child.spec.bearing_deg)
+        key = (
+            az.size, r.size, float(az[0]), float(r[0]), float(r[-1]),
+            float(child.spec.x), float(child.spec.y), float(child.spec.bearing_deg),
+        )
         return key != child.lut_key
 
     # ------------------------------------------------------------------ #
@@ -267,8 +280,8 @@ class FusionEngine:
                     if vals.shape == c.lut_ok.shape:
                         idx = c.lut_idx[c.lut_ok]
                         v = vals[c.lut_ok]
-                        # 重叠扇区取较大值（近似 max 融合）
-                        flat[idx] = np.maximum(flat[idx], v)
+                        # 重叠扇区与同格碰撞统一取最大值（避免 np 重复下标后者覆盖前者）
+                        np.maximum.at(flat, idx, v)
 
             for t in f.targets:
                 gx, gy = local_to_global(t.x, t.y, c.spec)
@@ -303,7 +316,7 @@ class FusionEngine:
     def _detect_single_station_deception(
         self, targets: list[Target], now: float
     ) -> list[tuple[float, float]]:
-        """F3 多站交叉抗欺骗：在 >=2 台在线传感器共视重叠扇区内，孤立单站目标标为疑似欺骗。"""
+        """F3 多站交叉抗欺骗：在 >=2 台在线传感器各自真实覆盖扇区内，孤立单站目标标为疑似欺骗。"""
         active = [
             c.spec for c in self._children
             if c.spec.enabled and c.frame is not None and (now - c.last_frame_t) <= self.stale_s
@@ -314,11 +327,12 @@ class FusionEngine:
         for t in targets:
             if getattr(t, "views", 1) >= 2:
                 continue
-            az_deg = degrees(atan2(t.x, t.y))
             cover_cnt = 0
             for s in active:
-                diff = abs(((az_deg - s.bearing_deg + 180.0) % 360.0) - 180.0)
-                if diff <= s.fov_deg * 0.5 and t.rng <= max(self.range_max, 1.0):
+                lx, ly = global_to_local(t.x, t.y, s)
+                lr = hypot(lx, ly)
+                laz_deg = degrees(atan2(lx, ly))
+                if abs(laz_deg) <= s.fov_deg * 0.5 and lr <= max(float(s.range_max), 1.0):
                     cover_cnt += 1
             if cover_cnt >= 2:
                 suspect.append((float(t.x), float(t.y)))
@@ -410,10 +424,16 @@ class FusionEngine:
                 self.stats["single"] += 1
 
             n = len(cl)
+            rot_vx = 0.0
+            rot_vy = 0.0
+            for w, m in zip(weights, cl):
+                gvx, gvy = local_vec_to_global(m[1].vx, m[1].vy, m[0])
+                rot_vx += w * gvx
+                rot_vy += w * gvy
             out.append(Target(
                 x=x, y=y,
-                vx=sum(w * m[1].vx for w, m in zip(weights, cl)) / w_sum,
-                vy=sum(w * m[1].vy for w, m in zip(weights, cl)) / w_sum,
+                vx=rot_vx / w_sum,
+                vy=rot_vy / w_sum,
                 snr=max(m[1].snr for m in cl),
                 threat=max(m[1].threat for m in cl),
                 cls=_majority([m[1].cls for m in cl]),

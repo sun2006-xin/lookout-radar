@@ -53,6 +53,8 @@ class CustomProtocolSpec:
     endian: str = "<"               # < 小端 | > 大端
     payload_offset: int = 2         # 第一目标起始字节偏移
     struct_fmt: str = "hhh"         # 例：hh -> (x,y); hhh -> (x,y,snr); ffff -> (x,y,vx,vy)
+    checksum: str = "none"          # none | sum8 | xor8 | crc16_modbus
+    multi_target: bool = False      # True 时按步长循环解包同一帧内多目标
     transports: tuple[str, ...] = ("serial", "tcp", "udp", "file")
     notes: str = ""
 
@@ -399,31 +401,58 @@ def parse_custom_line(spec: CustomProtocolSpec, line: str) -> list[Target]:
     return [t] if t is not None else []
 
 
-def parse_custom_binary(spec: CustomProtocolSpec, pkt: bytes) -> list[Target]:
-    """按声明式结构体格式解析单帧二进制报文。"""
-    fmt = f"{spec.endian}{spec.struct_fmt}"
-    sz = struct.calcsize(fmt)
-    if len(pkt) < spec.payload_offset + sz:
-        return []
-    vals = struct.unpack_from(fmt, pkt, spec.payload_offset)
+def _crc16_modbus(data: bytes) -> int:
+    crc = 0xFFFF
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            crc = (crc >> 1) ^ 0xA001 if (crc & 1) else (crc >> 1)
+    return crc
+
+
+def _verify_binary_checksum(spec: CustomProtocolSpec, pkt: bytes) -> tuple[bool, int]:
+    """校验二进制帧尾前校验和并返回数据区截止偏移（无校验时返回整个 pkt 长度）。"""
+    mode = (spec.checksum or "none").lower()
+    if mode in ("", "none"):
+        return True, len(pkt)
+    tail_len = len(parse_hex_bytes(spec.tail_hex))
+    body_end = len(pkt) - tail_len
+    csum_len = 2 if mode == "crc16_modbus" else 1
+    if body_end <= spec.payload_offset + csum_len:
+        return False, body_end
+    data_end = body_end - csum_len
+    body = pkt[:data_end]
+    if mode == "sum8":
+        return (sum(body) & 0xFF) == pkt[data_end], data_end
+    if mode == "xor8":
+        x = 0
+        for b in body:
+            x ^= b
+        return x == pkt[data_end], data_end
+    if mode == "crc16_modbus":
+        want = struct.unpack_from("<H", pkt, data_end)[0]
+        return _crc16_modbus(body) == want, data_end
+    return True, body_end
+
+
+def _unpack_one_record(spec: CustomProtocolSpec, vals: tuple) -> Target | None:
     if not vals:
-        return []
+        return None
     if spec.mode == "binary_point":
         dist = float(vals[0]) * spec.scale
         if dist <= 0.0:
-            return []
+            return None
         snr = 0.85
         if len(vals) >= 2:
             raw_s = float(vals[1])
             snr = min(1.0, raw_s / 1000.0) if raw_s > 100.0 else (raw_s / 100.0 if raw_s > 1.5 else raw_s)
-        t = _finite_target(0.0, dist, snr=snr)
-        return [t] if t is not None else []
+        return _finite_target(0.0, dist, snr=snr)
     if len(vals) < 2:
-        return []
+        return None
     if spec.mode == "binary_polar":
         dist = float(vals[0]) * spec.scale
         if dist <= 0.0:
-            return []
+            return None
         az_deg = float(vals[1]) * spec.angle_scale
         az = math.radians(az_deg)
         x, y = dist * math.sin(az), dist * math.cos(az)
@@ -431,8 +460,7 @@ def parse_custom_binary(spec: CustomProtocolSpec, pkt: bytes) -> list[Target]:
         if len(vals) >= 3:
             raw_s = float(vals[2])
             snr = min(1.0, raw_s / 1000.0) if raw_s > 100.0 else (raw_s / 100.0 if raw_s > 1.5 else raw_s)
-        t = _finite_target(x, y, vx, vy, snr)
-        return [t] if t is not None else []
+        return _finite_target(x, y, vx, vy, snr)
     x = float(vals[0]) * spec.scale
     y = float(vals[1]) * spec.scale
     vx, vy, snr = 0.0, 0.0, 0.85
@@ -445,8 +473,29 @@ def parse_custom_binary(spec: CustomProtocolSpec, pkt: bytes) -> list[Target]:
         if len(vals) >= 5:
             raw_s = float(vals[4])
             snr = raw_s / 100.0 if raw_s > 1.5 else raw_s
-    t = _finite_target(x, y, vx, vy, snr)
-    return [t] if t is not None else []
+    return _finite_target(x, y, vx, vy, snr)
+
+
+def parse_custom_binary(spec: CustomProtocolSpec, pkt: bytes) -> list[Target]:
+    """按声明式结构体格式解析二进制报文（支持单目标与 multi_target 多目标循环解包及校验和）。"""
+    ok_csum, data_end = _verify_binary_checksum(spec, pkt)
+    if not ok_csum:
+        return []
+    fmt = f"{spec.endian}{spec.struct_fmt}"
+    sz = struct.calcsize(fmt)
+    if sz <= 0 or data_end < spec.payload_offset + sz:
+        return []
+    out: list[Target] = []
+    off = spec.payload_offset
+    while off + sz <= data_end:
+        vals = struct.unpack_from(fmt, pkt, off)
+        t = _unpack_one_record(spec, vals)
+        if t is not None:
+            out.append(t)
+        if not spec.multi_target:
+            break
+        off += sz
+    return out
 
 
 def _make_decoder(spec: CustomProtocolSpec) -> StreamDecoder:
@@ -565,7 +614,7 @@ def build_driver_class(spec: CustomProtocolSpec) -> type[RadarDriver]:
                     return None
                 pkts = self._dec.feed(chunk)
                 self._good += len(pkts)
-                self._bad = self._dec.rejected
+                self._bad = self._dec.resync_count
                 for p in pkts:
                     tgts.extend(parse_custom_binary(self._spec, p))
                 if not pkts:

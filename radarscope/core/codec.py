@@ -52,6 +52,11 @@ class StreamDecoder:
         self._buf = bytearray()
         self.resync_count = 0     # 假同步/重同步次数，调试用
 
+    @property
+    def rejected(self) -> int:
+        """向后兼容别名：返回重同步/丢弃字节次数。"""
+        return self.resync_count
+
     def reset(self) -> None:
         self._buf.clear()
 

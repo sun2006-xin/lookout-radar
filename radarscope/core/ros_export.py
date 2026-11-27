@@ -108,36 +108,87 @@ def write_mcap_json_log(
     topic: str = "/radar/laserscan",
     schema_name: str = "lookout.LaserScan",
 ) -> int:
-    """写入标准 MCAP v0 二进制日志（Header + Schema + Channel + Messages + Footer）。"""
+    """写入含真实时间戳、Chunk 压缩块、Statistics 与 SummaryOffset 索引的标准 MCAP v0 日志。"""
+    import zlib
+
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     buf = bytearray()
     buf.extend(_MCAP_MAGIC)
 
     # Header (0x01): profile(str) + library(str)
-    buf.extend(_mcap_record(0x01, _mcap_str("ros2") + _mcap_str("Lookout-MCAP/1.0")))
+    buf.extend(_mcap_record(0x01, _mcap_str("ros2") + _mcap_str("Lookout-MCAP/2.0")))
 
-    # Schema (0x03): id(u16) + name(str) + encoding(str) + data(bytes_with_u32_len)
     schema_json = json.dumps({"type": "object", "title": schema_name}).encode("utf-8")
-    schema_body = struct.pack("<H", 1) + _mcap_str(schema_name) + _mcap_str("jsonschema") + struct.pack("<I", len(schema_json)) + schema_json
-    buf.extend(_mcap_record(0x03, schema_body))
+    schema_rec = _mcap_record(
+        0x03,
+        struct.pack("<H", 1) + _mcap_str(schema_name) + _mcap_str("jsonschema")
+        + struct.pack("<I", len(schema_json)) + schema_json,
+    )
+    chan_rec = _mcap_record(0x04, struct.pack("<HH", 1, 1) + _mcap_str(topic) + _mcap_str("json") + struct.pack("<I", 0))
+    buf.extend(schema_rec)
+    buf.extend(chan_rec)
 
-    # Channel (0x04): id(u16) + schema_id(u16) + topic(str) + message_encoding(str) + metadata_map_u32_len(0)
-    chan_body = struct.pack("<HH", 1, 1) + _mcap_str(topic) + _mcap_str("json") + struct.pack("<I", 0)
-    buf.extend(_mcap_record(0x04, chan_body))
-
-    base_ns = int(time.time() * 1e9)
+    now_ns = int(time.time() * 1e9)
+    first_hdr_ns: int | None = None
+    msg_buf = bytearray()
     written = 0
+    start_ns = 0
+    end_ns = 0
     for seq, msg in enumerate(messages):
         raw = json.dumps(msg, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        ts_ns = base_ns + seq * 100_000_000
-        # Message (0x05): channel_id(u16) + sequence(u32) + log_time(u64) + publish_time(u64) + data
-        msg_body = struct.pack("<HIQQ", 1, seq + 1, ts_ns, ts_ns) + raw
-        buf.extend(_mcap_record(0x05, msg_body))
+        stamp = (msg.get("header") or {}).get("stamp") if isinstance(msg, dict) else None
+        if isinstance(stamp, dict) and ("sec" in stamp):
+            ts_ns = int(stamp.get("sec", 0)) * 1_000_000_000 + int(stamp.get("nanosec", 0))
+            if ts_ns < 1_000_000_000_000:  # relative monotonic stamp -> shift to wall epoch
+                if first_hdr_ns is None:
+                    first_hdr_ns = ts_ns
+                ts_ns = now_ns + (ts_ns - first_hdr_ns)
+        else:
+            ts_ns = now_ns + seq * 100_000_000
+        if written == 0:
+            start_ns = ts_ns
+        end_ns = ts_ns
+        msg_buf.extend(_mcap_record(0x05, struct.pack("<HIQQ", 1, seq + 1, ts_ns, ts_ns) + raw))
         written += 1
 
+    # Chunk (0x06): msg_start_time(u64), msg_end_time(u64), uncompressed_size(u64), uncompressed_crc(u32), compression(str), records(u64_len + bytes)
+    raw_bytes = bytes(msg_buf)
+    crc = zlib.crc32(raw_bytes) & 0xFFFFFFFF
+    comp_bytes = zlib.compress(raw_bytes)
+    chunk_body = (
+        struct.pack("<QQQI", start_ns, end_ns, len(raw_bytes), crc)
+        + _mcap_str("zlib")
+        + struct.pack("<Q", len(comp_bytes))
+        + comp_bytes
+    )
+    buf.extend(_mcap_record(0x06, chunk_body))
+
+    # DataEnd (0x0F): data_section_crc(u32)
+    data_crc = zlib.crc32(bytes(buf[len(_MCAP_MAGIC):])) & 0xFFFFFFFF
+    buf.extend(_mcap_record(0x0F, struct.pack("<I", data_crc)))
+
+    summary_start = len(buf)
+    summary_buf = bytearray()
+    summary_buf.extend(schema_rec)
+    summary_buf.extend(chan_rec)
+    # Statistics (0x0B): message_count(u64) schema_count(u16) channel_count(u32) attachment_count(u32) metadata_count(u32) chunk_count(u32) start(u64) end(u64) + chan_msg_counts_map_u32_len
+    stat_map = struct.pack("<HQ", 1, written)
+    stat_body = (
+        struct.pack("<QHIIIIQQ", written, 1, 1, 0, 0, 1, start_ns, end_ns)
+        + struct.pack("<I", len(stat_map)) + stat_map
+    )
+    stat_off = summary_start + len(summary_buf)
+    stat_rec = _mcap_record(0x0B, stat_body)
+    summary_buf.extend(stat_rec)
+    buf.extend(summary_buf)
+
+    summary_offset_start = len(buf)
+    buf.extend(_mcap_record(0x0E, struct.pack("<BQQ", 0x0B, stat_off, len(stat_rec))))
+    sum_crc = zlib.crc32(bytes(buf[summary_start:])) & 0xFFFFFFFF
+
     # Footer (0x02): summary_start(u64) + summary_offset_start(u64) + summary_crc(u32)
-    buf.extend(_mcap_record(0x02, struct.pack("<QQI", 0, 0, 0)))
+    buf.extend(_mcap_record(0x02, struct.pack("<QQI", summary_start, summary_offset_start, sum_crc)))
     buf.extend(_MCAP_MAGIC)
     path.write_bytes(bytes(buf))
     return written

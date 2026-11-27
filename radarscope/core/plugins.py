@@ -216,9 +216,10 @@ class PluginManager:
         return self.plugins
 
     def reload(self) -> list[PluginInfo]:
-        """重载。注意：驱动注册表是运行时可写的，同名 id 会被覆盖，
-        所以重载是安全的；但插件在别处留下的副作用（比如开了线程）不会被回收。"""
+        """重载插件并清理旧动态模块，避免重复重载时 sys.modules 残留膨胀。"""
         self._apis.clear()
+        for key in [k for k in list(sys.modules) if k.startswith("_rs_plugin_")]:
+            sys.modules.pop(key, None)
         return self.load_all()
 
     def approve_plugin(self, path: str | Path) -> str:

@@ -123,6 +123,7 @@ class MainWindow(ConnectionController, ExportController,
         self._fps = 0.0
         self._table_t = 0.0
         self._reconnect_try = 0
+        self._reconnect_seq = 0
         self._want_connect = False
         self._paused = False
         self._font_scale = 1.0
@@ -145,6 +146,9 @@ class MainWindow(ConnectionController, ExportController,
         self._nmea_port = 10111
         self._last_frame_ref = None
         self._sim_dlg = None
+        self._pruning_tiles = False
+        self._bg_heading_deg = 0.0
+        self._bg_lock = __import__("threading").Lock()
         # 模拟电子站（动态虚拟目标与电子对抗教学叠加）
         from ..core.sim_targets import ElectronicStation
         self.sim_station = ElectronicStation()
@@ -1223,6 +1227,29 @@ class MainWindow(ConnectionController, ExportController,
     # ================================================================== #
     # 连接 / 断开
     # ================================================================== #
+    def _process_frame_bg(self, f):
+        """在 ReaderThread 后台线程完成掩膜/杂波图抑制与电子站干扰合成，真正解除主线程阻塞。"""
+        now = f.timestamp or time.monotonic()
+        dt = (now - getattr(self, "_bg_last_ts", 0.0)) if getattr(self, "_bg_last_ts", 0.0) else 0.1
+        self._bg_last_ts = now
+        with self._bg_lock:
+            if self.land_mask.enabled and f.has_scan:
+                f = self.land_mask.apply(f)
+            if self.clutter_map.enabled and f.has_scan:
+                f = self.clutter_map.apply(f)
+                if self.clutter_map.frames >= self.clutter_map.warmup:
+                    f.targets = pipeline.detect_targets(
+                        f, threshold=self._thresh,
+                        max_targets=max(8, self.caps.max_targets or 8),
+                        cfar_mode=self._cfar_mode,
+                    )
+            if self.sim_station.active():
+                f = self.sim_station.merge_into_frame(
+                    f, self.caps, dt, threshold=self._thresh, cfar_mode=self._cfar_mode
+                )
+        f.meta["_bg_processed"] = True
+        return f
+
     def _on_frame(self, frame) -> None:
         if self._paused:
             return                       # 暂停时画面冻住，方便截图或细看
@@ -1237,6 +1264,7 @@ class MainWindow(ConnectionController, ExportController,
                 self._log_level("warn", f"数据解析异常（已跳过该帧）：{exc}")
                 return
 
+        self._bg_heading_deg = float(self.heading_spin.value())
         now = frame.timestamp or time.monotonic()
         dt = (now - self._last_ts) if self._last_ts else 0.1
         self._last_ts = now
@@ -1247,32 +1275,35 @@ class MainWindow(ConnectionController, ExportController,
                 lm_key = (
                     int(getattr(self.map_layer, "revision", 0)),
                     round(float(self.caps.range_max), 1),
-                    round(float(self.heading_spin.value()), 0),
+                    round(self._bg_heading_deg, 0),
                 )
                 if lm_key != self._land_mask_key:
                     self._land_mask_key = lm_key
-                    self.land_mask.update_from_map_rgb(
-                        self.map_layer.to_rgb_array(),
-                        self.map_layer.mpp,
-                        self.map_layer.anchor_px,
-                        f.az_axis, f.r_axis,
-                        float(self.heading_spin.value()),
+                    with self._bg_lock:
+                        self.land_mask.update_from_map_rgb(
+                            self.map_layer.to_rgb_array(),
+                            self.map_layer.mpp,
+                            self.map_layer.anchor_px,
+                            f.az_axis, f.r_axis,
+                            self._bg_heading_deg,
+                        )
+            if not f.meta.get("_bg_processed"):
+                f = self.land_mask.apply(f)
+
+        if not f.meta.get("_bg_processed"):
+            if self.clutter_map.enabled and f.has_scan:
+                f = self.clutter_map.apply(f)
+                if self.clutter_map.frames >= self.clutter_map.warmup:
+                    f.targets = pipeline.detect_targets(
+                        f, threshold=self._thresh,
+                        max_targets=max(8, self.caps.max_targets or 8),
+                        cfar_mode=self._cfar_mode,
                     )
-            f = self.land_mask.apply(f)
 
-        if self.clutter_map.enabled and f.has_scan:
-            f = self.clutter_map.apply(f)
-            if self.clutter_map.frames >= self.clutter_map.warmup:
-                f.targets = pipeline.detect_targets(
-                    f, threshold=self._thresh,
-                    max_targets=max(8, self.caps.max_targets or 8),
-                    cfar_mode=self._cfar_mode,
+            if self.sim_station.active():
+                f = self.sim_station.merge_into_frame(
+                    f, self.caps, dt, threshold=self._thresh, cfar_mode=self._cfar_mode
                 )
-
-        if self.sim_station.active():
-            f = self.sim_station.merge_into_frame(
-                f, self.caps, dt, threshold=self._thresh, cfar_mode=self._cfar_mode
-            )
 
         period = f.meta.get("scan_period")
         if period:
@@ -1336,13 +1367,25 @@ class MainWindow(ConnectionController, ExportController,
                 self._own_y += vy * dt
                 self.ppi.set_origin(self._own_x, self._own_y)
 
-        # 地图：1 秒检查一次级别/中心是否要换，60 秒才做一次磁盘缓存清理，避免每帧卡顿
+        # 地图：1 秒检查一次级别/中心是否要换，60 秒才做一次后台磁盘缓存清理，避免阻塞主线程
         if (self.map_layer is not None and self.map_layer.enabled
                 and now - self._map_t > 1.0):
             self._map_t = now
-            if now - self._map_prune_t > 60.0 and not getattr(self.map_layer, "synthetic_sea", False):
+            if (now - self._map_prune_t > 60.0
+                    and not getattr(self.map_layer, "synthetic_sea", False)
+                    and not getattr(self, "_pruning_tiles", False)):
                 self._map_prune_t = now
-                self.map_layer.store.prune()
+                self._pruning_tiles = True
+                store_ref = self.map_layer.store
+
+                def _bg_prune() -> None:
+                    try:
+                        store_ref.prune()
+                    finally:
+                        self._pruning_tiles = False
+
+                import threading
+                threading.Thread(target=_bg_prune, daemon=True).start()
             self.map_layer.update_for(self._ais_ref[0], self._ais_ref[1],
                                       float(self.range_spin.value()),
                                       max(200, self.ppi.width()))
@@ -1697,8 +1740,13 @@ class MainWindow(ConnectionController, ExportController,
         if getattr(self, "_sim_dlg", None) is not None:
             self._sim_dlg.close()
         self._want_connect = False
+        self._reconnect_seq = getattr(self, "_reconnect_seq", 0) + 1
         self._teardown_reader()
         self.nmea_nav.stop()
+        self.ais.stop()
+        self.forwarder.stop()
+        if self.map_layer is not None:
+            self.map_layer.stop()
         if self.store.session_id is not None:
             self.store.end_session("正常退出")
         else:

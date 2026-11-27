@@ -1,6 +1,6 @@
 # 开发路线图与未来计划
 
-> 版本：v1.3.1（2026-11-26）· 状态：**全部纯软件主线（A5、B1~B3、C1~C4、D1~D6、E1~E9、F1~F3 及 v1.3 工作区停靠重构 / 3D Kalman+IMM / 任务闭环 / 真机防坑加固）已 100% 落地并通过 50 组真实单元测试；后续仅余实机硬件到达后的阶段 A 联调与 B4 原始 ADC→FFT**。
+> 版本：v1.4.0（2026-11-27）· 状态：**全软件功能与架构主线（A5、B1~B3、C1~C4、D1~D6、E1~E9、F1~F3、地基止血 G0、行业协议 G1、算法定量门禁 G2、H1 归档与原始瀑布、H2 大地坐标视距、I1 无头守护引擎与分块 MCAP）已全部完成并通过 55 组单元测试；项目进入纯软件冻结状态，后续仅余实体硬件到位后的 A1~A4 实机联调与 B4 原始 ADC→FFT**。
 >
 > 配套文档：[ARCHITECTURE.md](ARCHITECTURE.md)（系统分层与数据契约）· [STRUCTURE.md](STRUCTURE.md)（代码文件索引）。
 
@@ -11,7 +11,7 @@
 | 项 | 值 |
 |---|---|
 | 产品名 | 瞭望 Lookout（Python 包名 `radarscope`） |
-| 源码规模 | 约 16 200 行 / 80 个 Python 文件 / 50 组单元测试 |
+| 源码规模 | 约 19 000 行 / 88+ Python 文件 / 55 组单元测试 |
 | 主窗口结构 | `ui/mainwindow.py` + `ui/controllers.py` + `ui/scene_controller.py`（四控制器 + Dock 工作区预设） |
 | 打包方式 | `pyinstaller --noconfirm --clean installer/Lookout.spec`（生成 `dist/Lookout/Lookout.exe`） |
 | 开源仓库 | https://github.com/sun2006-xin/lookout-radar （MIT） |
@@ -189,6 +189,19 @@
 
 ---
 
+## 4.7 阶段 G~I —— 地基止血与中长期工业拓展规划（对标 OpenCPN / Stone Soup / Foxglove / TI）
+
+| 编号 | 阶段/版本 | 状态 | 目标与关键事项 |
+|---|---|---|---|
+| **G0** | v1.3.3 地基止血 | `[x]` 已完成 | 修复二进制通用协议 `_dec.resync_count` 崩溃、数字孪生 `set_control(**params)`、`TimelineDialog` 无 `scan` 渲染、多站融合速度矢量旋转与欺骗扇区几何、360° CFAR 循环边界、慢速雷达 `dt` 放宽至 `10s` 与远距协方差标定、PPI 碰撞最大值与渲染膨胀缓存、RHI `(r,el)→(r,z)` 投影对齐、UDP 组播/按行切分、BLE 线程回收、瓦片清理异步化、`FileTransport` 流式读盘、`ReaderThread` 后台杂波/掩膜/EW 卸载与 `closeEvent` 全资源停止（第 53 组测试覆盖） |
+| **G1** | v1.4 行业协议扩容 | `[x]` 已完成 | 新增 4 套标准驱动：**TI IWR6843/AWR1843 UART TLV**（`ti_mmwave.py`）、**ADS-B SBS-1/`dump1090`**（`adsb.py`）、**Open Drone ID ASTM F3411/JSON**（`odid.py`）、**ASTERIX CAT048/CAT240**（`asterix.py`）；`ais.py` / `aisfeed.py` 新增 `AisDecoder` 补全 Type 5/24 多分片船名重组；`CustomProtocolSpec` 已补全多目标循环解包（`multi_target`）与 `sum8`/`xor8`/`crc16_modbus` 二进制校验 |
+| **G2** | v1.4 算法定量门禁 | `[x]` 已完成 | `Tracker` 引入 **马氏距离关联门限**（`gating_mode="mahalanobis"`）、可选 **5×6 速度量测融合**（`use_vel_meas`）与 **3 模型 CT-IMM 协同转弯**；修复 `kalman3d`/`imm3d` 双重预测；CFAR 升级 **2D OS-CFAR** 与 **三点抛物线亚像素插值**；新增 `core/metrics.py` 与 `tools/eval_tracker.py`（**OSPA / GOSPA** 量化评估闭环，第 54 组测试覆盖） |
+| **H1** | v1.4 归档与原始瀑布 | `[x]` 已完成（硬件除外） | `FrameArchive` 升级 `RSF2`（保留 `rd/rhi/targets/meta` + 单调/UTC 双时钟 + `index_frames` O(1) 跳转并向下兼容 `RSF1`）；`WaterfallWidget` 新增右键切换「原始回波强度瀑布模式 (`raw`)」；OpenGL 大点数迁移留待万级真机点云阶段 |
+| **H2** | v1.4 大地坐标与视距 | `[x]` 已完成 | 新增 `core/geodesy.py` 实现 **WGS84 ↔ ECEF ↔ ENU** 高精度坐标转换及 **$4/3 R_e$ 雷达无线电视距与曲率下沉修正**，接入 `ais.py` / `adsb.py` / `odid.py`（第 55 组测试覆盖） |
+| **I1** | v1.4 无头引擎与 MCAP | `[x]` 已完成（B4 除外） | 新增无 UI `core/runtime.py`（`RadarEngineRuntime`）与 `main.py --daemon` 后台守护入口；`ros_export.py` 升级为含真实时间戳、zlib Chunk、Statistics 与 SummaryOffset 索引的标准 MCAP；`ws_bridge.py` 增加 `--token` 鉴权与 Ping/Close 控制帧处理；原始 ADC→FFT（B4）待相参硬件到位 |
+
+---
+
 ## 5. 明确不做与合规边界（避免下一位 AI 走弯路）
 
 - **软件仿真不设限，真实硬件严禁控武器/发物理干扰**：教学/科研向的模拟电子战（模拟射频链路方程、模拟火控跟踪推演与拦截几何、DRFM/RGPO/VGPO）全部支持；但**禁止向真实无线电功放硬件下发违规频段干扰发射指令，或接入实弹武器火控作动器**。
@@ -202,10 +215,10 @@
 
 ## 6. 建议的演进顺序
 
-> **当前进度（2026-11-26）**：`A5`、`B1~B3`、`C1~C4`、`D1~D6`、`E1~E9`、`F1~F3` 全部纯软件研发任务（含停靠工作区、GNN+M/N+3D Kalman/IMM、一体化任务录制对比与真机连接加固）已收官并通过 **50 组**真实回归测试；以下仅待实机硬件到位后开展联调：
+> **当前进度（2026-11-27，软件主线冻结）**：`A5`、`B1~B3`、`C1~C4`、`D1~D6`、`E1~E9`、`F1~F3` 与 `G0 / G1 / G2 / H1 / H2 / I1` 全量纯软件研发已收官并通过 **55 组**单元测试；后续仅待实机硬件到位后推进硬件联调：
 
 ```
-硬件主线（实体硬件到位后再开）：A1 → A2 → A3 → A4（真机联调与样本录制）→ B4（IWR6843+DCA1000 原始 ADC→FFT）
+待硬件到位主线：A1 → A2 → A3 → A4（实体雷达联调与样本采集）→ B4（IWR6843+DCA1000 原始 ADC→FFT）
 ```
 
 **开发收尾规范**：

@@ -107,13 +107,14 @@ class TimelineDialog(QDialog):
         self.lbl_time.setText(
             f"{time.strftime('%H:%M:%S', time.localtime(cur))}  ({offset_s:.1f}s / {self._dur:.1f}s)"
         )
-        rows = self.store.tracks_window(self.sid, cur - self._hold_win, cur + 0.05)
+        rows = self.store.tracks_window(self.sid, cur - self._hold_win, cur + 0.05, include_3d=True)
         latest: dict[int, Target] = {}
-        for _ts, tid, x, y, vx, vy, _rng, _az, snr, threat, cls in rows:
+        for _ts, tid, x, y, vx, vy, _rng, _az, snr, threat, cls, z, el_deg, rcs in rows:
             latest[int(tid)] = Target(
                 x=float(x), y=float(y), vx=float(vx), vy=float(vy),
                 snr=float(snr or 0.8), tid=int(tid),
                 threat=int(threat or 0), cls=str(cls or ""),
+                z=float(z or 0.0), el_deg=float(el_deg or 0.0), rcs=float(rcs or 0.0),
             )
         tracks = list(latest.values())
         self.ppi.push_frame(RadarFrame(timestamp=cur, targets=tracks), tracks)

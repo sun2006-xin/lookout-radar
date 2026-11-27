@@ -128,6 +128,8 @@ class PPIWidget(QWidget):
         self._north_up = False
         self._t_prev = 0.0
         self.tau = 1.1              # 余晖时间常数，秒
+        self._disp_buf: np.ndarray | None = None
+        self._img_dirty = True
 
     # ------------------------------------------------------------------ #
     def set_capabilities(self, caps: Capabilities) -> None:
@@ -165,41 +167,46 @@ class PPIWidget(QWidget):
     def reset(self) -> None:
         self._cflat[:] = 0.0
         self._tracks = []
+        self._trails.clear()
         self._sweep_az = None
         self._t_prev = 0.0
         self._ew_meta = None
         self._fc_sol = None
         self._deception_pts = []
+        self._img_dirty = True
         self.update()
 
     # ------------------------------------------------------------------ #
     def push_frame(self, frame: RadarFrame, tracks: list[Target]) -> None:
-        if not frame.has_scan or frame.az_axis is None or frame.r_axis is None:
-            return
-        if (self._r_axis is None
-                or self._r_axis.shape != frame.r_axis.shape
-                or not np.array_equal(self._r_axis, frame.r_axis)
-                or self._az_eff.shape[0] != self._predict_az_eff_size(frame.az_axis)):
-            self._build_lut(frame.az_axis, frame.r_axis)
-
         now = frame.timestamp or time.monotonic()
         dt = (now - self._t_prev) if self._t_prev else 0.05
         self._t_prev = now
-        self._cflat *= exp(-max(1e-3, min(dt, 1.0)) / self.tau)
+        self._cflat *= exp(-max(1e-3, min(dt, 10.0)) / self.tau)
 
-        try:
-            vals = frame.scan[self._expand, :]
-        except IndexError:
-            return
-        if vals.shape != self._valid.shape:
-            return
-        self._cflat[self._lut[self._valid]] = vals[self._valid]
+        if frame.has_scan and frame.az_axis is not None and frame.r_axis is not None:
+            if (self._r_axis is None
+                    or self._r_axis.shape != frame.r_axis.shape
+                    or not np.array_equal(self._r_axis, frame.r_axis)
+                    or self._az_eff.shape[0] != self._predict_az_eff_size(frame.az_axis)):
+                self._build_lut(frame.az_axis, frame.r_axis)
 
-        fresh = frame.meta.get("fresh_az")
-        if isinstance(fresh, tuple) and len(self._az_eff) > 1:
-            a0, a1 = fresh
-            idx = int((a0 + (a1 - a0) / 2) % len(self._az_eff))
-            self._sweep_az = float(self._az_eff[idx])
+            try:
+                vals = frame.scan[self._expand, :]
+            except IndexError:
+                return
+            if vals.shape != self._valid.shape:
+                return
+            valid_idx = self._lut[self._valid]
+            self._cflat[valid_idx] = 0.0
+            np.maximum.at(self._cflat, valid_idx, vals[self._valid])
+
+            fresh = frame.meta.get("fresh_az")
+            if isinstance(fresh, tuple) and len(self._az_eff) > 1:
+                a0, a1 = fresh
+                idx = int((a0 + (a1 - a0) / 2) % len(self._az_eff))
+                self._sweep_az = float(self._az_eff[idx])
+            else:
+                self._sweep_az = None
         else:
             self._sweep_az = None
 
@@ -209,8 +216,9 @@ class PPIWidget(QWidget):
         self._fc_sol = frame.meta.get("fc_solution")
         self._deception_pts = list(frame.meta.get("deception_points") or [])
 
-        self._tracks = tracks
-        self._update_trails(tracks)
+        self._tracks = list(tracks)
+        self._update_trails(self._tracks)
+        self._img_dirty = True
         self.update()
 
     # ------------------------------------------------------------------ #
@@ -257,12 +265,13 @@ class PPIWidget(QWidget):
         p.setRenderHint(QPainter.Antialiasing, True)
         p.fillRect(self.rect(), QColor(*pal["bg"]))
 
-        # 减一点点底噪再映射颜色，目标更"跳"，也更接近真实显控的 STC 效果
-        arr = (np.clip((self._cflat - 0.015) / 0.985, 0.0, 1.0) * 255).astype(np.uint8)
-        arr = arr.reshape(self.RES, self.RES)
-        # 两趟 3x3 最大值 = 等效 5x5，把方位和距离两个方向的取样缝都补上，
-        # 否则距离向只有 72 个格子铺到 240 像素半径上，会画成一条条虚线。
-        arr = _dilate3(_dilate3(arr))
+        # 仅在帧数据变化时重建膨胀光栅缓冲；悬停/拖拽重绘直接复用缓存
+        if self._img_dirty or self._disp_buf is None:
+            arr = (np.clip((self._cflat - 0.015) / 0.985, 0.0, 1.0) * 255).astype(np.uint8)
+            arr = arr.reshape(self.RES, self.RES)
+            self._disp_buf = np.ascontiguousarray(_dilate3(_dilate3(arr)))
+            self._img_dirty = False
+        arr = self._disp_buf
         img = QImage(arr.data, self.RES, self.RES, self.RES, QImage.Format_Indexed8)
         img.setColorTable(self._ctable)
         # 光栅按"圆的直径"铺，而不是按整个方框铺。
@@ -270,11 +279,7 @@ class PPIWidget(QWidget):
         # 看起来就像"圆画歪了"。
         # 真运动：画面整体按本舰位移反向平移，本舰标记自己跑。
         # 网格保持不动 —— 真运动显示里，网格代表"屏幕空间"，运动的是回波。
-        offpx = offpy = 0.0
-        if self.true_motion:
-            rmax = max(1e-6, self._caps.range_max)
-            offpx = self.origin[0] / rmax * R
-            offpy = -self.origin[1] / rmax * R
+        offpx, offpy = self._zone_offset_px(cx, cy, R)
 
         box = QRectF(cx - R, cy - R, 2.0 * R, 2.0 * R)
         # 裁剪 = 屏幕可视圆 ∩ 天线覆盖圆。
@@ -820,6 +825,7 @@ class PPIWidget(QWidget):
     def pick_target(self, pos) -> int:
         """屏幕坐标 -> 最近的目标航迹号，超出 14 像素算没点中。"""
         cx, cy, R = self._geometry()
+        offpx, offpy = self._zone_offset_px(cx, cy, R)
         caps = self._caps
         span = max(1e-6, caps.range_max - caps.range_min)
         best: tuple[float, int] | None = None
@@ -828,7 +834,7 @@ class PPIWidget(QWidget):
                 continue
             r = (t.rng - caps.range_min) / span * R
             pt = self._pt(cx, cy, r, t.az)
-            d = hypot(pos.x() - pt.x(), pos.y() - pt.y())
+            d = hypot(pos.x() - (pt.x() - offpx), pos.y() - (pt.y() - offpy))
             if d <= 14.0 and (best is None or d < best[0]):
                 best = (d, t.tid)
         return best[1] if best else -1
@@ -852,7 +858,12 @@ class PPIWidget(QWidget):
         if not self.true_motion:
             return 0.0, 0.0
         rmax = max(1e-6, self._caps.range_max)
-        return self.origin[0] / rmax * R, -self.origin[1] / rmax * R
+        ox, oy = self.origin[0], self.origin[1]
+        if not self._north_up and abs(self._heading_deg) > 1e-6:
+            h = radians(self._heading_deg)
+            ch, sh = cos(h), sin(h)
+            ox, oy = ox * ch - oy * sh, oy * ch + ox * sh
+        return ox / rmax * R, -oy / rmax * R
 
     def _hit_zone_handle(self, pos) -> tuple[str, object] | None:
         """命中检测：优先多边形顶点，其次圆边缘调半径（resize），最后圆内移动（move）。"""
@@ -865,6 +876,7 @@ class PPIWidget(QWidget):
             s_rid = str(rid)
             for idx, (vx, vy) in enumerate(pts):
                 sp = self._pt(cx, cy, hypot(vx, vy) / rmax * R, atan2(vx, vy))
+                sp = QPointF(sp.x() - offpx, sp.y() - offpy)
                 if hypot(pos.x() - sp.x(), pos.y() - sp.y()) <= 10.0:
                     return "poly_vtx", (s_rid, idx, [[float(a), float(b)] for a, b in pts])
         for z in reversed(self._zones):
@@ -1120,7 +1132,8 @@ class PPIWidget(QWidget):
 
     def _screen_to_body(self, pt: QPointF) -> tuple[float, float] | None:
         cx, cy, R = self._geometry()
-        rng, az, inside = point_to_polar(pt.x(), pt.y(), cx, cy, R,
+        offpx, offpy = self._zone_offset_px(cx, cy, R)
+        rng, az, inside = point_to_polar(pt.x() + offpx, pt.y() + offpy, cx, cy, R,
                                          self._caps.range_min, self._caps.range_max)
         if not inside:
             return None

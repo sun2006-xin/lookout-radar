@@ -129,9 +129,30 @@ class RHIScopeWidget(QWidget):
             p.setPen(QPen(QColor(*pal["text"])))
             p.drawText(QPointF(4, y + 4), f"{zz:.1f}m")
 
-        # 俯仰×距离热图投影（若设备提供了 rhi 矩阵）
+        # 俯仰×距离热图按真实 (r, el) -> (r, z) 几何重采样，与航迹点及仰角射线对齐
         if self._rhi is not None and self._rhi.size > 0:
-            arr = np.ascontiguousarray((np.clip(self._rhi, 0.0, 1.0) * 255).astype(np.uint8)[::-1])
+            rhi = self._rhi
+            if (self._el_axis is not None and self._r_axis is not None
+                    and self._el_axis.size >= 2 and self._r_axis.size >= 2
+                    and rhi.shape == (self._el_axis.size, self._r_axis.size)):
+                nh = 96
+                nw = int(min(180, self._r_axis.size))
+                z_vec = np.linspace(0.0, zmax, nh, dtype=np.float32)[:, None]
+                r_vec = np.linspace(0.0, rmax, nw, dtype=np.float32)[None, :]
+                r_slant = np.hypot(r_vec, z_vec)
+                el_rad = np.arctan2(z_vec, np.maximum(1e-3, r_vec))
+                el_ax = self._el_axis.astype(np.float32)
+                r_ax = self._r_axis.astype(np.float32)
+                valid = (
+                    (el_rad >= el_ax[0]) & (el_rad <= el_ax[-1])
+                    & (r_slant >= r_ax[0]) & (r_slant <= r_ax[-1])
+                )
+                ei = np.clip(np.searchsorted(el_ax, el_rad), 0, el_ax.size - 1)
+                ri = np.clip(np.searchsorted(r_ax, r_slant), 0, r_ax.size - 1)
+                cart = np.where(valid, rhi[ei, ri], 0.0)
+                arr = np.ascontiguousarray((np.clip(cart, 0.0, 1.0) * 255).astype(np.uint8)[::-1])
+            else:
+                arr = np.ascontiguousarray((np.clip(rhi, 0.0, 1.0) * 255).astype(np.uint8)[::-1])
             h, w = arr.shape
             img = QImage(arr.data, w, h, w, QImage.Format_Indexed8)
             img.setColorTable(self._ctable)

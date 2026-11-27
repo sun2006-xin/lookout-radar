@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS tracks (
     threat INTEGER, cls TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_tracks ON tracks(sid, ts);
+CREATE INDEX IF NOT EXISTS ix_tracks_tid ON tracks(sid, tid, ts);
 CREATE TABLE IF NOT EXISTS events (
     sid     INTEGER,
     ts      REAL,
@@ -60,6 +61,7 @@ CREATE TABLE IF NOT EXISTS events (
     tid     INTEGER
 );
 CREATE INDEX IF NOT EXISTS ix_events ON events(sid, ts);
+CREATE INDEX IF NOT EXISTS ix_events_kind ON events(sid, kind, rule_id);
 CREATE TABLE IF NOT EXISTS archives (
     sid      INTEGER,
     path     TEXT,
@@ -86,39 +88,93 @@ class SessionInfo:
 
 
 class FrameArchive:
-    """强度矩阵的顺序归档文件。
+    """雷达帧归档文件（兼容 RSF1 紧凑矩阵与 RSF2 全维度自描述帧）。
 
-    格式（小端）：
-        b"RSF1" | n_az u16 | n_rng u16 | ts f64 | az f32[n_az] | r f32[n_rng] |
-        data f16[n_az, n_rng]
-    刻意用 float16 存：显示用途 16 位精度足够，体积直接砍一半。
+    RSF1（小端）：
+        b"RSF1" | n_az u16 | n_rng u16 | ts f64 | az f32[n_az] | r f32[n_rng] | data f16[n_az, n_rng]
+    RSF2（小端，含长度可跳转索引与统一单调/UTC双时钟）：
+        b"RSF2" | rec_len u32 | body[rec_len]
+        body: mono_ts f64 | utc_ts f64 | flags u8 | n_az u16 | n_rng u16 | n_dop u16 | n_el u16
+              | az f32 | r f32 | scan f16 | [rd_v f32 + rd f16] | [el f32 + rhi f16] | meta_targets_json
     """
 
     MAGIC = b"RSF1"
+    MAGIC_V2 = b"RSF2"
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, version: int = 2) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.version = 2 if int(version) >= 2 else 1
         self._fh = open(self.path, "wb")
         self.frames = 0
         self.first_ts = 0.0
         self.last_ts = 0.0
 
-    def append(self, frame: RadarFrame) -> bool:
+    def append(self, frame: RadarFrame, utc_ts: float | None = None) -> bool:
         if not frame.has_scan or frame.az_axis is None or frame.r_axis is None:
             return False
         scan = np.ascontiguousarray(frame.scan, dtype=np.float16)
         n_az, n_rng = scan.shape
-        self._fh.write(self.MAGIC)
-        self._fh.write(struct.pack("<HH", n_az, n_rng))
-        self._fh.write(struct.pack("<d", float(frame.timestamp)))
-        self._fh.write(np.ascontiguousarray(frame.az_axis, dtype=np.float32).tobytes())
-        self._fh.write(np.ascontiguousarray(frame.r_axis, dtype=np.float32).tobytes())
-        self._fh.write(scan.tobytes())
+        az_b = np.ascontiguousarray(frame.az_axis, dtype=np.float32).tobytes()
+        r_b = np.ascontiguousarray(frame.r_axis, dtype=np.float32).tobytes()
+        sc_b = scan.tobytes()
+        ts_val = float(frame.timestamp)
+
+        if self.version == 1:
+            self._fh.write(self.MAGIC)
+            self._fh.write(struct.pack("<HH", n_az, n_rng))
+            self._fh.write(struct.pack("<d", ts_val))
+            self._fh.write(az_b)
+            self._fh.write(r_b)
+            self._fh.write(sc_b)
+        else:
+            flags = 0
+            rd_b = b""
+            n_dop = 0
+            if frame.rd is not None and frame.rd_v_axis is not None and frame.rd.shape == (frame.rd_v_axis.size, n_rng):
+                flags |= 0x01
+                n_dop = int(frame.rd_v_axis.size)
+                rd_b = (
+                    np.ascontiguousarray(frame.rd_v_axis, dtype=np.float32).tobytes()
+                    + np.ascontiguousarray(frame.rd, dtype=np.float16).tobytes()
+                )
+            rhi_b = b""
+            n_el = 0
+            if frame.rhi is not None and frame.el_axis is not None and frame.rhi.shape == (frame.el_axis.size, n_rng):
+                flags |= 0x02
+                n_el = int(frame.el_axis.size)
+                rhi_b = (
+                    np.ascontiguousarray(frame.el_axis, dtype=np.float32).tobytes()
+                    + np.ascontiguousarray(frame.rhi, dtype=np.float16).tobytes()
+                )
+            safe_meta = {
+                k: v for k, v in (frame.meta or {}).items()
+                if isinstance(v, (str, int, float, bool, list, dict, type(None)))
+            }
+            js = json.dumps({
+                "source": frame.source,
+                "meta": safe_meta,
+                "targets": [
+                    [float(t.x), float(t.y), float(t.vx), float(t.vy),
+                     float(getattr(t, "z", 0.0)), float(getattr(t, "el_deg", 0.0)),
+                     float(getattr(t, "rcs", 0.0)), float(t.snr), int(t.tid),
+                     int(t.threat), str(t.cls)]
+                    for t in frame.targets
+                ],
+            }, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            utc = float(time.time() if utc_ts is None else utc_ts)
+            body = b"".join([
+                struct.pack("<ddBHHHH", ts_val, utc, flags, n_az, n_rng, n_dop, n_el),
+                az_b, r_b, sc_b, rd_b, rhi_b, js,
+            ])
+            self._fh.write(self.MAGIC_V2)
+            self._fh.write(struct.pack("<I", len(body)))
+            self._fh.write(body)
+
         self.frames += 1
         if not self.first_ts:
-            self.first_ts = frame.timestamp
-        self.last_ts = frame.timestamp
+            self.first_ts = ts_val
+        self.last_ts = ts_val
         return True
 
     def close(self) -> None:
@@ -128,27 +184,162 @@ class FrameArchive:
         except Exception:
             pass
 
+    @classmethod
+    def _decode_v2_body(cls, body: bytes) -> tuple[RadarFrame, float] | None:
+        hdr_sz = struct.calcsize("<ddBHHHH")
+        if len(body) < hdr_sz:
+            return None
+        mono_ts, utc_ts, flags, n_az, n_rng, n_dop, n_el = struct.unpack_from("<ddBHHHH", body, 0)
+        pos = hdr_sz
+        az = np.frombuffer(body, dtype=np.float32, count=n_az, offset=pos).copy()
+        pos += 4 * n_az
+        r = np.frombuffer(body, dtype=np.float32, count=n_rng, offset=pos).copy()
+        pos += 4 * n_rng
+        scan = np.frombuffer(body, dtype=np.float16, count=n_az * n_rng, offset=pos).reshape(n_az, n_rng).astype(np.float32)
+        pos += 2 * n_az * n_rng
+        rd = rd_v = None
+        if (flags & 0x01) and n_dop > 0:
+            rd_v = np.frombuffer(body, dtype=np.float32, count=n_dop, offset=pos).copy()
+            pos += 4 * n_dop
+            rd = np.frombuffer(body, dtype=np.float16, count=n_dop * n_rng, offset=pos).reshape(n_dop, n_rng).astype(np.float32)
+            pos += 2 * n_dop * n_rng
+        rhi = el_ax = None
+        if (flags & 0x02) and n_el > 0:
+            el_ax = np.frombuffer(body, dtype=np.float32, count=n_el, offset=pos).copy()
+            pos += 4 * n_el
+            rhi = np.frombuffer(body, dtype=np.float16, count=n_el * n_rng, offset=pos).reshape(n_el, n_rng).astype(np.float32)
+            pos += 2 * n_el * n_rng
+        meta: dict = {}
+        targets: list[Target] = []
+        source = ""
+        if pos < len(body):
+            try:
+                info = json.loads(body[pos:].decode("utf-8"))
+                source = str(info.get("source") or "")
+                meta = dict(info.get("meta") or {})
+                for item in info.get("targets") or ():
+                    targets.append(Target(
+                        x=item[0], y=item[1], vx=item[2], vy=item[3],
+                        z=item[4], el_deg=item[5], rcs=item[6],
+                        snr=item[7], tid=int(item[8]), threat=int(item[9]), cls=str(item[10]),
+                    ))
+            except Exception:
+                pass
+        meta["utc_ts"] = utc_ts
+        return RadarFrame(
+            timestamp=mono_ts, scan=scan, az_axis=az, r_axis=r,
+            targets=targets, rd=rd, rd_v_axis=rd_v, rhi=rhi, el_axis=el_ax,
+            source=source, meta=meta,
+        ), utc_ts
+
     # ---- 读 ----
     @classmethod
-    def read_frames(cls, path: str | Path) -> Iterator[tuple[float, np.ndarray, np.ndarray, np.ndarray]]:
+    def read_full_frames(cls, path: str | Path) -> Iterator[RadarFrame]:
+        """读取全部完整 RadarFrame（兼容 RSF1 与 RSF2，含 RD/RHI/目标/UTC时钟）。"""
         with open(path, "rb") as fh:
             while True:
                 magic = fh.read(4)
                 if len(magic) < 4:
                     return
-                if magic != cls.MAGIC:
+                if magic == cls.MAGIC:
+                    head = fh.read(12)
+                    if len(head) < 12:
+                        return
+                    n_az, n_rng = struct.unpack("<HH", head[:4])
+                    ts = struct.unpack("<d", head[4:12])[0]
+                    az = np.frombuffer(fh.read(4 * n_az), dtype=np.float32).copy()
+                    r = np.frombuffer(fh.read(4 * n_rng), dtype=np.float32).copy()
+                    data = np.frombuffer(fh.read(2 * n_az * n_rng), dtype=np.float16)
+                    if data.size != n_az * n_rng:
+                        return
+                    yield RadarFrame(
+                        timestamp=ts, scan=data.reshape(n_az, n_rng).astype(np.float32),
+                        az_axis=az, r_axis=r,
+                    )
+                elif magic == cls.MAGIC_V2:
+                    raw_len = fh.read(4)
+                    if len(raw_len) < 4:
+                        return
+                    rec_len = struct.unpack("<I", raw_len)[0]
+                    body = fh.read(rec_len)
+                    if len(body) < rec_len:
+                        return
+                    res = cls._decode_v2_body(body)
+                    if res is None:
+                        return
+                    yield res[0]
+                else:
                     return
+
+    @classmethod
+    def read_frames(cls, path: str | Path) -> Iterator[tuple[float, np.ndarray, np.ndarray, np.ndarray]]:
+        for f in cls.read_full_frames(path):
+            if f.scan is not None and f.az_axis is not None and f.r_axis is not None:
+                yield f.timestamp, f.scan, f.az_axis, f.r_axis
+
+    @classmethod
+    def index_frames(cls, path: str | Path) -> list[tuple[int, float, float]]:
+        """快速扫描归档帧偏移索引 [(file_offset, mono_ts, utc_ts), ...]，用于 O(1) 随机跳转。"""
+        idx: list[tuple[int, float, float]] = []
+        with open(path, "rb") as fh:
+            while True:
+                off = fh.tell()
+                magic = fh.read(4)
+                if len(magic) < 4:
+                    break
+                if magic == cls.MAGIC:
+                    head = fh.read(12)
+                    if len(head) < 12:
+                        break
+                    n_az, n_rng = struct.unpack("<HH", head[:4])
+                    ts = struct.unpack("<d", head[4:12])[0]
+                    skip = 4 * n_az + 4 * n_rng + 2 * n_az * n_rng
+                    fh.seek(skip, 1)
+                    idx.append((off, ts, ts))
+                elif magic == cls.MAGIC_V2:
+                    raw_len = fh.read(4)
+                    if len(raw_len) < 4:
+                        break
+                    rec_len = struct.unpack("<I", raw_len)[0]
+                    hdr = fh.read(16)
+                    if len(hdr) < 16:
+                        break
+                    mono_ts, utc_ts = struct.unpack("<dd", hdr)
+                    fh.seek(max(0, rec_len - 16), 1)
+                    idx.append((off, mono_ts, utc_ts))
+                else:
+                    break
+        return idx
+
+    @classmethod
+    def read_frame_at(cls, path: str | Path, offset: int) -> RadarFrame | None:
+        with open(path, "rb") as fh:
+            fh.seek(int(offset))
+            magic = fh.read(4)
+            if magic == cls.MAGIC:
                 head = fh.read(12)
                 if len(head) < 12:
-                    return
+                    return None
                 n_az, n_rng = struct.unpack("<HH", head[:4])
                 ts = struct.unpack("<d", head[4:12])[0]
-                az = np.frombuffer(fh.read(4 * n_az), dtype=np.float32)
-                r = np.frombuffer(fh.read(4 * n_rng), dtype=np.float32)
+                az = np.frombuffer(fh.read(4 * n_az), dtype=np.float32).copy()
+                r = np.frombuffer(fh.read(4 * n_rng), dtype=np.float32).copy()
                 data = np.frombuffer(fh.read(2 * n_az * n_rng), dtype=np.float16)
                 if data.size != n_az * n_rng:
-                    return
-                yield ts, data.reshape(n_az, n_rng).astype(np.float32), az, r
+                    return None
+                return RadarFrame(timestamp=ts, scan=data.reshape(n_az, n_rng).astype(np.float32),
+                                  az_axis=az, r_axis=r)
+            if magic == cls.MAGIC_V2:
+                raw_len = fh.read(4)
+                if len(raw_len) < 4:
+                    return None
+                rec_len = struct.unpack("<I", raw_len)[0]
+                body = fh.read(rec_len)
+                if len(body) < rec_len:
+                    return None
+                res = cls._decode_v2_body(body)
+                return res[0] if res is not None else None
+        return None
 
 
 class Store:
@@ -289,11 +480,18 @@ class Store:
         return [SessionInfo(r[0], r[1], r[2], r[3], r[4] or "",
                             json.loads(r[5] or "{}"), r[6] or "") for r in rows]
 
-    def tracks_of(self, sid: int, limit: int = 200000) -> list[tuple]:
+    def tracks_of(self, sid: int, limit: int = 200000,
+                  include_3d: bool = False) -> list[tuple]:
+        cols = (
+            "ts,tid,x,y,vx,vy,rng,az,snr,threat,cls,z,el_deg,rcs"
+            if include_3d else
+            "ts,tid,x,y,vx,vy,rng,az,snr,threat,cls"
+        )
         with self._lock:
             return self._db.execute(
-                "SELECT ts,tid,x,y,vx,vy,rng,az,snr,threat,cls FROM tracks"
-                " WHERE sid=? ORDER BY ts LIMIT ?", (sid, limit)).fetchall()
+                f"SELECT {cols} FROM tracks WHERE sid=? ORDER BY ts LIMIT ?",
+                (sid, limit),
+            ).fetchall()
 
     def events_of(self, sid: int, limit: int = 2000) -> list[tuple]:
         with self._lock:
@@ -423,12 +621,17 @@ class Store:
             self._db.commit()
             return len(sids)
 
-    def tracks_window(self, sid: int, t0: float, t1: float) -> list[tuple]:
+    def tracks_window(self, sid: int, t0: float, t1: float,
+                      include_3d: bool = False) -> list[tuple]:
         """按时间窗口查询航迹（走 ix_tracks(sid, ts) 索引，用于时间轴回放 C3）。"""
+        cols = (
+            "ts, tid, x, y, vx, vy, rng, az, snr, threat, cls, z, el_deg, rcs"
+            if include_3d else
+            "ts, tid, x, y, vx, vy, rng, az, snr, threat, cls"
+        )
         with self._lock:
             return self._db.execute(
-                "SELECT ts, tid, x, y, vx, vy, rng, az, snr, threat, cls"
-                " FROM tracks WHERE sid=? AND ts>=? AND ts<=? ORDER BY ts ASC",
+                f"SELECT {cols} FROM tracks WHERE sid=? AND ts>=? AND ts<=? ORDER BY ts ASC",
                 (sid, float(t0), float(t1)),
             ).fetchall()
 

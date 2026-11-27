@@ -67,11 +67,13 @@ class BridgeServer:
     """把 Forwarder 发出的 UDP JSON 帧实时广播给 WebSocket 客户端。"""
 
     def __init__(self, udp_port: int = 9100, ws_port: int = 9101,
-                 http_port: int = 8088, ros_mode: bool = False) -> None:
+                 http_port: int = 8088, ros_mode: bool = False,
+                 token: str = "") -> None:
         self.udp_port = udp_port
         self.ws_port = ws_port
         self.http_port = http_port
         self.ros_mode = bool(ros_mode)
+        self.token = str(token or "").strip()
         self._clients: list[socket.socket] = []
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -128,6 +130,13 @@ class BridgeServer:
     def _handshake(self, conn: socket.socket) -> None:
         try:
             req = conn.recv(2048).decode("utf-8", errors="ignore")
+            req_line = req.splitlines()[0] if req else ""
+            if self.token:
+                ok_tok = (f"token={self.token}" in req_line) or (f"Bearer {self.token}".lower() in req.lower())
+                if not ok_tok:
+                    conn.sendall(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n")
+                    conn.close()
+                    return
             key = ""
             for line in req.splitlines():
                 if line.lower().startswith("sec-websocket-key:"):
@@ -145,8 +154,34 @@ class BridgeServer:
             conn.sendall(resp.encode("ascii"))
             with self._lock:
                 self._clients.append(conn)
+            threading.Thread(target=self._client_rx_loop, args=(conn,), daemon=True).start()
         except Exception:
             conn.close()
+
+    def _client_rx_loop(self, conn: socket.socket) -> None:
+        """处理客户端 Close/Ping 控制帧，防止半开连接僵死。"""
+        conn.settimeout(1.0)
+        while not self._stop.is_set():
+            try:
+                hdr = conn.recv(2)
+                if not hdr or len(hdr) < 2:
+                    break
+                opcode = hdr[0] & 0x0F
+                if opcode == 0x8:  # Close
+                    break
+                if opcode == 0x9:  # Ping -> Pong
+                    conn.sendall(struct.pack("!BB", 0x8A, 0))
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+        with self._lock:
+            if conn in self._clients:
+                self._clients.remove(conn)
+        try:
+            conn.close()
+        except Exception:
+            pass
 
     def start(self) -> None:
         threading.Thread(target=self._udp_loop, daemon=True).start()
@@ -169,9 +204,10 @@ def main() -> int:
     parser.add_argument("--ws-port", type=int, default=9101)
     parser.add_argument("--http-port", type=int, default=8088)
     parser.add_argument("--ros", action="store_true", help="转换为 Foxglove / ROS 兼容 JSON 载荷")
+    parser.add_argument("--token", default="", help="可选 WebSocket 连接鉴权口令")
     args = parser.parse_args()
 
-    bridge = BridgeServer(args.udp_port, args.ws_port, args.http_port, ros_mode=args.ros)
+    bridge = BridgeServer(args.udp_port, args.ws_port, args.http_port, ros_mode=args.ros, token=args.token)
     bridge.start()
 
     class _Handler(http.server.BaseHTTPRequestHandler):

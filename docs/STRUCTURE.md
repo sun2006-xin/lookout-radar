@@ -1,7 +1,7 @@
 # 项目文件具体解释
 
 > 一个文件只干一件事。想定位模块职责或改动入口可先查下表。
-> 源码约 13 500 行 / 73 个 Python 文件 / 39 组核心单元测试（不含依赖与打包产物）。
+> 源码约 19 000 行 / 88+ 个 Python 文件 / 55 组核心单元测试（不含依赖与打包产物）。
 > 产品名「瞭望 Lookout」，Python 包名 `radarscope`。
 >
 > 配套：[ARCHITECTURE.md](ARCHITECTURE.md) 架构与数据契约 · [ROADMAP.md](ROADMAP.md) 开发路线图。
@@ -31,7 +31,7 @@
 | `data/` | 运行时生成，**不进版本库**：见下表 |
 | `plugins/` | 用户插件目录，丢 `.py` 即生效 |
 | `tools/` | 开发/文档工具（下面单列） |
-| `tests/` | `test_core.py`（39 组测试）+ `fixtures/`（5 份 `.bin`/`.rad` 回归夹具与 `manifest.json`） |
+| `tests/` | `test_core.py`（55 组测试）+ `fixtures/`（5 份 `.bin`/`.rad` 回归夹具与 `manifest.json`） |
 | `docs/` | 全部文档（下面单列） |
 | `installer/` | `radarscope.iss` 安装包脚本与 `Lookout.spec` 构建配置 |
 | `firmware/` | `hc_sr04_servo.ino`，HC-SR04 + 舵机扫描的 Arduino 示例 |
@@ -82,6 +82,9 @@
 | `nmea_nav.py` | NMEA 本船定位与航向解析：`$GPGGA/$GNRMC/$HEHDT/$RARSD` 校验与 UDP 监听 | `NmeaOwnShip`、`feed_line()`、`snapshot()` |
 | `ros_export.py` | ROS 2 / Foxglove 遥测导出与二进制 MCAP v0 日志封装 | `to_ros_laserscan()`、`to_ros_pointcloud2()`、`write_mcap_json_log()` |
 | `mission.py` | 一体化任务包录制（`MissionRecorder`）与离线多参数重算对比（`recompute_mission_comparison`） | 同步存档 `manifest.json`、`frames.rad` 与参数快照，支持 CA/GO/OS-CFAR + 杂波/滤波对比 |
+| `metrics.py` | 多目标跟踪定量评估：`ospa_distance()`、`gospa_distance()`、`evaluate_tracker_sequence()` | 基于 `linear_sum_assignment_min`，量化定位误差、漏检、虚警与 ID 跳变（G2） |
+| `geodesy.py` | WGS84 ↔ ECEF ↔ ENU 高精度大地坐标转换与 $4/3 R_e$ 雷达视距/曲率下沉修正 | 纯标准库数学，零 pyproj 依赖（H2） |
+| `runtime.py` | 无界面核心运行时 `RadarEngineRuntime`（采集→流水线→追踪→告警→转发→RSF2/DB） | 零 PyQt5，支撑 `main.py --daemon` 后台守护与长稳压测（I1） |
 
 ---
 
@@ -99,6 +102,10 @@
 | `ldlidar.py` | device | omni | LD19/LD06/D500 旋转激光，360°，CRC + 碎片重同步 |
 | `ultrasonic.py` | device | sector | HC-SR04 + 舵机，180° 机械扫描，文本协议 |
 | `custom_generic.py` | device | omni/sector | 加载预设与 `custom_drivers.json`，自动注册 NMEA TTM 航海雷达 / 77G CSV / 通用串口二进制帧 |
+| `ti_mmwave.py` | device | rd | TI IWR6843 / AWR1843 / AWR2944 标准 40B Header + UART TLV（Type 1/7/1010）驱动 |
+| `adsb.py` | device | omni | ADS-B 航空监视：SBS-1 30003 文本流与 `dump1090`/`readsb` `aircraft.json` 投影 |
+| `odid.py` | device | omni | Open Drone ID（ASTM F3411 25B Location 报文与 MAVLink/JSON）无人机远程识别驱动 |
+| `asterix.py` | device | omni | EUROCONTROL ASTERIX CAT 048（点迹航迹）与 CAT 240（雷达原始视频块）二进制解码 |
 | `replay.py` | replay | sector | 回放 `.rad` 帧归档；到文件尾标记 `_finished`，下一轮再抛，不丢最后一帧 |
 
 **驱动里不许操作界面、不许按型号写 `if did == "..."`。** 型号只出现在 `label`/`vendor` 字符串。
@@ -158,7 +165,8 @@
 
 | 文件 | 具体职责 |
 |---|---|
-| `check.py` | **提交前必跑**：编译 + 50 组测试 + 链路自检 + 录制夹具回归，判据与 CI 一致 |
+| `check.py` | **提交前必跑**：编译 + 55 组测试 + 链路自检 + 录制夹具回归，判据与 CI 一致 |
+| `eval_tracker.py` | 基于 `core/metrics.py` 对比 `alpha_beta` / `kalman3d` / `imm3d` / 马氏门限的 GOSPA / OSPA 量化基准 |
 | `selftest.py` | 独立的无界面链路自检（含 `validate_frame_meta` 校验） |
 | `capture_check.py` | 离线校验 `.bin`/`.rad` 录制夹具（帧数/峰值/目标数/CRC 拒绝数），默认批量跑 `tests/fixtures/manifest.json` |
 | `ws_bridge.py` | 零依赖 UDP→WebSocket 桥接与静态页服务器（配合 `web_viewer.html` 做 Web 订阅端） |
@@ -176,7 +184,7 @@
 
 ## `tests/` —— 测试即规格
 
-`tests/test_core.py` 共 **50 组**，不依赖 pytest，直接 `python tests/test_core.py`。
+`tests/test_core.py` 共 **55 组**，不依赖 pytest，直接 `python tests/test_core.py`。
 **不打桩、不 mock**：直接跑真实算法与真实 SQLite。
 
 | 组 | 盯的是什么 |

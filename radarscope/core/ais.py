@@ -43,14 +43,11 @@ class AisTarget:
     kind: int = 0           # 报文类型
 
     def local_xy(self, ref_lat: float, ref_lon: float) -> tuple[float, float]:
-        """经纬度 → 以参考点为原点的本地米制坐标（等距圆柱近似）。
+        """经纬度 → 以参考点为原点的本地米制坐标（WGS84 -> ENU 切平面投影）。"""
+        from .geodesy import geodetic_to_enu
 
-        在几公里范围内这个近似的误差远小于 AIS 本身的定位误差，
-        没必要上 UTM 投影。
-        """
-        lat_m = (self.lat - ref_lat) * 111_320.0
-        lon_m = (self.lon - ref_lon) * 111_320.0 * _cos_deg(ref_lat)
-        return lon_m, lat_m          # x 向东，y 向北 → 与雷达坐标一致
+        e, n, _u = geodetic_to_enu(self.lat, self.lon, 0.0, ref_lat, ref_lon, 0.0)
+        return e, n          # x 向东，y 向北 → 与雷达坐标一致
 
 
 def _cos_deg(deg: float) -> float:
@@ -100,33 +97,91 @@ def _i(bits: str, start: int, length: int) -> int:
     return v
 
 
-def parse_aivdm(sentence: str) -> AisTarget | None:
-    """解析一条 AIVDM 语句。非位置报告、校验失败、分片包头都返回 None。"""
-    s = sentence.strip()
-    if not s.startswith(("!AIVDM", "!AIVDO")):
-        return None
-    if not checksum_ok(s):
-        return None
-    body = s[1:].split("*")[0]
-    parts = body.split(",")
-    if len(parts) < 7:
-        return None
-    try:
-        frag_cnt = int(parts[1])
-        frag_no = int(parts[2])
-        payload = parts[5]
-        fill = int(parts[6] or 0)
-    except (ValueError, IndexError):
-        return None
-    if frag_cnt != 1 or frag_no != 1:
-        return None                     # 多分片报文暂不支持（位置报告都在单分片里）
-    try:
-        bits = payload_to_bits(payload, fill)
-    except ValueError:
-        return None
+def _sixbit_str(bits: str, start: int, length: int) -> str:
+    """AIS 6-bit ASCII 解码（Type 5 / Type 24 船名与呼号）。"""
+    chars = []
+    for pos in range(start, min(len(bits), start + length) - 5, 6):
+        code = int(bits[pos:pos + 6], 2)
+        if code == 0:
+            break
+        chars.append(chr(code + 64) if code < 32 else chr(code))
+    return "".join(chars).replace("@", "").strip()
+
+
+class AisDecoder:
+    """有状态 AIS 解码器：支持 Type 5 / 24 多分片重组，并自动把船名回填到位置报告。"""
+
+    def __init__(self) -> None:
+        self._frags: dict[tuple[int, str, str], dict[int, str]] = {}
+        self.names: dict[int, str] = {}
+
+    def feed(self, sentence: str) -> AisTarget | None:
+        s = sentence.strip()
+        if not s.startswith(("!AIVDM", "!AIVDO")) or not checksum_ok(s):
+            return None
+        parts = s[1:].split("*")[0].split(",")
+        if len(parts) < 7:
+            return None
+        try:
+            frag_cnt = int(parts[1])
+            frag_no = int(parts[2])
+            seq_id = parts[3]
+            chan = parts[4]
+            payload = parts[5]
+            fill = int(parts[6] or 0)
+        except (ValueError, IndexError):
+            return None
+
+        if frag_cnt <= 1:
+            full_payload = payload
+            full_fill = fill
+        else:
+            key = (frag_cnt, seq_id, chan)
+            slot = self._frags.setdefault(key, {})
+            slot[frag_no] = payload
+            if len(slot) < frag_cnt:
+                return None
+            if any(k not in slot for k in range(1, frag_cnt + 1)):
+                return None
+            full_payload = "".join(slot[k] for k in range(1, frag_cnt + 1))
+            full_fill = fill
+            self._frags.pop(key, None)
+
+        try:
+            bits = payload_to_bits(full_payload, full_fill)
+        except ValueError:
+            return None
+        if len(bits) < 38:
+            return None
+
+        kind = _u(bits, 0, 6)
+        mmsi = _u(bits, 8, 30)
+        if kind == 5 and len(bits) >= 232:
+            name = _sixbit_str(bits, 112, 120) or _sixbit_str(bits, 70, 42)
+            if name:
+                self.names[mmsi] = name
+            return AisTarget(mmsi=mmsi, lat=0.0, lon=0.0, name=self.names.get(mmsi, ""), kind=5)
+        if kind == 24 and len(bits) >= 160:
+            part = _u(bits, 38, 2)
+            if part == 0:
+                name = _sixbit_str(bits, 40, 120)
+                if name:
+                    self.names[mmsi] = name
+            elif part == 1 and mmsi not in self.names:
+                call = _sixbit_str(bits, 90, 42)
+                if call:
+                    self.names[mmsi] = call
+            return AisTarget(mmsi=mmsi, lat=0.0, lon=0.0, name=self.names.get(mmsi, ""), kind=24)
+
+        tgt = _decode_pos_bits(bits)
+        if tgt is not None and not tgt.name:
+            tgt.name = self.names.get(tgt.mmsi, "")
+        return tgt
+
+
+def _decode_pos_bits(bits: str) -> AisTarget | None:
     if len(bits) < 38:
         return None
-
     kind = _u(bits, 0, 6)
     mmsi = _u(bits, 8, 30)
     t = AisTarget(mmsi=mmsi, lat=0.0, lon=0.0, kind=kind)
@@ -164,15 +219,43 @@ def parse_aivdm(sentence: str) -> AisTarget | None:
     return t
 
 
-def make_aivdm(payload_bits: str, fill: int = 0, chan: str = "A") -> str:
-    """把 bit 串反向打成一条 AIVDM（自测用，也方便造测试数据）。"""
+def parse_aivdm(sentence: str) -> AisTarget | None:
+    """解析一条单分片 AIVDM 位置报告语句。"""
+    s = sentence.strip()
+    if not s.startswith(("!AIVDM", "!AIVDO")):
+        return None
+    if not checksum_ok(s):
+        return None
+    body = s[1:].split("*")[0]
+    parts = body.split(",")
+    if len(parts) < 7:
+        return None
+    try:
+        frag_cnt = int(parts[1])
+        frag_no = int(parts[2])
+        payload = parts[5]
+        fill = int(parts[6] or 0)
+    except (ValueError, IndexError):
+        return None
+    if frag_cnt != 1 or frag_no != 1:
+        return None
+    try:
+        bits = payload_to_bits(payload, fill)
+    except ValueError:
+        return None
+    return _decode_pos_bits(bits)
+
+
+def make_aivdm(payload_bits: str, fill: int = 0, chan: str = "A",
+               frag_cnt: int = 1, frag_no: int = 1, seq_id: str = "") -> str:
+    """把 bit 串反向打成 AIVDM 语句（自测用，也支持多分片测试）。"""
     bits = payload_bits + "0" * fill
     chars = []
     for i in range(0, len(bits), 6):
         v = int(bits[i:i + 6].ljust(6, "0"), 2)
         chars.append(chr(v + 48 + (8 if v + 48 > 87 else 0)))
     payload = "".join(chars)
-    body = f"AIVDM,1,1,,{chan},{payload},{fill}"
+    body = f"AIVDM,{frag_cnt},{frag_no},{seq_id},{chan},{payload},{fill}"
     x = 0
     for ch in body:
         x ^= ord(ch)

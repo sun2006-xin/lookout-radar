@@ -12,7 +12,7 @@ import socket
 import threading
 import time
 
-from .ais import AisTarget, parse_aivdm
+from .ais import AisDecoder, AisTarget
 
 
 class AisFeed:
@@ -22,6 +22,7 @@ class AisFeed:
         self._sock: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._decoder = AisDecoder()
         self._targets: dict[int, tuple[AisTarget, float]] = {}
         self.received = 0
         self.errors = 0
@@ -80,13 +81,20 @@ class AisFeed:
         """解析一行。单独暴露出来，方便绕过网络做测试。"""
         if not self.running:
             return None                 # stop() 之后不再往表里写
-        t = parse_aivdm(line)
+        t = self._decoder.feed(line)
         if t is None:
             if line.strip().startswith(("!AIVD", "$AIVD")):
                 self.errors += 1
             return None
         self.received += 1
         with self._lock:
+            if t.kind in (5, 24):
+                old = self._targets.get(t.mmsi)
+                if old is not None and t.name:
+                    old[0].name = t.name
+                return t
+            if not t.name and t.mmsi in self._decoder.names:
+                t.name = self._decoder.names[t.mmsi]
             self._targets[t.mmsi] = (t, time.monotonic())
         return t
 

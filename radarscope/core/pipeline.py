@@ -71,15 +71,27 @@ def _go_cfar_background(x: np.ndarray, guard: int = 2, train: int = 5) -> np.nda
 
 def _os_cfar_background(x: np.ndarray, guard: int = 2, train: int = 5,
                         quantile: float = 0.75) -> np.ndarray:
-    """OS-CFAR（有序统计）：沿距离训练窗取分位数，多目标靠得近时不互相抬高背景。"""
+    """二维 OS-CFAR（有序统计）：沿距离与邻近方位训练窗取分位数，多目标靠得近时不互相抬高背景。"""
     h, w = x.shape
-    pad = np.pad(x, ((0, 0), (train, train)), mode="edge")
-    offsets = [k for k in range(-train, train + 1) if abs(k) > guard]
-    if not offsets:
+    pad = np.pad(x, ((2, 2), (train, train)), mode="edge")
+    r_offs = [k for k in range(-train, train + 1) if abs(k) > guard]
+    if not r_offs:
         return _cfar_background(x, guard, train)
-    stack = np.stack([pad[:, train + off:train + off + w] for off in offsets], axis=0)
-    kth = max(0, min(len(offsets) - 1, int(round(quantile * (len(offsets) - 1)))))
+    az_offs = (-2, 0, 2) if h >= 5 else (0,)
+    slices = [pad[2 + da:2 + da + h, train + dr:train + dr + w]
+              for da in az_offs for dr in r_offs]
+    stack = np.stack(slices, axis=0)
+    kth = max(0, min(len(slices) - 1, int(round(quantile * (len(slices) - 1)))))
     return np.partition(stack, kth, axis=0)[kth].astype(np.float32)
+
+
+def _parabolic_offset(ym1: float, y0: float, yp1: float) -> float:
+    """三点抛物线亚像素峰值偏移估计，范围限幅 [-0.5, 0.5]。"""
+    denom = ym1 - 2.0 * y0 + yp1
+    if abs(denom) < 1e-9 or denom >= 0.0:
+        return 0.0
+    delta = 0.5 * (ym1 - yp1) / denom
+    return float(max(-0.5, min(0.5, delta)))
 
 
 def _local_noise_std(x: np.ndarray, guard: int = 2, train: int = 5) -> np.ndarray:
@@ -118,18 +130,27 @@ def detect_targets(
         return []
 
     scan = frame.scan.astype(np.float32, copy=False)
+    wrap_az = False
+    if frame.az_axis is not None and frame.az_axis.size >= 16:
+        span_rad = float(abs(frame.az_axis[-1] - frame.az_axis[0]))
+        wrap_az = span_rad >= radians(340.0)
+    pad_az = 6 if wrap_az else 0
+    work = np.pad(scan, ((pad_az, pad_az), (0, 0)), mode="wrap") if pad_az else scan
+
     mode = (cfar_mode or "ca").lower()
     if mode == "os":
-        bg = _os_cfar_background(scan)
+        bg_w = _os_cfar_background(work)
     elif mode in ("go", "auto"):
-        bg = _go_cfar_background(scan)
+        bg_w = _go_cfar_background(work)
     else:
-        bg = _cfar_background(scan)
+        bg_w = _cfar_background(work)
+    bg = bg_w[pad_az:pad_az + scan.shape[0], :] if pad_az else bg_w
 
     score = scan - bg
     if mode == "auto":
         # 用 guard=3, train=6 避免宽波束目标自身旁瓣抬高局部标准差
-        sigma = _local_noise_std(scan, guard=3, train=6)
+        sig_w = _local_noise_std(work, guard=3, train=6)
+        sigma = sig_w[pad_az:pad_az + scan.shape[0], :] if pad_az else sig_w
         eff_thr = np.clip(0.06 + 3.8 * sigma, 0.09, 0.85)
         eff_floor = np.clip(bg + 3.0 * sigma, 0.08, 0.85)
         mask = (score > eff_thr) & (scan > eff_floor)
@@ -168,6 +189,18 @@ def detect_targets(
             continue
         az = float(frame.az_axis[i]) if frame.az_axis is not None else 0.0
         rng = float(frame.r_axis[j]) if frame.r_axis is not None else 0.0
+        # 亚像素抛物线峰值插值：降低栅格离散化测距/测角量化台阶
+        if frame.r_axis is not None and 0 < j < n_rng - 1:
+            dj = _parabolic_offset(float(score[i, j - 1]), float(score[i, j]), float(score[i, j + 1]))
+            dr = float(frame.r_axis[j + 1] - frame.r_axis[j - 1]) * 0.5
+            rng = max(0.0, rng + dj * dr)
+        if frame.az_axis is not None and mask.shape[0] >= 3 and (wrap_az or 0 < i < mask.shape[0] - 1):
+            im1 = (i - 1) % mask.shape[0]
+            ip1 = (i + 1) % mask.shape[0]
+            di = _parabolic_offset(float(score[im1, j]), float(score[i, j]), float(score[ip1, j]))
+            d_az = float(frame.az_axis[ip1] - frame.az_axis[im1])
+            if abs(d_az) < 1.0:
+                az += di * d_az * 0.5
         out.append(
             Target(
                 x=rng * np.sin(az),
@@ -175,9 +208,13 @@ def detect_targets(
                 snr=float(min(1.0, scan[i, j])),
             )
         )
-        i0, i1 = max(0, i - guard_az), min(mask.shape[0], i + guard_az + 1)
         j0, j1 = max(0, j - guard_rng), min(n_rng, j + guard_rng + 1)
-        taken[i0:i1, j0:j1] = True
+        if wrap_az:
+            az_idx = np.arange(i - guard_az, i + guard_az + 1) % mask.shape[0]
+            taken[az_idx[:, None], j0:j1] = True
+        else:
+            i0, i1 = max(0, i - guard_az), min(mask.shape[0], i + guard_az + 1)
+            taken[i0:i1, j0:j1] = True
     return out
 
 

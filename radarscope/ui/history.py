@@ -213,7 +213,7 @@ class HistoryPanel(QWidget):
         if not path:
             return
         try:
-            rows = self.store.tracks_of(s.id)
+            rows = self.store.tracks_of(s.id, include_3d=True)
         except Exception as exc:
             QMessageBox.warning(self, "导出失败", str(exc))
             return
@@ -222,13 +222,14 @@ class HistoryPanel(QWidget):
             return
         with open(path, "w", newline="", encoding="utf-8-sig") as fh:
             w = csv.writer(fh)
-            w.writerow(["时间", "航迹号", "X(m)", "Y(m)", "Vx", "Vy",
-                        "距离(m)", "方位(°)", "SNR", "威胁", "分类"])
+            w.writerow(["时间", "航迹号", "X(m)", "Y(m)", "Z(m)", "Vx", "Vy",
+                        "距离(m)", "方位(°)", "仰角(°)", "RCS", "SNR", "威胁", "分类"])
             for r in rows:
-                ts, tid, x, y, vx, vy, rng, az, snr, threat, cls = r
+                ts, tid, x, y, vx, vy, rng, az, snr, threat, cls, z, el_deg, rcs = r
                 w.writerow([time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts)),
-                            tid, f"{x:.3f}", f"{y:.3f}", f"{vx:.3f}", f"{vy:.3f}",
-                            f"{rng:.3f}", f"{az:.2f}", f"{snr:.3f}", threat, cls])
+                            tid, f"{x:.3f}", f"{y:.3f}", f"{z or 0.0:.3f}", f"{vx:.3f}", f"{vy:.3f}",
+                            f"{rng:.3f}", f"{az:.2f}", f"{el_deg or 0.0:.2f}", f"{rcs or 0.0:.2f}",
+                            f"{snr:.3f}", threat, cls])
         QMessageBox.information(self, "导出完成", f"已写出 {len(rows)} 行到\n{path}")
 
     def _replay_current(self) -> None:

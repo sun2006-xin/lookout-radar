@@ -118,13 +118,15 @@ class ReaderThread(QThread):
     failed = pyqtSignal(str)
 
     def __init__(self, driver, parent=None, caps=None,
-                 thresh_getter=None, cfar_getter=None, stall_timeout_s: float = 0.0):
+                 thresh_getter=None, cfar_getter=None, stall_timeout_s: float = 0.0,
+                 post_processor=None):
         super().__init__(parent)
         self.driver = driver
         self._caps = caps
         self._thresh_getter = thresh_getter or (lambda: 0.30)
         self._cfar_getter = cfar_getter or (lambda: "auto")
         self._stall_timeout_s = max(0.0, float(stall_timeout_s))
+        self._post_processor = post_processor
         self._alive = True
 
     def stop(self) -> None:
@@ -149,6 +151,8 @@ class ReaderThread(QThread):
                             threshold=float(self._thresh_getter()),
                             cfar_mode=str(self._cfar_getter()),
                         )
+                        if self._post_processor is not None:
+                            frame = self._post_processor(frame)
                         frame.meta["_normalized"] = True
                     except Exception as exc:
                         LOG.warning("后台流水线处理异常（跳过帧）：%s", exc)
@@ -332,6 +336,7 @@ class ConnectionController:
             thresh_getter=lambda: self._thresh,
             cfar_getter=lambda: getattr(self, "_cfar_mode", "auto"),
             stall_timeout_s=5.0 if is_live_hw else 0.0,
+            post_processor=getattr(self, "_process_frame_bg", None),
         )
         self.reader.frameReady.connect(self._on_frame)
         self.reader.failed.connect(self._on_failed)
@@ -371,6 +376,7 @@ class ConnectionController:
 
     def _disconnect(self, reason: str = "") -> None:
         self._want_connect = False
+        self._reconnect_seq = getattr(self, "_reconnect_seq", 0) + 1
         self._teardown_reader()
         if self.store.session_id is not None:
             self.store.end_session(reason)
@@ -395,10 +401,15 @@ class ConnectionController:
 
         if self.chk_reconnect.isChecked() and not simulated and self._want_connect:
             self._reconnect_try += 1
+            seq = getattr(self, "_reconnect_seq", 0)
             delay = min(10.0, 2.0 ** (self._reconnect_try - 1))
             self.status_left.setText(
                 f"连接中断，{delay:.0f} 秒后自动重连（第 {self._reconnect_try} 次）")
-            QTimer.singleShot(int(delay * 1000), lambda: self._connect(silent=True))
+            QTimer.singleShot(
+                int(delay * 1000),
+                lambda s=seq: (self._want_connect and s == getattr(self, "_reconnect_seq", 0)
+                               and self._connect(silent=True)),
+            )
         else:
             self.status_left.setText("已断开")
             QMessageBox.warning(self, "数据中断", msg)
